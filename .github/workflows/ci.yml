@@ -1,0 +1,70 @@
+name: Build and isolated acceptance
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - run: npm ci
+      - run: npm run check
+      - run: npm run bundle
+      - name: Isolated core, CLI and source acceptance
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            export MCPLINK_E2E_BINARY="$PWD/target/release/bundle/macos/mcplink.app/Contents/MacOS/mcplink"
+          else
+            export MCPLINK_E2E_BINARY="$PWD/target/release/mcplink.exe"
+          fi
+          python tests/e2e/run.py --record artifacts/e2e/ci-core
+          python tests/e2e/agent_cli.py --record artifacts/e2e/ci-cli
+          python tests/e2e/claude_sources.py --record artifacts/e2e/ci-claude
+      - name: macOS DMG acceptance
+        if: runner.os == 'macOS'
+        run: |
+          python3 tests/e2e/verify_package.py --record artifacts/e2e/ci-package
+          python3 tests/e2e/installed_app.py --record artifacts/e2e/ci-installed
+      - name: Record source baseline
+        shell: bash
+        run: |
+          suffix=""
+          if [[ "$RUNNER_OS" == "Windows" ]]; then suffix=".exe"; fi
+          python scripts/release_manifest.py --require-clean --record artifacts/e2e/ci-manifest --binary "target/release/mcplink${suffix}" --binary "target/release/mcplink-desktop${suffix}"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: acceptance-${{ matrix.os }}
+          if-no-files-found: warn
+          path: |
+            artifacts/e2e/ci-cli/report.json
+            artifacts/e2e/ci-core/report.json
+            artifacts/e2e/ci-claude/report.json
+            artifacts/e2e/ci-package/package-report.json
+            artifacts/e2e/ci-installed/report.json
+            artifacts/e2e/ci-manifest/release-manifest.json
+            target/release/bundle/dmg/*.dmg
+            target/release/bundle/nsis/*setup.exe

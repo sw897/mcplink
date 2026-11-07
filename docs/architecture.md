@@ -1,0 +1,40 @@
+# mcplink 架构
+
+mcplink 管理个人电脑的 MCP 接入。服务、账号、Agent 三个视图与管理 CLI 使用同一份连接关系。业务 Skill 由外部 Git 流程管理；软件只内置并可复制安装自身的管理 Skill，不提供通用 Skill 安装器、不切换模型，也不实现办公平台业务连接器。
+
+## 组件与调用
+
+- **桌面**：Tauri 2 + React/TypeScript，扫描、连接编辑、账号维护、Agent 对比、变更预览和恢复。
+- **管理核心**：Rust `mcplink-core`，包含 Codex TOML 与 Hermes YAML 适配、SQLite 元数据、系统凭据库和配置操作日志。
+- **Claude Code 来源**：读取用户 JSON 与已启用用户插件默认 `.mcp.json`，按真实来源登记只读绑定；插件升级仍由原客户端维护，连接可在 mcplink 导入、检查并复用到可写目标。插件发现异常单独显示，不覆盖 Codex/Hermes 盘点结果。
+- **Agent CLI**：`mcplink schema/status/sources/connections/credentials/changes/gateway/mcp`，JSON 输出和 stdin 输入；复用后台 RPC，带语义失败退出码，预览／应用仍走同一配置事务。`skill show/install` 从二进制导出或安装管理 Skill，无需后台。详见 [Agent CLI](agent-cli.md)。
+- **后台**：独立 `mcplink daemon`，每个数据目录单实例。关闭窗口不关闭后台；首版通过按需启动管理生命周期，不安装系统服务。
+- **共享入口**：每个 Agent 为每项共享服务启动独立 STDIO Bridge。Bridge 经带本地认证的 loopback HTTP 调用后台。后台用 rmcp 连接上游 STDIO 或 Streamable HTTP。
+
+本地工具和原生多客户端服务可直接写入 Agent 配置。需要共用认证的服务使用 Bridge，原生配置只保留程序路径、连接 ID 和数据目录。每项服务保留独立接入名，不聚合成一个重命名全部工具的入口。
+
+后台每项连接复用一个上游会话；多个客户端的请求由协议 ID 分流。SDK 管理握手、分页游标和 MCP 结果。转发 tools、resources、prompts 的普通请求；不宣告没有实现的 tasks、sampling、elicitation 或订阅能力。Hermes 的工具白名单、glob 和资源/提示开关由共享路径保留；不能等价转换的直连配置拒绝写入，并给出改用共享接入的提示。
+
+Bridge 每次派发前检查后台并按需重新连接。派发后通信失败或超时返回结果待核对，不自动重发工具调用。下游取消不代表上游回滚，首版不保证跨 HTTP 管理链路传播取消通知。
+
+## 配置与数据
+
+原生配置是客户端配置现状的来源。SQLite 保存连接摘要、来源、绑定、修订号和操作状态，启用 WAL、外键与 schema 版本。完整上游定义及变更计划可能包含 Secret，放在系统凭据库；SQLite 仅保存引用。用户标签不冒充上游确认的账号身份。
+
+写入步骤为：预览并绑定连接修订和文件哈希 → 获取配置写锁并重新核对 → 持久化变更意图和备份 → 原子替换文件 → 更新绑定和操作状态。批量操作按同一文件中的前序结果计算后续哈希；各目标分别报告结果。外部编辑或预览后账号更新都使旧预览失效。
+
+后台启动时核对 pending 操作：文件为目标版本则补记完成，仍为原版本则标记未写入，其他版本标记冲突。恢复只修改本次条目，保留其他条目的后续编辑；同条目后续修改时拒绝覆盖。原生直连在托管定义更新后显示待同步，需要重新预览应用。共享连接直接使用新的托管授权。
+
+原生配置备份保存在本地数据目录 `backups/`，可能包含原客户端原有明文凭据，目录限当前用户访问。它不是可携带的凭据备份；删除系统凭据库条目会使依赖这些条目的恢复记录失效。首版不提供整库备份/恢复或自动历史清理。
+
+## 认证
+
+HTTP 令牌按上游要求原样保存，不自动添加 Bearer。标准 OAuth 使用 rmcp AuthorizationManager：系统浏览器、PKCE S256、state/issuer 检查、单次授权会话及 loopback 回调。支持上游动态注册或已有 public client ID，不接管客户端私有凭据文件。
+
+每份 OAuth grant 使用同一刷新锁；更新、断开和回调按连接修订校验，旧授权无法覆盖新状态。断开停止新调用并删除托管令牌/grant；已派发调用的副作用不会被撤销。原客户端保存的直连凭据仍由相应客户端维护。
+
+本地管理 HTTP 仅绑定 127.0.0.1，校验 Host、拒绝浏览器 Origin，并要求本地 Vault 中的随机认证值。端口持久化，冲突时报告错误，不静默换端口。共享上游仅接受 HTTPS 或 loopback HTTP，不跟随 HTTP 重定向。
+
+## 代码入口
+
+`config.rs` 适配原生格式；`engine.rs` 处理管理操作、变更与恢复；`mcp.rs` 管理上游会话和认证；`runtime.rs` 提供后台与管理客户端；`cli.rs` 提供具名 CLI、机器契约和 Skill 安装；`main.rs` 提供程序入口与 Bridge；`src/main.tsx` 是桌面功能入口。
