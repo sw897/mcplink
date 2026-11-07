@@ -32,17 +32,24 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm run bundle
-      - name: Isolated core, CLI and source acceptance
-        shell: bash
+      - name: Select acceptance binary
+        shell: python {0}
         run: |
-          if [[ "$RUNNER_OS" == "macOS" ]]; then
-            export MCPLINK_E2E_BINARY="$PWD/target/release/bundle/macos/mcplink.app/Contents/MacOS/mcplink"
-          else
-            export MCPLINK_E2E_BINARY="$PWD/target/release/mcplink.exe"
-          fi
-          python tests/e2e/run.py --record artifacts/e2e/ci-core
-          python tests/e2e/agent_cli.py --record artifacts/e2e/ci-cli
-          python tests/e2e/claude_sources.py --record artifacts/e2e/ci-claude
+          import os
+          from pathlib import Path
+          binary = Path.cwd() / ("target/release/mcplink.exe" if os.name == "nt" else "target/release/bundle/macos/mcplink.app/Contents/MacOS/mcplink")
+          assert binary.is_file(), binary
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+              output.write(f"MCPLINK_E2E_BINARY={binary}\n")
+      - name: Isolated core acceptance
+        timeout-minutes: 5
+        run: python -u tests/e2e/run.py --record artifacts/e2e/ci-core
+      - name: Isolated named CLI acceptance
+        timeout-minutes: 5
+        run: python -u tests/e2e/agent_cli.py --record artifacts/e2e/ci-cli
+      - name: Isolated Claude source acceptance
+        timeout-minutes: 5
+        run: python -u tests/e2e/claude_sources.py --record artifacts/e2e/ci-claude
       - name: macOS DMG acceptance
         if: runner.os == 'macOS'
         run: |

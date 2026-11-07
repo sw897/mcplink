@@ -21,7 +21,7 @@ import urllib.request
 
 
 ROOT = Path(__file__).resolve().parents[2]
-BINARY = Path(os.environ.get("MCPLINK_E2E_BINARY",ROOT / "target/debug/mcplink")).resolve()
+BINARY = Path(os.environ.get("MCPLINK_E2E_BINARY", ROOT / "target/debug" / ("mcplink.exe" if os.name == "nt" else "mcplink"))).resolve()
 FIXTURE = ROOT / "tests/fixtures/mcp_server.py"
 
 
@@ -80,7 +80,15 @@ class Harness:
             path.mkdir(parents=True)
         (self.home / ".mcplink-test-fixture").touch()
         self.server = subprocess.Popen([sys.executable, str(FIXTURE), "--auth"], stdout=subprocess.PIPE, stderr=(record / "fixture.log").open("w"), text=True)
-        self.port = json.loads(self.server.stdout.readline())["port"]
+        startup = queue.Queue()
+        threading.Thread(target=lambda: startup.put(self.server.stdout.readline()), daemon=True).start()
+        try:
+            self.port = json.loads(startup.get(timeout=20))["port"]
+        except (queue.Empty, json.JSONDecodeError, KeyError) as error:
+            self.server.terminate()
+            self.server.wait(timeout=5)
+            raise AssertionError(f"Synthetic MCP fixture did not announce a port; see {record / 'fixture.log'}") from error
+        print("READY synthetic MCP fixture", flush=True)
         self.url = f"http://127.0.0.1:{self.port}/mcp"
         local = {"command": sys.executable, "args": [str(FIXTURE), "--stdio"]}
         toml = '# Codex user comment\nmodel = "fixture-model" # preserve this\n\n[mcp_servers.local_notes]\ncommand = ' + json.dumps(sys.executable) + '\nargs = ' + json.dumps(local["args"]) + '\n'
@@ -346,6 +354,7 @@ def main():
     record = args.record or ROOT / "artifacts/e2e/core" / datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%z")
     record = record.resolve()
     record.mkdir(parents=True, exist_ok=False)
+    print("START isolated core acceptance", flush=True)
     harness = Harness(record, native_agents=args.native_agents)
     conclusion, error, identifiers = "PASS", None, {}
     try:

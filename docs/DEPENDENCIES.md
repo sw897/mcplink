@@ -11,6 +11,7 @@ mcplink 自有代码使用 MIT。具体依赖解析由 Cargo.lock 与 package-lo
 | reqwest | 0.13.5 | rustls HTTP 客户端 | MIT / Apache-2.0 |
 | rusqlite | 0.38.0 | SQLite，内嵌 SQLite 构建 | MIT；SQLite public domain |
 | keyring | 4.2.0 | 系统凭据库 | MIT / Apache-2.0 |
+| windows-sys | 0.61.2 | Windows 后台启动时隔离标准输入输出句柄 | MIT / Apache-2.0 |
 | toml / toml_edit | 0.9.12 / 0.23.10 | TOML 读取和保留格式编辑 | MIT / Apache-2.0 |
 | serde_yaml / yaml-edit | 0.9.34 / 0.3.6 | YAML 读取和保留格式编辑 | MIT / Apache-2.0；Apache-2.0 |
 | serde / serde_json | 1.0.229 / 1.0.154 | 序列化 | MIT / Apache-2.0 |

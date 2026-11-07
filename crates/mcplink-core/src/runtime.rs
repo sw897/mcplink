@@ -182,6 +182,33 @@ impl Client {
             return Ok(client);
         }
         let executable = std::env::current_exe().context("无法定位后台程序")?;
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::Foundation::{
+                HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
+            };
+            use windows_sys::Win32::System::Console::{
+                GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+            };
+
+            // Stdio::null replaces the daemon's standard streams, but Windows
+            // otherwise also inherits the CLI's original capture pipe handles.
+            // Explicit child stdio still works: Command duplicates those handles.
+            for stream in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+                // SAFETY: These are borrowed process handles. Clearing inheritance
+                // neither closes them nor changes their input/output behavior.
+                unsafe {
+                    let handle = GetStdHandle(stream);
+                    if !handle.is_null()
+                        && handle != INVALID_HANDLE_VALUE
+                        && SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) == 0
+                    {
+                        return Err(std::io::Error::last_os_error())
+                            .context("无法隔离后台程序的输入输出句柄");
+                    }
+                }
+            }
+        }
         let child = tokio::process::Command::new(executable)
             .args(["daemon", "--data-dir"])
             .arg(&data)
