@@ -1,12 +1,14 @@
 """Synthetic MCP and OAuth service for mcplink end-to-end verification."""
 import argparse
 import base64
+import faulthandler
 import hashlib
 import json
 import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import TCPServer
 from urllib.parse import parse_qs, urlencode, urlparse
 
 
@@ -15,6 +17,14 @@ TOOLS = [
     {"name": "search_documents", "description": "Search synthetic documents", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}, "annotations": {"readOnlyHint": True}},
     {"name": "read_document", "description": "Read one synthetic document", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "delay_ms": {"type": "integer"}}, "required": ["id"]}, "annotations": {"readOnlyHint": True}},
 ]
+
+
+class LoopbackHTTPServer(ThreadingHTTPServer):
+    def server_bind(self):
+        # The synthetic service only uses its bound loopback address; do not
+        # make startup depend on the host's reverse DNS configuration.
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 def handle(request):
@@ -146,7 +156,11 @@ def main():
                 response = {"jsonrpc": "2.0", "id": request["id"], "error": {"code": -32601, "message": "Method not found"}}
             print(json.dumps(response, ensure_ascii=False), flush=True)
         return
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    faulthandler.dump_traceback_later(10)
+    try:
+        server = LoopbackHTTPServer(("127.0.0.1", args.port), Handler)
+    finally:
+        faulthandler.cancel_dump_traceback_later()
     server.auth, server.codes, server.refreshes, server.calls = args.auth, {}, 0, 0
     server.access_token, server.refresh_token = "unissued-synthetic-access", "unissued-synthetic-refresh"
     print(json.dumps({"port": server.server_port}), flush=True)

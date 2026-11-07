@@ -87,7 +87,8 @@ class Harness:
         except (queue.Empty, json.JSONDecodeError, KeyError) as error:
             self.server.terminate()
             self.server.wait(timeout=5)
-            raise AssertionError(f"Synthetic MCP fixture did not announce a port; see {record / 'fixture.log'}") from error
+            diagnostic = (record / "fixture.log").read_text(errors="replace")[-4000:]
+            raise AssertionError(f"Synthetic MCP fixture did not announce a port; see {record / 'fixture.log'}\n{diagnostic}") from error
         print("READY synthetic MCP fixture", flush=True)
         self.url = f"http://127.0.0.1:{self.port}/mcp"
         local = {"command": sys.executable, "args": [str(FIXTURE), "--stdio"]}
