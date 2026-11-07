@@ -53,7 +53,7 @@ def main():
         passed('discover Claude camelCase user JSON and enabled user plugin; skip disabled/project plugins')
         managed = harness.rpc('connections.import', {'sourceId': source['id'], 'name': 'plugin_notes'})['id']
         detail = harness.rpc('connections.detail', {'id': managed})
-        assert detail['definition']['args'][0] == str(plugin / 'server.py')
+        assert Path(detail['definition']['args'][0]) == plugin / 'server.py'
         assert detail['definition']['env']['FIXTURE_SECRET'] == '••••••••'
         assert 'synthetic-native-value' not in json.dumps(detail)
         passed('import plugin definition, resolve plugin root and redact configured secret')

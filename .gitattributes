@@ -1,2 +1,3 @@
 # Keep upstream license text verbatim, including its original whitespace.
+* text=auto eol=lf
 THIRD_PARTY_NOTICES.txt -whitespace
