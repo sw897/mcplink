@@ -12,5 +12,14 @@ flags.push(`--remap-path-prefix=${homedir()}=/user-home`);
 flags.push(`--remap-path-prefix=${process.cwd()}=.`);
 env.CARGO_ENCODED_RUSTFLAGS = flags.join("\x1f");
 
+if (process.platform === "win32") {
+  // MSVC's native dependencies embed __FILE__ independently of Rust's remap.
+  // cc tracks _CL_ for rebuilds; preserve the caller's options and quote one arg.
+  const trim = `/d1trimfile:${homedir()}`
+    .replace(/(\\*)"/g, '$1$1\\"')
+    .replace(/(\\+)$/, "$1$1");
+  env._CL_ = [process.env._CL_, `"${trim}"`].filter(Boolean).join(" ");
+}
+
 execFileSync(process.execPath, ["scripts/prepare-sidecar.mjs"], { stdio: "inherit", env });
 execFileSync(process.execPath, [require.resolve("@tauri-apps/cli/tauri.js"), "build", ...process.argv.slice(2)], { stdio: "inherit", env });

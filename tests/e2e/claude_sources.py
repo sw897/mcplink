@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import shutil
 import sys
+import traceback
 
 from run import BINARY, FIXTURE, Harness
 
@@ -92,6 +93,7 @@ def main():
     except Exception as exception:
         conclusion, error = 'FAIL', str(exception)
         print('FAIL', error, flush=True)
+        traceback.print_exc()
     finally:
         harness.close(False)
     report = {'conclusion': conclusion, 'error': error, 'scenarios': results,

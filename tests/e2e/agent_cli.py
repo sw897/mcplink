@@ -7,6 +7,7 @@ from pathlib import Path
 import platform
 import subprocess
 import tomllib
+import traceback
 import urllib.request
 
 from run import BINARY, Harness, ROOT
@@ -69,7 +70,7 @@ class AgentCli(Harness):
         project.parent.mkdir()
         project.write_text('# project entry\nmodel = "keep-project"\n')
         source = self.cli("sources", "add", "--agent", "codex", "--path", str(project), "--label", "fixture project")
-        assert source["path"] == str(project) and source["id"].startswith("source:")
+        assert Path(source["path"]).samefile(project) and source["id"].startswith("source:"), source
         saved = self.cli("connections", "save", "--stdin", value={"name": "cli_http", "title": "CLI test", "definition": {"url": self.url, "headers": {"Authorization": secret}}})
         connection = saved["id"]
         rejected = self.cli("connections", "probe", connection, exit_status=1)
@@ -188,6 +189,7 @@ def main():
     except Exception as exception:
         conclusion, error = "FAIL", str(exception)
         print("FAIL", error, flush=True)
+        traceback.print_exc()
     finally:
         harness.close(False)
     report = {"conclusion": conclusion, "error": error, "executed_at": datetime.now(timezone.utc).isoformat(),

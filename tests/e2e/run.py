@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 import tomllib
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -363,6 +364,7 @@ def main():
     except Exception as exception:
         conclusion, error = "FAIL", str(exception)
         print("FAIL", error, flush=True)
+        traceback.print_exc()
     finally:
         harness.close(args.keep)
     report = {"conclusion": conclusion, "code_version": json.loads((ROOT/"package.json").read_text())["version"], "native_agents_requested": args.native_agents, "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), "os": __import__("platform").platform(), "cargo_lock_sha256": hashlib.sha256((ROOT/"Cargo.lock").read_bytes()).hexdigest(), "package_lock_sha256": hashlib.sha256((ROOT/"package-lock.json").read_bytes()).hexdigest(), "executed_at": datetime.now(timezone.utc).isoformat(), "command": "python3 tests/e2e/run.py", "fixture": "synthetic MCP and OAuth", "scenarios": harness.results, "error": error, "ids": identifiers, "home": str(harness.home), "data": str(harness.data), "fixture_port": harness.port, "binary_sha256": hashlib.sha256(BINARY.read_bytes()).hexdigest(), "skill_sha256": hashlib.sha256((ROOT / "tests/fixtures/weekly-report/SKILL.md").read_bytes()).hexdigest()}
