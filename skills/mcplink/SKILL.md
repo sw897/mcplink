@@ -1,6 +1,6 @@
 ---
 name: mcplink
-description: 通过 mcplink CLI 无 UI 管理 Codex、Hermes 的 MCP，盘点和导入 Claude Code 用户及插件 MCP；管理连接、托管凭据和共享接入，预览、应用及恢复可写来源的配置变更。
+description: 通过 mcplink CLI 管理 MCP 连接、凭据及共享接入，盘点 Claude Code 只读来源，预览、应用及恢复可写配置；按明确托管连接与本次授权发现、校验和调用 MCP 工具。
 ---
 
 # mcplink 管理
@@ -15,6 +15,9 @@ description: 通过 mcplink CLI 无 UI 管理 Codex、Hermes 的 MCP，盘点和
 
 - 默认 stdout 是单个 JSON：成功为 `{"ok":...}`，失败为 `{"error":{"code":"...","message":"..."}}`，部分结果位于 `result`。
 - 退出码：`0` 成功，`1` 操作失败或未就绪，`2` 参数或 stdin 无效。`--help`、`--version` 输出普通文本；`bridge` 的 stdout 是 MCP 协议。
+- 若当前 `schema` 包含 `call`，可用 `connections tools ID --tool TOOL` 获取指定工具的输入 Schema 与摘要，再以 `call ID TOOL --stdin` 传入参数对象。对象类型原样保留，校验失败退出 `2`。上游错误退出 `1`，工具结果在 `.result.output`；成功时在 `.ok.output`。
+- 工具调用使用返回的托管连接 ID 和精确工具名，不按显示名选账号；按本次业务授权执行，不因管理连接的授权而扩大到发送消息或修改业务数据。终端入口不继承原生 Agent 的工具确认流程，`readOnlyHint` 不是授权。
+- 需要固定参数契约时传 `--schema-hash HASH`；Schema 或连接变化时停止并重新发现。工具调用超时或通信中断后先核对结果，不自动重发。新 CLI 遇到旧后台时按错误提示使用同一构建重启，不回退绕过校验。
 - `--data-dir` / `MCPLINK_DATA_DIR` 选择管理数据；`CODEX_HOME` / `HERMES_HOME` 选择原生配置范围。沿用用户指定环境，未经要求不切换到另一套数据。
 - `connections list` 包含 `detected:true` 的未托管条目。此类条目先按 `sourceId` 和 `name` 导入，再使用返回的托管 ID。
 - Claude Code 自动盘点用户 `.claude.json` 与已启用用户插件默认 `.mcp.json`。这些来源带 `readOnly:true`，可以导入、检查和复用连接；配置由原客户端或插件维护。不要把它们选作写入目标，或直接改写插件缓存。

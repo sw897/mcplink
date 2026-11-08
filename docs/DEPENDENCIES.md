@@ -7,6 +7,7 @@ mcplink 自有代码使用 MIT。具体依赖解析由 Cargo.lock 与 package-lo
 | Tauri / tauri-build / dialog plugin | 2.12.5 / 2.7.4 / 2.8.4 | 原生窗口、打包、文件选择 | MIT / Apache-2.0 |
 | React / React DOM | 19.3.1 | 桌面界面 | MIT |
 | rmcp | 3.9.0 | MCP 客户端/服务端、传输和 OAuth | Apache-2.0 |
+| jsonschema | 0.60.2 | 调用工具前校验输入 Schema；禁用 HTTP/文件引用获取 | MIT |
 | tokio / axum | 1.54.1 / 0.8.9 | 异步运行时、本地 HTTP | MIT |
 | reqwest | 0.13.5 | rustls HTTP 客户端 | MIT / Apache-2.0 |
 | rusqlite | 0.38.0 | SQLite，内嵌 SQLite 构建 | MIT；SQLite public domain |

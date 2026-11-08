@@ -176,6 +176,19 @@ impl McpPool {
     }
 
     pub async fn request(&self, engine: Arc<Engine>, id: &str, request: Value) -> Result<Value> {
+        self.request_at_revision(engine, id, request, None).await
+    }
+
+    pub async fn request_at_revision(
+        &self,
+        engine: Arc<Engine>,
+        id: &str,
+        request: Value,
+        revision: Option<u64>,
+    ) -> Result<Value> {
+        if revision.is_some() && engine.paused.load(std::sync::atomic::Ordering::SeqCst) {
+            bail!("共享后台已暂停，请在 mcplink 恢复");
+        }
         let method = request.get("method").and_then(Value::as_str).unwrap_or("");
         if !matches!(
             method,
@@ -189,7 +202,14 @@ impl McpPool {
         ) {
             bail!("此 MCP 能力暂未开放转发");
         }
-        let definition = engine.definition(&engine.store.connection(id)?)?;
+        let connection = engine.store.connection(id)?;
+        if revision.is_some_and(|expected| expected != connection.revision) {
+            bail!(crate::invocation::ToolFailure {
+                code: crate::invocation::ToolErrorCode::ConnectionChanged,
+                details: Value::Null
+            });
+        }
+        let definition = engine.definition(&connection)?;
         if method.starts_with("resources/") && definition.resources_disabled
             || method.starts_with("prompts/") && definition.prompts_disabled
         {
@@ -208,6 +228,15 @@ impl McpPool {
         }
         let list = method == "tools/list";
         let peer = self.peer(engine.clone(), id).await?;
+        if let Some(expected) = revision {
+            let current = engine.store.connection(id)?;
+            if current.revision != expected || !current.active {
+                bail!(crate::invocation::ToolFailure {
+                    code: crate::invocation::ToolErrorCode::ConnectionChanged,
+                    details: Value::Null
+                });
+            }
+        }
         let request =
             serde_json::from_value::<ClientRequest>(request).context("MCP 请求参数格式不正确")?;
         let limit = definition.timeout.unwrap_or(120).clamp(5, 600);

@@ -18,6 +18,15 @@ TOOLS = [
     {"name": "read_document", "description": "Read one synthetic document", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "delay_ms": {"type": "integer"}}, "required": ["id"]}, "annotations": {"readOnlyHint": True}},
 ]
 
+CALL_TOOLS = [
+    {"name":"inspect_payload","description":"Echo a typed synthetic payload","inputSchema":{
+        "type":"object","$defs":{"item":{"type":"object","properties":{"label":{"type":"string","minLength":2},"weight":{"type":"number","minimum":0}},"required":["label","weight"],"additionalProperties":False}},
+        "properties":{"items":{"type":"array","items":{"$ref":"#/$defs/item"},"minItems":1},"enabled":{"type":"boolean"},"count":{"type":"integer","minimum":1,"maximum":4},"choice":{"enum":["a","b"]},"optional":{"anyOf":[{"type":"null"},{"type":"string"}]}},
+        "required":["items","enabled","count","choice"],"additionalProperties":False}},
+    {"name":"invalid_schema","inputSchema":{"type":"object","properties":{"value":{"type":"not-a-type"}}}},
+    {"name":"external_schema","inputSchema":{"type":"object","properties":{"value":{"$ref":"http://127.0.0.1:9/private-schema"}}}},
+]
+
 
 class LoopbackHTTPServer(ThreadingHTTPServer):
     def server_bind(self):
@@ -27,7 +36,7 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
         self.server_name, self.server_port = self.server_address[:2]
 
 
-def handle(request):
+def handle(request, endpoint="", origin=""):
     method = request.get("method")
     params = request.get("params") or {}
     if method == "initialize":
@@ -37,10 +46,26 @@ def handle(request):
     if method == "ping":
         return {}
     if method == "tools/list":
+        if endpoint in {"/mcp-tools", "/mcp-slow", "/mcp-cycle", "/mcp-duplicates"}:
+            if endpoint == "/mcp-cycle":
+                return {"tools":[],"nextCursor":"repeat"}
+            if endpoint == "/mcp-duplicates":
+                return {"tools":[TOOLS[0],TOOLS[0]]}
+            tools = TOOLS + CALL_TOOLS
+            if origin:
+                tools = [{**tool,"inputSchema":{"type":"object","properties":{"value":{"$ref":origin+"/schema-external"}}}} if tool["name"]=="external_schema" else tool for tool in tools]
+            offset = int(params.get("cursor", "0"))
+            page = {"tools":tools[offset:offset+2]}
+            if offset+2 < len(tools): page["nextCursor"]=str(offset+2)
+            return page
         return {"tools": TOOLS}
     if method == "tools/call":
+        if endpoint == "/mcp-rpc-error":
+            raise ValueError("Synthetic upstream RPC failure")
         args = params.get("arguments", {})
-        if params.get("name") == "search_documents":
+        if params.get("name") == "inspect_payload" and endpoint in {"/mcp-tools","/mcp-slow"}:
+            output = {"received":args,"account":"synthetic-work-account"}
+        elif params.get("name") == "search_documents":
             output = {"account": "synthetic-work-account", "documents": [{"id": DOCUMENT["id"], "title": DOCUMENT["title"]}]}
         elif params.get("name") == "read_document" and args.get("id") == DOCUMENT["id"]:
             time.sleep(min(args.get("delay_ms", 0), 6000) / 1000)
@@ -95,7 +120,10 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         if path.path == "/stats":
-            return self.send(200, {"refreshes": self.server.refreshes, "calls": self.server.calls})
+            return self.send(200, {"refreshes": self.server.refreshes, "calls": self.server.calls,"lists":self.server.lists,"schemaReads":self.server.schema_reads})
+        if path.path == "/schema-external":
+            self.server.schema_reads += 1
+            return self.send(200,{"type":"string"})
         return self.send(405, {"error": "POST required"})
 
     def do_POST(self):
@@ -131,9 +159,12 @@ class Handler(BaseHTTPRequestHandler):
             request = json.loads(raw)
             if "id" not in request:
                 return self.send(202, {})
-            result = handle(request)
             if request.get("method") == "tools/call":
                 self.server.calls += 1
+            if request.get("method") == "tools/list":
+                self.server.lists += 1
+                if path == "/mcp-slow": time.sleep(0.8)
+            result = handle(request, path, origin)
             return self.send(200, {"jsonrpc": "2.0", "id": request["id"], "result": result})
         except ValueError:
             return self.send(200, {"jsonrpc": "2.0", "id": request.get("id"), "error": {"code": -32601, "message": "Method not found"}})
@@ -162,6 +193,7 @@ def main():
     finally:
         faulthandler.cancel_dump_traceback_later()
     server.auth, server.codes, server.refreshes, server.calls = args.auth, {}, 0, 0
+    server.lists, server.schema_reads = 0, 0
     server.access_token, server.refresh_token = "unissued-synthetic-access", "unissued-synthetic-refresh"
     print(json.dumps({"port": server.server_port}), flush=True)
     server.serve_forever()

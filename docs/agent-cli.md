@@ -62,6 +62,8 @@ Cargo 默认将程序放入 `~/.cargo/bin`，该目录需在 PATH 中。也可�
 | `changes history` / `changes restore OPERATION_ID` | 查看最近 25 条历史，恢复指定条目并保留无关后续修改。 |
 | `gateway status` / `gateway pause` / `gateway resume` | 查看或切换所有共享连接的后台状态。 |
 | `mcp describe ID` / `mcp request ID --stdin` | 查看上游能力，或派发一条协议请求，不自动重试。 |
+| `connections tools ID --tool TOOL` | 源码开发能力：发现指定工具，返回 Schema、描述和 `schemaHash`。 |
+| `call ID TOOL --stdin [--schema-hash HASH]` | 源码开发能力：校验参数后调用精确工具，不自动重试。 |
 | `skill show` / `skill install --agent AGENT` | 导出或安装 mcplink 自身管理 Skill。 |
 
 `AGENT` 为 `codex`、`hermes`、`claude`。`ACTION` 为 `upsert`、`disable`、`enable`、`remove`。目标使用来源 ID（如 `hermes:user`），连接使用导入或保存返回的托管 ID。
@@ -73,6 +75,41 @@ Claude Code 来源标记为 `readOnly:true`：支持用户 `.claude.json` 中的
 ## 标准输入
 
 标准输入必须是一条 UTF-8 JSON 对象，最多 8 MiB，传完后关闭管道。凭据及可能含凭据的完整定义经 stdin 传入，不使用 argv、Shell 字面量、临时凭据文件或日志。
+
+## 通用工具调用（源码开发能力）
+
+以下入口未包含在 v0.1.0 发布包中。先运行当前程序的 `schema` 确认命令；后台也须使用同一构建。新 CLI 连接旧后台时会明确失败，不会重放成其他命令或自动停止旧后台。
+
+```sh
+mcplink connections tools CONNECTION_ID --tool read_document
+```
+
+返回 `connectionId`、`connectionRevision`、指定工具的完整 `tool` 及 `schemaHash`。工具发现遍历分页，使用连接当前筛选；重复名称、循环游标、超过 100 页或 10,000 项时拒绝调用。连接 ID 必须是已有托管 ID，不按显示名回退选择账号。
+
+调用参数直接是工具的输入对象，而不是 MCP 请求 envelope。例如，用程序构造 stdin：
+
+```python
+import json
+import subprocess
+
+connection_id = "CONNECTION_ID"  # 使用导入或保存返回的托管 ID
+result = subprocess.run(
+    ["mcplink", "call", connection_id, "read_document", "--stdin"],
+    input=json.dumps({"id": "example-document"}),
+    text=True, capture_output=True, check=False,
+)
+response = json.loads(result.stdout)
+```
+
+成功结果位于 `.ok`，含 `connectionId`、`tool`、`schemaHash` 和未改写的 MCP `output`。上游 `isError` 或 RPC 错误退出 `1`，MCP 结果保存在 `.result.output`。CLI/工具参数错误退出 `2`；Schema 不可验证、摘要变化、工具不可用、连接变化或通信失败退出 `1`。
+
+参数保留嵌套对象、数组、布尔值、数值和 null。支持 JSON Schema Draft 4/6/7/2019-09/2020-12，未声明时使用 2020-12；支持文档内引用，拒绝获取外部 HTTP/文件引用。`format` 作为注解，不强制断言；不注入默认值、不转换参数类型。Schema 最大 1 MiB，错误最多给出 16 个 Schema 位置，不回显参数值。
+
+`--schema-hash` 可固定发现时的输入 Schema 摘要；不匹配时在工具派发前失败。发现期间连接修订变化同样失败。固定摘要采用保守策略：输入 Schema 的任何变化均需重新核对，即使变化可能兼容。
+
+终端调用不继承原生 Agent 的工具确认流程。按当前任务授权核对工具与参数，不能把工具的 `readOnlyHint` 当作授权依据。超时或连接中断后先核对执行结果，不自动重发。
+
+## 其他 stdin 对象
 
 以下演示创建无凭据 STDIO 连接；将命令路径替换为实际服务。Agent 使用参数数组和 `input=`，可以避免 Shell 转义问题：
 
@@ -123,6 +160,7 @@ npm run check
 python3 tests/e2e/agent_cli.py --record artifacts/e2e/agent-cli/local-run
 python3 tests/e2e/run.py
 python3 tests/e2e/claude_sources.py --record artifacts/e2e/claude/local-run
+python3 tests/e2e/tool_calls.py --record artifacts/e2e/tool-calls/local-run
 ```
 
 测试使用隔离配置、合成 MCP/OAuth 与 fixture Vault，不修改日常 Agent 配置。报告记录命令、退出码、断言和二进制／Skill 哈希，输出到忽略的 `artifacts/` 目录。默认测试不要求真实账号或模型登录；`run.py --native-agents` 可额外检查已安装的原生客户端命令。

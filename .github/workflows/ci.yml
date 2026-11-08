@@ -29,6 +29,14 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.13"
+      - name: Cache Rust dependencies and build outputs
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'scripts/bundle.mjs', 'scripts/prepare-sidecar.mjs') }}
       - run: npm ci
       - run: npm run check
       - run: npm run bundle
@@ -50,6 +58,9 @@ jobs:
       - name: Isolated Claude source acceptance
         timeout-minutes: 5
         run: python -u tests/e2e/claude_sources.py --record artifacts/e2e/ci-claude
+      - name: Isolated tool invocation acceptance
+        timeout-minutes: 5
+        run: python -u tests/e2e/tool_calls.py --record artifacts/e2e/ci-tools
       - name: macOS DMG acceptance
         if: runner.os == 'macOS'
         run: |
@@ -70,6 +81,7 @@ jobs:
             artifacts/e2e/ci-cli/report.json
             artifacts/e2e/ci-core/report.json
             artifacts/e2e/ci-claude/report.json
+            artifacts/e2e/ci-tools/report.json
             artifacts/e2e/ci-package/package-report.json
             artifacts/e2e/ci-installed/report.json
             artifacts/e2e/ci-manifest/release-manifest.json

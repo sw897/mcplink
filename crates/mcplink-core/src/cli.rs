@@ -35,6 +35,16 @@ enum Command {
     Schema,
     /// 扫描原生配置并返回连接、绑定、来源、历史和后台状态
     Status,
+    /// 校验 stdin 参数后调用指定连接的精确工具名，不自动重试
+    Call {
+        id: String,
+        tool: String,
+        #[arg(long, required = true)]
+        stdin: bool,
+        /// 可选的固定工具 Schema 摘要；不匹配时拒绝派发
+        #[arg(long)]
+        schema_hash: Option<String>,
+    },
     /// 管理 Codex/Hermes 和 Claude Code 只读配置来源
     Sources {
         #[command(subcommand)]
@@ -138,6 +148,9 @@ enum ConnectionCommand {
     /// 主动检查并返回工具 Schema；非 ready 状态退出 1
     Tools {
         id: String,
+        /// 只查看指定工具的 Schema 和摘要，不执行工具
+        #[arg(long)]
+        tool: Option<String>,
     },
 }
 
@@ -232,6 +245,7 @@ fn schema() -> Value {
                 "semantics":"Complete replacement. To edit, start from connections show .ok.definition and preserve masked fields. Omit transport; do not pass native config field names."},
             "credentials update":{"required":["value"],"optional":["header (default Authorization)"],"semantics":"Value stored verbatim, no Bearer prefix added"},
             "mcp request":{"required":["method"],"optional":["params"]},
+            "call":{"encoding":"tool arguments JSON object, preserved without string coercion","schema":"upstream inputSchema; drafts 4/6/7/2019-09/2020-12, default 2020-12; external retrieval disabled; format is annotation","invalidArgumentsExitCode":2},
             "rpc --stdin":{"required":["method"],"optional":["params"],"semantics":"Legacy RPC envelope preserved; inspect nested results/status as well as process exit"}},
         "command":command_schema(&command)})
 }
@@ -318,6 +332,13 @@ impl Failure {
         }
     }
     fn operation(error: anyhow::Error) -> Self {
+        if let Some(failure) = error.downcast_ref::<mcplink_core::invocation::ToolFailure>() {
+            return Self {
+                code: failure.code.as_str(),
+                message: failure.to_string(),
+                result: (!failure.details.is_null()).then(|| failure.details.clone()),
+            };
+        }
         Self {
             code: "operation_failed",
             message: error.to_string(),
@@ -336,6 +357,17 @@ async fn execute(command: Command, data: PathBuf) -> Result<Value, Failure> {
             command: SkillCommand::Install { agent },
         } => return install_skill(&agent).map_err(Failure::operation),
         Command::Status => ("snapshot", json!({}), None, false),
+        Command::Call {
+            id,
+            tool,
+            schema_hash,
+            ..
+        } => (
+            "tools.call",
+            json!({"id":id,"tool":tool,"arguments":stdin_json().await.map_err(Failure::input)?,"schemaHash":schema_hash}),
+            None,
+            true,
+        ),
         Command::Sources { command } => match command {
             SourceCommand::List => ("snapshot", json!({}), Some("sources"), false),
             SourceCommand::Add { agent, path, label } => (
@@ -370,7 +402,13 @@ async fn execute(command: Command, data: PathBuf) -> Result<Value, Failure> {
                 ("connections.delete", json!({"id":id}), None, false)
             }
             ConnectionCommand::Probe { id } => ("connections.probe", json!({"id":id}), None, true),
-            ConnectionCommand::Tools { id } => ("connections.tools", json!({"id":id}), None, true),
+            ConnectionCommand::Tools { id, tool: None } => {
+                ("connections.tools", json!({"id":id}), None, true)
+            }
+            ConnectionCommand::Tools {
+                id,
+                tool: Some(tool),
+            } => ("tools.describe", json!({"id":id,"tool":tool}), None, false),
         },
         Command::Credentials { command } => match command {
             CredentialCommand::Update { id, .. } => {
@@ -477,6 +515,15 @@ async fn execute(command: Command, data: PathBuf) -> Result<Value, Failure> {
                 "upstream_failed",
                 "上游请求失败，执行结果需核对；不要自动重试",
             )),
+            "tools.call"
+                if value["output"].get("rpcError").is_some()
+                    || value["output"]["isError"] == true =>
+            {
+                Some((
+                    "upstream_failed",
+                    "上游工具返回失败，执行结果需核对；不要自动重试",
+                ))
+            }
             _ => None,
         };
         if let Some((code, message)) = failure {
@@ -551,7 +598,7 @@ pub async fn run() -> i32 {
                         response["result"] = result;
                     }
                     println!("{response}");
-                    if failure.code == "invalid_input" {
+                    if matches!(failure.code, "invalid_input" | "invalid_tool_arguments") {
                         2
                     } else {
                         1

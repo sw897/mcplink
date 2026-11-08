@@ -17,6 +17,7 @@ clap = { version = "4", features = ["derive"] }
 directories = "6"
 fs2 = "0.4"
 glob = "0.3"
+jsonschema = { version = "=0.60.2", default-features = false }
 keyring = "4.2"
 opener = "0.8"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }

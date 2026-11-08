@@ -902,6 +902,25 @@ impl Engine {
                 self.paused.store(false, Ordering::SeqCst);
                 Ok(json!({"paused":false}))
             }
+            "tools.describe" | "tools.call" => {
+                if self.paused.load(Ordering::SeqCst) {
+                    bail!("共享后台已暂停，请在 mcplink 恢复");
+                }
+                let id = required(&p, "id")?;
+                let name = required(&p, "tool")?;
+                if method == "tools.describe" {
+                    crate::invocation::describe(self.clone(), id, name).await
+                } else {
+                    crate::invocation::call(
+                        self.clone(),
+                        id,
+                        name,
+                        p.get("arguments").cloned().context("缺少工具参数对象")?,
+                        p.get("schemaHash").and_then(Value::as_str),
+                    )
+                    .await
+                }
+            }
             "mcp.describe" => {
                 if self.paused.load(Ordering::SeqCst) {
                     bail!("共享后台已暂停，请在 mcplink 恢复");
@@ -955,9 +974,9 @@ impl Engine {
             .iter()
             .any(|binding| binding.connection_id == id && binding.mode == "shared");
         let pool = if shared { &self.pool } else { &temporary };
-        let result = pool
-            .request(self.clone(), id, json!({"method":"tools/list","params":{}}))
-            .await;
+        let result = crate::invocation::discover_with_pool(self.clone(), id, pool)
+            .await
+            .map(|(_, tools)| json!({"tools":tools}));
         temporary.clear().await;
         let _mutation = self.mutation.lock().await;
         let mut connection = self.store.connection(id)?;

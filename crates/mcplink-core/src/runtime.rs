@@ -57,7 +57,7 @@ async fn health(State(state): State<ServerState>, headers: HeaderMap) -> impl In
     (
         StatusCode::OK,
         Json(
-            json!({"application":"mcplink","instance":state.info.instance,"version":env!("CARGO_PKG_VERSION")}),
+            json!({"application":"mcplink","instance":state.info.instance,"version":env!("CARGO_PKG_VERSION"),"managementApi":2}),
         ),
     )
 }
@@ -80,7 +80,13 @@ async fn rpc(
     let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
     let response = match state.engine.rpc(method, params).await {
         Ok(value) => json!({"ok":value}),
-        Err(error) => json!({"error":{"message":error.to_string()}}),
+        Err(error) => {
+            if let Some(failure) = error.downcast_ref::<crate::invocation::ToolFailure>() {
+                json!({"error":{"code":failure.code,"message":failure.to_string(),"details":failure.details}})
+            } else {
+                json!({"error":{"message":error.to_string()}})
+            }
+        }
     };
     (StatusCode::OK, Json(response))
 }
@@ -126,7 +132,7 @@ pub async fn daemon(data: PathBuf, port: Option<u16>) -> Result<()> {
     let router = Router::new()
         .route("/health", get(health))
         .route("/rpc", post(rpc))
-        .layer(DefaultBodyLimit::max(8 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(8 * 1024 * 1024 + 64 * 1024))
         .with_state(state);
     axum::serve(listener, router)
         .with_graceful_shutdown(async {
@@ -144,6 +150,7 @@ pub struct Client {
     info: RuntimeInfo,
     key: String,
     http: reqwest::Client,
+    management_api: u64,
 }
 
 impl Client {
@@ -174,6 +181,7 @@ impl Client {
             info,
             key,
             http,
+            management_api: status["managementApi"].as_u64().unwrap_or(1),
         })
     }
 
@@ -228,6 +236,9 @@ impl Client {
     }
 
     pub async fn call(&self, method: &str, params: Value) -> Result<Value> {
+        if matches!(method, "tools.describe" | "tools.call") && self.management_api < 2 {
+            bail!("旧后台不支持当前工具调用命令；请退出桌面并停止旧后台，再使用同一构建重试");
+        }
         let response = self
             .http
             .post(format!("http://127.0.0.1:{}/rpc", self.info.port))
@@ -238,6 +249,11 @@ impl Client {
             .context("后台通信中断，执行结果需核对")?;
         let body: Value = response.json().await.context("后台响应无效")?;
         if let Some(error) = body.get("error") {
+            if let Ok(failure) =
+                serde_json::from_value::<crate::invocation::ToolFailure>(error.clone())
+            {
+                return Err(failure.into());
+            }
             bail!(
                 "{}",
                 error

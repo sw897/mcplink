@@ -1,5 +1,6 @@
 pub mod config;
 pub mod engine;
+pub mod invocation;
 pub mod mcp;
 pub mod model;
 pub mod runtime;
