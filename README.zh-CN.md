@@ -101,7 +101,7 @@ Windows 桌面交互、全新 macOS 账号首次钥匙串授权，以及网络�
 
 ## 从源码运行
 
-技术栈为 **React + TypeScript、Tauri 2、Rust**。使用 [.node-version](.node-version) 和 [rust-toolchain.toml](rust-toolchain.toml) 固定的 Node/Rust 版本、Python 3.11+，以及 [Tauri 平台构建工具](https://v2.tauri.app/start/prerequisites/)。macOS 需要 Xcode Command Line Tools；Windows 需要 MSVC 构建工具和 WebView2。
+技术栈为 **React + TypeScript、Tauri 2、Rust**。开发与 CI 使用 **Node.js 22 LTS**，具体版本固定在 [.node-version](.node-version)，最低支持 **22.12.0**。另需 [rust-toolchain.toml](rust-toolchain.toml) 固定的 Rust 版本、Python 3.11+，以及 [Tauri 平台构建工具](https://v2.tauri.app/start/prerequisites/)。macOS 需要 Xcode Command Line Tools；Windows 需要 MSVC 构建工具和 WebView2。
 
 ```sh
 git clone https://github.com/sw897/mcplink.git

@@ -103,7 +103,7 @@ Windows desktop interaction, first Keychain access under a new macOS account, an
 
 ## Build from source
 
-mcplink uses **React + TypeScript, Tauri 2, and Rust**. Install the Node.js and Rust versions pinned in [.node-version](.node-version) and [rust-toolchain.toml](rust-toolchain.toml), Python 3.11+, and the [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/). macOS requires Xcode Command Line Tools; Windows requires the MSVC build tools and WebView2.
+mcplink uses **React + TypeScript, Tauri 2, and Rust**. Development and CI use **Node.js 22 LTS**, pinned in [.node-version](.node-version); the minimum supported version is **22.12.0**. Install the Rust version pinned in [rust-toolchain.toml](rust-toolchain.toml), Python 3.11+, and the [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/). macOS requires Xcode Command Line Tools; Windows requires the MSVC build tools and WebView2.
 
 ```sh
 git clone https://github.com/sw897/mcplink.git

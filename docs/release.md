@@ -1,6 +1,6 @@
 # 构建与发布
 
-使用 `.node-version` 和 `rust-toolchain.toml` 固定 Node/Rust 工具链，`npm ci` 和 Cargo `--locked` 固定依赖。Python 3.11+ 运行验收脚本。锁定环境便于重跑；签名时间和平台工具链会影响产物字节，不宣称二进制逐字节可重现。
+使用 `.node-version` 固定 Node.js 22 LTS（最低支持 22.12.0），`rust-toolchain.toml` 固定 Rust 工具链，`npm ci` 和 Cargo `--locked` 固定依赖。开发、CI 和发布入口使用同一 Node 版本。Python 3.11+ 运行验收脚本。锁定环境便于重跑；签名时间和平台工具链会影响产物字节，不宣称二进制逐字节可重现。
 
 ## 本地 macOS 候选
 

@@ -4,7 +4,7 @@ mcplink 使用 React/TypeScript、Tauri 和 Rust。请先阅读 [README](README.
 
 ## 开发环境
 
-- 使用 `.node-version` 和 `rust-toolchain.toml` 中的工具链。
+- Node.js 使用 `.node-version` 固定的 22 LTS 版本，最低支持 22.12.0；Rust 使用 `rust-toolchain.toml` 中的工具链。
 - Python 3.11+ 运行端到端脚本。
 - 安装目标平台所需的 Tauri 原生构建工具。
 
