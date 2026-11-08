@@ -161,6 +161,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(202, {})
             if request.get("method") == "tools/call":
                 self.server.calls += 1
+                if path == "/mcp-drop":
+                    self.close_connection = True
+                    self.connection.close()
+                    return
             if request.get("method") == "tools/list":
                 self.server.lists += 1
                 if path == "/mcp-slow": time.sleep(0.8)

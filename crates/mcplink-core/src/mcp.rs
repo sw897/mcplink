@@ -227,6 +227,7 @@ impl McpPool {
             bail!("此工具不在连接启用清单中");
         }
         let list = method == "tools/list";
+        let invoking = method == "tools/call";
         let peer = self.peer(engine.clone(), id).await?;
         if let Some(expected) = revision {
             let current = engine.store.connection(id)?;
@@ -254,7 +255,16 @@ impl McpPool {
                 Ok(value)
             }
             Ok(Err(rmcp::ServiceError::McpError(error))) => Ok(json!({"rpcError":error})),
-            Ok(Err(error)) => Err(connection_error(error)),
+            Ok(Err(error)) => {
+                let diagnostic = connection_error(error);
+                if invoking {
+                    Err(anyhow::anyhow!(
+                        "工具调用中断，执行结果需核对；不要自动重试。{diagnostic}"
+                    ))
+                } else {
+                    Err(diagnostic)
+                }
+            }
             Err(_) => bail!("工具请求超时，执行结果待核对，请确认结果后再决定是否重试"),
         }
     }

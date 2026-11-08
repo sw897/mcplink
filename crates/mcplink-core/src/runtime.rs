@@ -246,8 +246,11 @@ impl Client {
             .json(&json!({"method":method,"params":params}))
             .send()
             .await
-            .context("后台通信中断，执行结果需核对")?;
-        let body: Value = response.json().await.context("后台响应无效")?;
+            .context("后台通信中断，执行结果需核对；不要自动重试")?;
+        let body: Value = response
+            .json()
+            .await
+            .context("后台响应无效，执行结果需核对；不要自动重试")?;
         if let Some(error) = body.get("error") {
             if let Ok(failure) =
                 serde_json::from_value::<crate::invocation::ToolFailure>(error.clone())

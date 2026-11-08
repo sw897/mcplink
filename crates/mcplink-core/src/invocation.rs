@@ -146,7 +146,7 @@ pub async fn describe(engine: Arc<Engine>, id: &str, name: &str) -> Result<Value
     Ok(
         json!({"connectionId":id,"connectionRevision":revision,"schemaHash":schema_hash(&tool)?,"tool":tool,
         "validation":{"drafts":["draft-04","draft-06","draft-07","2019-09","2020-12"],
-        "defaultDraft":"2020-12","externalReferences":false,"formatAssertions":false}}),
+        "defaultDraft":"2020-12","externalReferences":false,"formatAssertions":false,"customVocabularies":false}}),
     )
 }
 

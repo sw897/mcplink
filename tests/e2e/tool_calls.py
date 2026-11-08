@@ -185,6 +185,13 @@ class ToolCalls(AgentCli):
         time.sleep(1.3)
         assert self.stats()["calls"]==count+1
         self.passed("an uncertain timeout sends the tool exactly once and is not automatically replayed")
+
+        dropped=self.save("dropped_tools",url=f"http://127.0.0.1:{self.port}/mcp-drop")
+        count=self.stats()["calls"]
+        failure=self.invoke(dropped,"search_documents",{"query":"fixture"},exit_status=1)
+        assert "结果" in failure["error"]["message"]
+        assert self.stats()["calls"]==count+1
+        self.passed("a connection closed after receipt is reported as uncertain and the tool is not resent")
         return {"connection":connection}
 
 
