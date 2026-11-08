@@ -76,7 +76,7 @@ class Harness:
         self.data = record / "data"
         self.results = []
         self.clients = []
-        self.environment = {**os.environ, "MCPLINK_HOME": str(self.home), "MCPLINK_DATA_DIR": str(self.data), "MCPLINK_VAULT": "fixture", "CODEX_HOME": str(self.home / ".codex"), "HERMES_HOME": str(self.home / ".hermes"), "CLAUDE_CONFIG_DIR": str(self.home / ".claude")}
+        self.environment = {**os.environ, "MCPLINK_HOME": str(self.home), "MCPLINK_DATA_DIR": str(self.data), "MCPLINK_VAULT": "fixture", "CODEX_HOME": str(self.home / ".codex"), "HERMES_HOME": str(self.home / ".hermes"), "CLAUDE_CONFIG_DIR": str(self.home / ".claude"), "XDG_CONFIG_HOME":str(self.home/".config"), "XDG_DATA_HOME":str(self.home/".local/share"), "XDG_CACHE_HOME":str(self.home/".cache"), "XDG_STATE_HOME":str(self.home/".local/state"), "OPENCODE_CONFIG_DIR":str(self.home/".config/opencode"), "OPENCODE_TEST_HOME":str(self.home)}
         for path in (self.home / ".codex", self.home / ".hermes"):
             path.mkdir(parents=True)
         (self.home / ".mcplink-test-fixture").touch()

@@ -44,7 +44,15 @@ impl Engine {
 
     pub fn sources(&self) -> Result<Vec<Source>> {
         let mut sources = config::default_sources()?;
-        sources.extend(self.store.sources()?);
+        for stored in self.store.sources()? {
+            if let Some(position) = sources.iter().position(|s| s.id == stored.id) {
+                if stored.agent == Agent::Opencode && stored.path == sources[position].path {
+                    sources[position] = stored;
+                }
+            } else {
+                sources.push(stored);
+            }
+        }
         Ok(sources)
     }
 
@@ -74,6 +82,7 @@ impl Engine {
         } else {
             let previous = self.definition(connection)?;
             previous.url != definition.url
+                || previous.origin_project != definition.origin_project
                 || previous.client_id != definition.client_id
                 || previous.client_secret != definition.client_secret
                 || previous.oauth_scopes != definition.oauth_scopes
@@ -108,7 +117,7 @@ impl Engine {
         for source in self.sources()? {
             let result = config::scan(&source);
             let error = result.as_ref().err().map(ToString::to_string);
-            scopes.push(json!({"id":source.id,"agent":source.agent,"label":source.label,"path":source.path,"exists":source.path.exists(),"error":error,"readOnly":source.read_only}));
+            scopes.push(json!({"id":source.id,"agent":source.agent,"label":source.label,"path":source.path,"project":source.project,"scope":source.scope,"exists":source.path.exists(),"error":error,"readOnly":source.read_only}));
             if let Ok(entries) = result {
                 for entry in entries {
                     let binding = bindings
@@ -131,8 +140,30 @@ impl Engine {
                                 .iter()
                                 .any(|c| c.id == b.connection_id && c.revision != b.revision)
                     });
-                    detected.push(json!({"id":id,"connectionId":connection_id,"sourceId":source.id,"agent":source.agent,"name":entry.name,"enabled":entry.definition.enabled,"transport":entry.definition.transport(),"changed":changed,"needsUpdate":needs_update,"error":entry.error,"mode":binding.map(|b|b.mode.as_str()).unwrap_or("direct")}));
+                    detected.push(json!({"id":id,"connectionId":connection_id,"sourceId":source.id,"agent":source.agent,"scope":source.scope,"project":source.project,"name":entry.name,"enabled":entry.definition.enabled,"transport":entry.definition.transport(),"changed":changed,"needsUpdate":needs_update,"error":entry.error,"mode":binding.map(|b|b.mode.as_str()).unwrap_or("direct")}));
                 }
+            }
+        }
+        // This describes only explicitly added project contexts. Native policy,
+        // project approvals and plugin endpoint deduplication remain client-owned.
+        let candidates = detected.clone();
+        for row in &mut detected {
+            if row["agent"] != "claude"
+                || !matches!(row["scope"].as_str(), Some("user" | "local" | "project"))
+            {
+                continue;
+            }
+            let rank = |value: &Value| match value["scope"].as_str() {
+                Some("local") => 3,
+                Some("project") => 2,
+                Some("user") => 1,
+                _ => 0,
+            };
+            let mut overrides:Vec<_>=candidates.iter().filter(|candidate|candidate["agent"]=="claude"&&candidate["name"]==row["name"]&&rank(candidate)>rank(row)&&!candidate["project"].is_null()&&(row["project"].is_null()||candidate["project"]==row["project"]))
+                .map(|candidate|json!({"sourceId":candidate["sourceId"],"project":candidate["project"],"scope":candidate["scope"]})).collect();
+            overrides.sort_by_key(|value| std::cmp::Reverse(rank(value)));
+            if !overrides.is_empty() {
+                row["overriddenIn"] = json!(overrides);
             }
         }
         for binding in &bindings {
@@ -184,6 +215,7 @@ impl Engine {
         if let Some(error) = entry.error {
             bail!("该服务配置无效：{error}");
         }
+        config::check_source_import(&source)?;
         let id = uuid::Uuid::new_v4().to_string();
         let mut connection = Connection {
             id: id.clone(),
@@ -286,6 +318,8 @@ impl Engine {
             }
             definition.original = old_definition.original;
             definition.original_agent = old_definition.original_agent;
+            definition.origin_project = old_definition.origin_project;
+            definition.origin_layout = old_definition.origin_layout;
         }
         let mut connection = existing.unwrap_or_else(|| Connection {
             id: uuid::Uuid::new_v4().to_string(),
@@ -402,7 +436,12 @@ impl Engine {
                 let name = binding
                     .map(|b| b.name.clone())
                     .unwrap_or_else(|| connection.name.clone());
-                if !touched.insert((source.path.clone(), config::name_key(&name))) {
+                if !touched.insert((
+                    source.path.clone(),
+                    source.scope.clone(),
+                    source.project.clone(),
+                    config::name_key(&name),
+                )) {
                     bail!("批量操作中存在重复目标或接入名称冲突");
                 }
                 let before = document
@@ -443,18 +482,19 @@ impl Engine {
                     let mut value = if matches!(action, "disable" | "enable") {
                         before.clone().context("目标尚未接入此服务")?
                     } else if actual_mode == "shared" {
-                        self.bridge_config(
+                        let bridge = self.bridge_config(
                             &connection.id,
                             p.get("_bridgeExecutable").and_then(Value::as_str),
-                        )?
+                        )?;
+                        config::native(&serde_json::from_value(bridge)?, &source)?
                     } else {
-                        config::native(&definition, &source.agent)?
+                        config::native(&definition, &source)?
                     };
                     if action == "disable" {
-                        value["enabled"] = json!(false);
+                        config::set_native_enabled(&mut value, &source, false)?;
                     }
                     if action == "enable" {
-                        value["enabled"] = json!(true);
+                        config::set_native_enabled(&mut value, &source, true)?;
                     }
                     Some(value)
                 };
@@ -486,7 +526,7 @@ impl Engine {
             .set(&format!("plan/{}", plan.id), &serde_json::to_string(&plan)?)?;
         let summary=plan.changes.iter().map(|change|{
             let source=self.source(&change.source_id)?;
-            Ok(json!({"id":change.id,"sourceId":source.id,"agent":source.agent,"sourceLabel":source.label,"path":source.path,"name":change.name,"mode":change.mode,"action":change.action,"before":change.before.as_ref().and_then(|v|config::normalize(v,source.agent.clone()).ok()).map(|d|d.public_value()),"after":change.after.as_ref().and_then(|v|config::normalize(v,source.agent.clone()).ok()).map(|d|d.public_value()),"reload":"配置写入后，请在对应 Agent 重新加载 MCP 或重新开启会话"}))
+            Ok(json!({"id":change.id,"sourceId":source.id,"agent":source.agent,"sourceLabel":source.label,"path":source.path,"name":change.name,"mode":change.mode,"action":change.action,"before":change.before.as_ref().and_then(|v|config::normalize_source(v,&source).ok()).map(|d|d.public_value()),"after":change.after.as_ref().and_then(|v|config::normalize_source(v,&source).ok()).map(|d|d.public_value()),"reload":"配置写入后，请在对应 Agent 重新加载 MCP 或重新开启会话"}))
         }).collect::<Result<Vec<_>>>()?;
         let mut display = connections[0].public_value();
         if connections.len() > 1 {
@@ -736,39 +776,14 @@ impl Engine {
             }
             "sources.add" => {
                 let _guard = self.mutation.lock().await;
-                let agent: Agent =
-                    serde_json::from_value(p.get("agent").cloned().context("请选择 Agent")?)?;
-                let path = PathBuf::from(required(&p, "path")?);
-                let path = path.canonicalize().unwrap_or(path);
-                if let Some(existing) = self
-                    .sources()?
-                    .into_iter()
-                    .find(|s| s.path.canonicalize().unwrap_or(s.path.clone()) == path)
-                {
-                    return Ok(serde_json::to_value(existing)?);
+                let sources = self.sources()?;
+                let source = config::source_from_params(&p, &sources)?;
+                if sources.iter().any(|existing| {
+                    existing.id == source.id
+                        && serde_json::to_value(existing).ok() == serde_json::to_value(&source).ok()
+                }) {
+                    return Ok(serde_json::to_value(source)?);
                 }
-                if !path.is_absolute() {
-                    bail!("请选择完整的配置文件路径");
-                }
-                let id = format!(
-                    "source:{}",
-                    digest(format!("{}:{}", agent.label(), path.display()).as_bytes())
-                );
-                let source = Source {
-                    id,
-                    read_only: agent == Agent::Claude,
-                    agent,
-                    label: p
-                        .get("label")
-                        .and_then(Value::as_str)
-                        .unwrap_or("自定义配置")
-                        .into(),
-                    path,
-                    project: None,
-                    plugin_root: None,
-                    discovery_error: None,
-                };
-                config::read(&source)?;
                 self.store.save_source(&source)?;
                 Ok(serde_json::to_value(source)?)
             }
@@ -789,7 +804,9 @@ impl Engine {
                 if binding.mode != "direct" {
                     bail!("共享入口不能作为上游配置，请编辑服务连接");
                 }
-                let entry = config::scan(&self.source(source_id)?)?
+                let source = self.source(source_id)?;
+                config::check_source_import(&source)?;
+                let entry = config::scan(&source)?
                     .into_iter()
                     .find(|e| e.name == name)
                     .context("来源中已移除此服务")?;

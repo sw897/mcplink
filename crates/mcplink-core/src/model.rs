@@ -24,6 +24,7 @@ pub enum Agent {
     Codex,
     Hermes,
     Claude,
+    Opencode,
 }
 
 impl Agent {
@@ -32,6 +33,7 @@ impl Agent {
             Self::Codex => "Codex",
             Self::Hermes => "Hermes",
             Self::Claude => "Claude Code",
+            Self::Opencode => "OpenCode",
         }
     }
 }
@@ -50,6 +52,17 @@ pub struct Source {
     pub plugin_root: Option<PathBuf>,
     #[serde(default)]
     pub discovery_error: Option<String>,
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub layout: Option<OpenCodeLayout>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum OpenCodeLayout {
+    V1,
+    V2,
 }
 
 #[derive(Clone, Serialize, Deserialize, Default)]
@@ -76,6 +89,8 @@ pub struct Definition {
     pub prompts_disabled: bool,
     pub original: Value,
     pub original_agent: Option<Agent>,
+    pub origin_project: Option<PathBuf>,
+    pub origin_layout: Option<OpenCodeLayout>,
 }
 
 impl Definition {

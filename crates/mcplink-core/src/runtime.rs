@@ -58,7 +58,7 @@ async fn health(State(state): State<ServerState>, headers: HeaderMap) -> impl In
     (
         StatusCode::OK,
         Json(
-            json!({"application":"mcplink","instance":state.info.instance,"version":env!("CARGO_PKG_VERSION"),"managementApi":4}),
+            json!({"application":"mcplink","instance":state.info.instance,"version":env!("CARGO_PKG_VERSION"),"managementApi":5}),
         ),
     )
 }
@@ -297,6 +297,23 @@ impl Client {
     }
 
     pub async fn call(&self, method: &str, params: Value) -> Result<Value> {
+        if self.management_api < 5
+            && ((method == "sources.add"
+                && (params["agent"] == "opencode"
+                    || ["scope", "project", "layout"]
+                        .iter()
+                        .any(|key| params.get(*key).is_some_and(|v| !v.is_null()))))
+                || (method == "changes.preview"
+                    && params["targetSourceIds"].as_array().is_some_and(|targets| {
+                        targets.iter().any(|id| {
+                            id.as_str().is_some_and(|id| {
+                                id.starts_with("claude:") || id.starts_with("opencode:")
+                            })
+                        })
+                    })))
+        {
+            bail!("旧后台不支持当前 Agent 配置作用域；请退出桌面并停止旧后台，再使用同一构建重试");
+        }
         if self.management_api < 4
             && (matches!(method, "oauth.configure" | "oauth.start")
                 || (method == "connections.save"

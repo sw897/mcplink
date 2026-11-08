@@ -58,6 +58,25 @@ jobs:
       - name: Isolated Claude source acceptance
         timeout-minutes: 5
         run: python -u tests/e2e/claude_sources.py --record artifacts/e2e/ci-claude
+      - name: Prepare pinned native Claude CLI for scoped acceptance
+        run: npm install --prefix artifacts/e2e/native-claude --no-save --package-lock=false --ignore-scripts @anthropic-ai/claude-code@2.1.319
+      - name: Select native Claude CLI
+        shell: python {0}
+        run: |
+          import os
+          from pathlib import Path
+          target = "win32-x64" if os.name == "nt" else "darwin-arm64"
+          name = "claude.exe" if os.name == "nt" else "claude"
+          binary = Path.cwd() / "artifacts/e2e/native-claude/node_modules/@anthropic-ai" / f"claude-code-{target}" / name
+          assert binary.is_file(), binary
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+              output.write(f"MCPLINK_E2E_CLAUDE={binary}\n")
+      - name: Isolated Claude writable scope acceptance
+        timeout-minutes: 5
+        run: python -u tests/e2e/claude_writable.py --record artifacts/e2e/ci-claude-writable
+      - name: Isolated OpenCode layout acceptance
+        timeout-minutes: 5
+        run: python -u tests/e2e/opencode_sources.py --record artifacts/e2e/ci-opencode
       - name: Isolated tool invocation acceptance
         timeout-minutes: 5
         run: python -u tests/e2e/tool_calls.py --record artifacts/e2e/ci-tools
@@ -90,6 +109,8 @@ jobs:
             artifacts/e2e/ci-cli/report.json
             artifacts/e2e/ci-core/report.json
             artifacts/e2e/ci-claude/report.json
+            artifacts/e2e/ci-claude-writable/report.json
+            artifacts/e2e/ci-opencode/report.json
             artifacts/e2e/ci-tools/report.json
             artifacts/e2e/ci-generated/report.json
             artifacts/e2e/ci-remote/report.json

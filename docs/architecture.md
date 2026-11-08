@@ -6,7 +6,7 @@ mcplink 管理个人电脑的 MCP 接入。服务、账号、Agent 三个视图�
 
 - **桌面**：Tauri 2 + React/TypeScript，扫描、连接编辑、账号维护、Agent 对比、变更预览和恢复。
 - **管理核心**：Rust `mcplink-core`，包含 Codex TOML 与 Hermes YAML 适配、SQLite 元数据、系统凭据库和配置操作日志。
-- **Claude Code 来源**：读取用户 JSON 与已启用用户插件默认 `.mcp.json`，按真实来源登记只读绑定；插件升级仍由原客户端维护，连接可在 mcplink 导入、检查并复用到可写目标。插件发现异常单独显示，不覆盖 Codex/Hermes 盘点结果。
+- **版本化配置来源**：源码支持 Claude Code user/local/project 的独立 JSON 位置和 OpenCode V1/V2 JSONC 服务表。JSON 编辑复用同一预览、哈希检查、备份和逐条恢复事务，保留无关设置、注释及空白。Claude 插件与托管来源保持只读，客户端审批、信任、登录缓存和插件升级由原客户端维护。具体边界见 [Agent 配置适配](agent-adapters.md)。
 - **Agent CLI**：`mcplink schema/status/sources/connections/credentials/changes/gateway/mcp`，JSON 输出和 stdin 输入；复用后台 RPC，带语义失败退出码，预览／应用仍走同一配置事务。`skill show/install` 从二进制导出或安装管理 Skill，无需后台。详见 [Agent CLI](agent-cli.md)。
 - **后台**：独立 `mcplink daemon`，每个数据目录单实例。关闭窗口不关闭后台；首版通过按需启动管理生命周期，不安装系统服务。
 - **共享入口**：每个 Agent 为每项共享服务启动独立 STDIO Bridge。Bridge 经带本地认证的 loopback HTTP 调用后台。后台用 rmcp 连接上游 STDIO 或 Streamable HTTP。

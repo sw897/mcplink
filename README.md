@@ -67,7 +67,7 @@ Configuration discovery and a successful file write do not prove that a running 
 | Hermes | User configuration and explicitly added YAML files | Yes |
 | Claude Code | User configuration and enabled user plugins; explicitly added JSON files | Read-only |
 
-Claude Code configuration remains under Claude Code and plugin control. Project overrides, enterprise policies, and cloud connectors are not inferred. See [compatibility and limits](docs/compatibility.md).
+This table describes v0.1.0. Source development adds writable Claude Code user/local/project scopes and version-aware OpenCode V1/V2 JSON/JSONC adapters. These changes are not included in the release downloads; see [adapter scope and validation](docs/agent-adapters.md). Client approvals, policies, and login caches remain under the client’s control.
 
 ### CLI and management Skill
 

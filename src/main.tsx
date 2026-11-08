@@ -28,8 +28,8 @@ import {
 } from "lucide-react";
 import "./style.css";
 
-type Agent = "codex" | "hermes" | "claude";
-const agents: Agent[] = ["codex", "hermes", "claude"];
+type Agent = "codex" | "hermes" | "claude" | "opencode";
+const agents: Agent[] = ["codex", "hermes", "claude", "opencode"];
 type Json = Record<string, unknown>;
 type Connection = {
   id: string;
@@ -55,6 +55,9 @@ type Source = {
   exists: boolean;
   error?: string;
   readOnly?: boolean;
+  scope?: string;
+  layout?: "v1" | "v2";
+  project?: string;
 };
 type Binding = {
   id: string;
@@ -67,6 +70,7 @@ type Binding = {
   needsUpdate?: boolean;
   missing?: boolean;
   mode: string;
+  overriddenIn?: { sourceId: string; project: string; scope: string }[];
 };
 type Operation = {
   id: string;
@@ -130,6 +134,7 @@ type Dialog =
       params: Json;
     }
   | { kind: "sources" }
+  | { kind: "addSource"; agent: Agent }
   | { kind: "history" }
   | { kind: "editor"; connection?: Connection }
   | { kind: "connect"; connections: Connection[] }
@@ -137,7 +142,12 @@ type Dialog =
   | { kind: "credential"; connection: Connection };
 
 const agentLabel = (agent: Agent) =>
-  ({ codex: "Codex", hermes: "Hermes", claude: "Claude Code" })[agent];
+  ({
+    codex: "Codex",
+    hermes: "Hermes",
+    claude: "Claude Code",
+    opencode: "OpenCode",
+  })[agent];
 const time = (value?: number) =>
   value
     ? new Date(value * 1000).toLocaleString("zh-CN", {
@@ -352,15 +362,21 @@ function App() {
       (binding) => binding.agent === agent,
     );
     if (!bindings.length) {
-      const writable = sourcesFor(agent).some((source) => !source.readOnly);
+      const available = sourcesFor(agent);
+      const missing = available.length === 0;
+      const writable = available.some((source) => !source.readOnly);
       return (
         <button
           className="cell-add"
-          disabled={!writable}
-          onClick={() => void connect([connection])}
+          disabled={!writable && !missing}
+          onClick={() =>
+            missing
+              ? setDialog({ kind: "addSource", agent })
+              : void connect([connection])
+          }
         >
           <Plus size={13} />
-          {writable ? "接入" : "只读来源"}
+          {missing ? "添加来源" : writable ? "接入" : "只读来源"}
         </button>
       );
     }
@@ -524,7 +540,7 @@ function App() {
                 个配置位置
               </span>
               <span className="divider">/</span>
-              <span>Codex、Hermes、Claude Code</span>
+              <span>Codex、Hermes、Claude Code、OpenCode</span>
               <button onClick={() => setDialog({ kind: "sources" })}>
                 查看范围
                 <ArrowRight size={12} />
@@ -635,6 +651,10 @@ function App() {
                           <span className="agent-avatar claude">Cl</span>Claude
                           Code
                         </th>
+                        <th className="agent-column">
+                          <span className="agent-avatar opencode">O</span>
+                          OpenCode
+                        </th>
                         <th>连接状态</th>
                         <th />
                       </tr>
@@ -682,6 +702,7 @@ function App() {
                           <td>{bindingCell(connection, "codex")}</td>
                           <td>{bindingCell(connection, "hermes")}</td>
                           <td>{bindingCell(connection, "claude")}</td>
+                          <td>{bindingCell(connection, "opencode")}</td>
                           <td>
                             <Status value={connection.status} />
                             {connection.checkedAt && (
@@ -861,7 +882,7 @@ function App() {
                                 (source) => source.exists,
                               ).length
                             }{" "}
-                            个配置位置
+                            处配置
                           </span>
                         </div>
                         <strong className="count">
@@ -878,11 +899,22 @@ function App() {
                         </p>
                         <button
                           className="button"
-                          disabled={agent === "claude"}
-                          onClick={() => void connect(data.connections)}
+                          disabled={
+                            sourcesFor(agent).length > 0 &&
+                            !sourcesFor(agent).some(
+                              (source) => !source.readOnly,
+                            )
+                          }
+                          onClick={() =>
+                            sourcesFor(agent).length === 0
+                              ? setDialog({ kind: "addSource", agent })
+                              : void connect(data.connections)
+                          }
                         >
                           <Plus size={15} />
-                          {agent === "claude" ? "来源配置只读" : "选用已有服务"}
+                          {sourcesFor(agent).length === 0
+                            ? "添加配置来源"
+                            : "选用已有服务"}
                         </button>
                       </article>
                     );
@@ -900,6 +932,7 @@ function App() {
                         <th>Codex</th>
                         <th>Hermes</th>
                         <th>Claude Code</th>
+                        <th>OpenCode</th>
                         <th>已核验工具</th>
                       </tr>
                     </thead>
@@ -919,6 +952,7 @@ function App() {
                           <td>{bindingCell(connection, "codex")}</td>
                           <td>{bindingCell(connection, "hermes")}</td>
                           <td>{bindingCell(connection, "claude")}</td>
+                          <td>{bindingCell(connection, "opencode")}</td>
                           <td>
                             {connection.toolCount === undefined ||
                             connection.toolCount === null ? (
@@ -978,6 +1012,10 @@ function App() {
                     {agentLabel(source.agent)} · {source.label}
                   </strong>
                   <code>{source.path}</code>
+                  {source.layout && (
+                    <small>OpenCode {source.layout.toUpperCase()}</small>
+                  )}
+                  {source.project && <code>项目：{source.project}</code>}
                   <small className={source.error ? "inline-error" : "muted"}>
                     {source.error ||
                       (source.exists ? "已找到配置" : "尚未创建配置文件") +
@@ -992,6 +1030,10 @@ function App() {
                   className="button"
                   key={agent}
                   onClick={async () => {
+                    if (agent === "claude" || agent === "opencode") {
+                      setDialog({ kind: "addSource", agent });
+                      return;
+                    }
                     const path = await open({
                       title: `选择 ${agentLabel(agent)} 配置`,
                       multiple: false,
@@ -999,11 +1041,7 @@ function App() {
                         {
                           name: "配置文件",
                           extensions:
-                            agent === "codex"
-                              ? ["toml"]
-                              : agent === "claude"
-                                ? ["json"]
-                                : ["yaml", "yml"],
+                            agent === "codex" ? ["toml"] : ["yaml", "yml"],
                         },
                       ],
                     });
@@ -1018,6 +1056,16 @@ function App() {
             </div>
           </div>
         </Modal>
+      )}
+      {dialog?.kind === "addSource" && (
+        <SourceDialog
+          agent={dialog.agent}
+          onClose={() => setDialog({ kind: "sources" })}
+          onSaved={async () => {
+            await load();
+            setDialog({ kind: "sources" });
+          }}
+        />
       )}
       {dialog?.kind === "history" && (
         <Modal title="变更与恢复" wide onClose={() => setDialog(undefined)}>
@@ -1210,6 +1258,13 @@ function App() {
                           采用来源更新
                         </button>
                       )}
+                    {!!binding.overriddenIn?.length && (
+                      <span>
+                        {" "}
+                        · 在 {binding.overriddenIn.length}{" "}
+                        个已登记项目来源中被更高作用域覆盖
+                      </span>
+                    )}
                   </small>
                 </div>
                 <button
@@ -1327,6 +1382,159 @@ function App() {
         />
       )}
     </div>
+  );
+}
+
+function SourceDialog({
+  agent,
+  onClose,
+  onSaved,
+}: {
+  agent: Agent;
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+}) {
+  const [scope, setScope] = useState("user");
+  const [layout, setLayout] = useState("auto");
+  const [path, setPath] = useState("");
+  const [project, setProject] = useState("");
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
+  const scoped = scope === "local" || scope === "project";
+  return (
+    <Modal title={`添加 ${agentLabel(agent)} 来源`} onClose={onClose}>
+      <form
+        className="modal-body"
+        onSubmit={async (event) => {
+          event.preventDefault();
+          setPending(true);
+          setError("");
+          try {
+            await rpc("sources.add", {
+              agent,
+              scope: scope === "readonly" ? null : scope,
+              path: scoped && agent === "claude" ? null : path || null,
+              project: scoped ? project : null,
+              layout: agent === "opencode" && layout !== "auto" ? layout : null,
+            });
+            await onSaved();
+          } catch (error) {
+            setError((error as Error).message);
+          } finally {
+            setPending(false);
+          }
+        }}
+      >
+        <label className="field">
+          <span>配置作用域</span>
+          <select
+            value={scope}
+            onChange={(event) => setScope(event.target.value)}
+          >
+            <option value="user">User · 所有项目</option>
+            {agent === "claude" && (
+              <option value="local">Local · 个人项目配置</option>
+            )}
+            <option value="project">Project · 项目配置</option>
+            {agent === "claude" && (
+              <option value="readonly">其他 JSON · 只读盘点</option>
+            )}
+          </select>
+        </label>
+        {agent === "opencode" && (
+          <label className="field">
+            <span>OpenCode 配置版本</span>
+            <select
+              value={layout}
+              onChange={(event) => setLayout(event.target.value)}
+            >
+              <option value="auto">自动识别已有配置</option>
+              <option value="v1">V1 · mcp 下的服务</option>
+              <option value="v2">V2 · mcp.servers</option>
+            </select>
+          </label>
+        )}
+        {scoped && (
+          <label className="field">
+            <span>项目目录</span>
+            <input
+              value={project}
+              onChange={(event) => setProject(event.target.value)}
+              required
+              placeholder="完整目录路径"
+            />
+            <button
+              type="button"
+              className="button"
+              onClick={async () => {
+                const selected = await open({
+                  directory: true,
+                  multiple: false,
+                  title: "选择项目目录",
+                });
+                if (typeof selected === "string") setProject(selected);
+              }}
+            >
+              选择项目目录
+            </button>
+          </label>
+        )}
+        {(!scoped || agent === "opencode") && (
+          <label className="field">
+            <span>配置文件</span>
+            <input
+              value={path}
+              onChange={(event) => setPath(event.target.value)}
+              required={scope === "readonly"}
+              placeholder={
+                agent === "opencode"
+                  ? "留空自动选择 opencode.json(c)"
+                  : scope === "user"
+                    ? "留空使用当前用户 .claude.json"
+                    : "完整 JSON 文件路径"
+              }
+            />
+            <button
+              type="button"
+              className="button"
+              onClick={async () => {
+                const selected = await open({
+                  multiple: false,
+                  filters: [
+                    {
+                      name: "JSON 配置",
+                      extensions:
+                        agent === "opencode" ? ["json", "jsonc"] : ["json"],
+                    },
+                  ],
+                });
+                if (typeof selected === "string") setPath(selected);
+              }}
+            >
+              选择配置文件
+            </button>
+          </label>
+        )}
+        <p className="field-help">
+          {agent === "opencode"
+            ? "已有配置按结构识别 V1/V2；空文件须明确选择版本。保留 JSONC 注释及其他设置，不自动迁移原文件。"
+            : "User 与 Local 使用 .claude.json 的不同位置；Local 按 Git 项目根目录定位。Project 使用所选目录的 .mcp.json，客户端审批及信任由 Claude Code 维护。插件与托管来源保持只读。"}
+        </p>
+        {error && (
+          <div className="warning-banner" role="alert">
+            {error}
+          </div>
+        )}
+        <footer className="modal-footer">
+          <button type="button" className="button" onClick={onClose}>
+            取消
+          </button>
+          <button className="button primary" disabled={pending}>
+            {pending && <Loader2 className="spin" size={15} />}添加来源
+          </button>
+        </footer>
+      </form>
+    </Modal>
   );
 }
 

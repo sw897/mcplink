@@ -48,7 +48,7 @@ Cargo 默认将程序放入 `~/.cargo/bin`，该目录需在 PATH 中。也可�
 | 命令 | 用途 |
 | --- | --- |
 | `status` | 连接、绑定、来源、最近历史和 Gateway 的完整快照。 |
-| `sources list` / `sources add --agent AGENT --path PATH [--label LABEL]` | 查看来源，添加真实配置文件。 |
+| `sources list` / `sources add --agent AGENT [--path PATH] [--scope SCOPE] [--project DIR] [--layout v1\|v2]` | 查看来源或显式添加配置；作用域与版本参数为源码开发能力。 |
 | `connections list` / `connections show ID` | 查看连接摘要或脱敏定义。未导入条目带 `detected:true`。 |
 | `connections import --source SOURCE_ID --name NAME` | 将已有原生条目纳入托管，返回托管 ID，不改写原生文件。 |
 | `connections adopt --source SOURCE_ID --name NAME` | 明确采用已绑定直连条目的外部修改。 |
@@ -71,7 +71,7 @@ Cargo 默认将程序放入 `~/.cargo/bin`，该目录需在 PATH 中。也可�
 
 `AGENT` 为 `codex`、`hermes`、`claude`。`ACTION` 为 `upsert`、`disable`、`enable`、`remove`。目标使用来源 ID（如 `hermes:user`），连接使用导入或保存返回的托管 ID。
 
-Claude Code 来源标记为 `readOnly:true`：支持用户 `.claude.json` 中的 `mcpServers`、已启用用户插件默认 `.mcp.json` 的包裹或裸映射形式。`CLAUDE_CONFIG_DIR` 指定用户目录；设置与插件安装登记用于发现当前用户插件。可按来源 ID 导入、检查和复用连接，原文件保持不变，写入目标选择器会禁用只读来源。`sources add --agent claude` 可补充只读 JSON 文件。项目或企业配置优先级、其他插件入口和云连接器不自动推断。
+v0.1.0 中 Claude Code 来源只读。源码开发能力支持可写 user，以及显式添加的 local/project 作用域；插件、托管和未明确作用域的其他 JSON 仍只读。OpenCode 支持显式 V1/V2 JSON/JSONC 来源。参数、覆盖关系、保留格式与转换限制见 [Agent 配置适配](agent-adapters.md)。只读来源不会因以其他 Agent 或路径重复登记而变为可写。
 
 此路径使用 Claude 的原生配置入口和插件目录结构；配置位置与插件格式参照 [Claude MCP 文档](https://code.claude.com/docs/en/mcp) 和 [插件清单文档](https://code.claude.com/docs/en/plugins-reference)。
 

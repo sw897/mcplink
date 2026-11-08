@@ -483,6 +483,11 @@ td:last-child {
   background: #f8eee8;
   border-color: #ead6c9;
 }
+.agent-avatar.opencode {
+  color: #4f566c;
+  background: #eef0f7;
+  border-color: #d9dfed;
+}
 .service-name {
   display: flex;
   gap: 12px;
@@ -778,7 +783,7 @@ dd {
 }
 .agent-cards {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: 18px;
   margin-bottom: 25px;
 }
@@ -796,6 +801,7 @@ dd {
 .agent-card h2 {
   font-size: 15px;
   font-weight: 550;
+  white-space: nowrap;
 }
 .agent-card > div .muted {
   margin-left: auto;

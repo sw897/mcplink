@@ -65,7 +65,7 @@ Get-FileHash .\mcplink_0.1.0_x64-setup.exe -Algorithm SHA256
 | Hermes | 用户配置，以及手动添加的 YAML 文件 | 支持 |
 | Claude Code | 用户配置、已启用用户插件，以及手动添加的 JSON 文件 | 只读 |
 
-Claude Code 来源由原客户端和插件维护。mcplink 不推断项目覆盖、企业策略或云连接器。完整边界见[兼容说明](docs/compatibility.md)。
+上表描述 v0.1.0。源码开发能力新增 Claude Code user/local/project 可写作用域，以及 OpenCode V1/V2 JSON/JSONC 适配，尚未包含在下载包中，详见[适配范围与验证](docs/agent-adapters.md)。客户端审批、策略和登录缓存继续由原客户端维护。
 
 ### CLI 与管理 Skill
 

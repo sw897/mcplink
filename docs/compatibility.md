@@ -11,15 +11,16 @@
 | Linux / Intel Mac | 未实机验收。 |
 | Codex | 用户 config.toml，以及手动添加的 TOML 来源；已检查 CLI 0.166.0、0.167.0 的相关入口。 |
 | Hermes | 用户 config.yaml，以及手动添加的 YAML 来源；已检查 0.23.0 的相关入口。 |
-| Claude Code | 用户 `.claude.json` 的 `mcpServers` 及已启用用户插件的默认 `.mcp.json`，只读盘点、导入和复用。插件从用户安装登记发现，支持 `${CLAUDE_PLUGIN_ROOT}`。 |
+| Claude Code | v0.1.0 只读盘点与导入。源码开发能力支持 user/local/project 预览、写入及恢复；插件与托管来源只读。已验证 2.1.319 的隔离原生加载及 MCP 连接。 |
+| OpenCode | 源码开发能力支持 V1/V2 全局和显式项目 JSON/JSONC 的读写、启停、共享及恢复；本机 1.19.5、2.2.1 已加载共享入口并连接。 |
 
-配置写入支持 Codex、Hermes。Claude/插件文件由原客户端维护；mcplink 不推断企业策略、项目启停覆盖、其他插件入口或 claude.ai 云连接器。
+v0.1.0 配置写入支持 Codex、Hermes。源码新增 Agent 适配及限制见[详细说明](agent-adapters.md)；不修改 Claude Code 审批、信任或项目启停偏好，不读取原生登录缓存。文件事务、原生加载和模型侧工具调用分别记录，后者不因配置写入或连接检查通过而自动视为通过。
 
 默认扫描已支持的用户入口。项目/profile 通过手动添加真实配置文件纳入管理，不推断尚未选择的项目或运行中会话的覆盖关系。
 
 ## 配置与运行环境
 
-- TOML 表和 YAML 映射的编辑保留未涉及的条目及注释。TOML inline table 可盘点，暂不直接编辑。
+- TOML 表、YAML 映射和源码新增 JSON/JSONC 编辑保留未涉及条目及格式；JSONC 支持注释与尾逗号，拒绝重复键及 JSON5 扩展。TOML inline table 可盘点，暂不直接编辑。
 - 符号链接来源可读，写入需选择真实文件。预览后的外部修改会使计划失效。
 - STDIO 命令必须能在桌面的运行环境中找到。推荐使用绝对路径，应用不会自动加载用户 Shell。
 - 不读取原生 Agent 的私有登录存储或 `.env`。扫描结果不能证明客户端已登录。

@@ -1,6 +1,6 @@
 ---
 name: mcplink
-description: 通过 mcplink CLI 管理 MCP 连接、凭据及共享接入，盘点 Claude Code 只读来源，预览、应用及恢复可写配置；按明确托管连接与本次授权发现、校验和调用 MCP 工具。
+description: 通过 mcplink CLI 管理 MCP 连接、凭据及共享接入，按当前 schema 适配 Codex、Hermes、Claude Code 和 OpenCode 来源，预览、应用及恢复可写配置；按明确托管连接与本次授权发现、校验和调用 MCP 工具。
 ---
 
 # mcplink 管理
@@ -34,7 +34,11 @@ mcplink connections probe CONNECTION_ID
 mcplink connections tools CONNECTION_ID
 ```
 
-自定义项目/profile 来源用 `sources add --agent codex|hermes|claude --path /absolute/config/file` 添加真实文件。Claude JSON 使用 `mcpServers`，以只读方式纳入。来源 ID 从返回值取得。`CLAUDE_CONFIG_DIR` 可选择 Claude 用户目录。
+自定义项目/profile 来源用 `sources add --agent AGENT --path /absolute/config/file` 添加真实文件，Agent 选项以当前 `schema` 为准。来源 ID 从返回值取得，`readOnly:true` 的来源只读。`CLAUDE_CONFIG_DIR` 可选择 Claude 用户目录。
+
+若 schema 提供 `--scope`，Claude Code 可写 user 来源；`sources add --agent claude --scope local|project --project /absolute/project` 显式添加项目作用域。Local 按 Git 项目根目录定位 `.claude.json` 的项目键，Project 使用所选目录 `.mcp.json`。只写目标服务，不修改信任、审批或项目启停偏好；插件、托管及其他未明确作用域的 JSON 保持只读。原生启停在 Claude Code `/mcp` 维护，不能向服务条目添加 `enabled`。
+
+若 schema 支持 `opencode`，可用 `sources add --agent opencode --path /absolute/opencode.jsonc --layout v1|v2`；项目来源另加 `--scope project --project /absolute/project`。V1 使用 `mcp.<name>`/`enabled`，V2 使用 `mcp.servers.<name>`/`disabled`。已有结构可识别，空文件须按实际客户端版本明确选择；不自动迁移混合格式。JSONC 注释及未涉及设置保持原样。原生专用 OAuth、文件变量、超时或协议选项不能等价导入时保留原客户端配置，另建明确的托管连接；不读取原生登录缓存。文件写入、原生加载和工具调用分别核验。
 
 新增或编辑连接用 `connections save --stdin`。输入为完整的规范化连接对象；编辑时以 `connections show` 的 `definition` 为起点，保留仍需沿用的字段和掩码，连同 `id`、`name` 等元数据提交。原生 `http_headers`、`enabled_tools` 等字段须转换为 `schema` 中的规范字段。保存连接本身不写 Agent 配置。
 

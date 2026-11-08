@@ -48,9 +48,9 @@ def main():
     try:
         status = harness.rpc('snapshot')
         sources = [s for s in status['sources'] if s['agent'] == 'claude']
-        assert len(sources) == 2 and all(s['readOnly'] for s in sources)
+        assert len(sources) == 2 and not next(s for s in sources if s['id']=='claude:user')['readOnly']
         source = next(s for s in sources if s['path'] == str(plugin_config))
-        assert all('disabled' not in s['path'] for s in sources)
+        assert source['readOnly'] and all('disabled' not in s['path'] for s in sources)
         passed('discover Claude camelCase user JSON and enabled user plugin; skip disabled/project plugins')
         managed = harness.rpc('connections.import', {'sourceId': source['id'], 'name': 'plugin_notes'})['id']
         detail = harness.rpc('connections.detail', {'id': managed})
@@ -62,12 +62,12 @@ def main():
         assert harness.rpc('connections.probe', {'id': user_id})['connection']['status'] == 'ready'
         assert harness.rpc('connections.probe', {'id': managed})['connection']['status'] == 'ready'
         passed('import both native source shapes and discover actual MCP tools')
-        for target in [source['id'], 'claude:user']:
+        for target in [source['id']]:
             message = harness.rpc('changes.preview', {'connectionId': managed, 'targetSourceIds': [target]}, error=True)
             assert '只读' in message
         added = harness.rpc('sources.add', {'agent': 'hermes', 'path': str(plugin_config)})
         assert added['id'] == source['id'] and added['readOnly']
-        passed('reject writes to Claude/plugin sources and preserve readonly identity on duplicate path registration')
+        passed('reject writes to plugin sources and preserve readonly identity on duplicate path registration')
         unsupported = harness.rpc('connections.import', {'sourceId': 'claude:user', 'name': 'unsupported'}, error=True)
         assert '传输' in unsupported
         passed('unsupported Claude transport is explicit rather than treated as ordinary HTTP')

@@ -8,7 +8,7 @@ use std::{
     str::FromStr,
 };
 
-const FIELDS: &[&str] = &[
+pub(crate) const FIELDS: &[&str] = &[
     "type",
     "command",
     "args",
@@ -30,6 +30,11 @@ const FIELDS: &[&str] = &[
     "tool_timeout_sec",
     "connect_timeout",
     "startup_timeout_sec",
+    "environment",
+    "disabled",
+    "codemode",
+    "protocol",
+    "pool",
 ];
 
 pub fn user_home() -> Result<PathBuf> {
@@ -37,6 +42,10 @@ pub fn user_home() -> Result<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| directories::UserDirs::new().map(|dirs| dirs.home_dir().to_owned()))
         .context("无法定位当前用户目录")
+}
+
+pub fn opencode_home() -> Result<PathBuf> {
+    crate::opencode::directory()
 }
 
 pub fn default_sources() -> Result<Vec<Source>> {
@@ -57,6 +66,8 @@ pub fn default_sources() -> Result<Vec<Source>> {
             read_only: false,
             plugin_root: None,
             discovery_error: None,
+            scope: None,
+            layout: None,
         },
         Source {
             id: "hermes:user".into(),
@@ -67,22 +78,27 @@ pub fn default_sources() -> Result<Vec<Source>> {
             read_only: false,
             plugin_root: None,
             discovery_error: None,
+            scope: None,
+            layout: None,
         },
         Source {
             id: "claude:user".into(),
             agent: Agent::Claude,
-            label: "用户 MCP（只读）".into(),
+            label: "用户 MCP".into(),
             path: std::env::var_os("CLAUDE_CONFIG_DIR")
                 .map(PathBuf::from)
-                .unwrap_or(home)
+                .unwrap_or(home.clone())
                 .join(".claude.json"),
             project: None,
-            read_only: true,
+            read_only: false,
             plugin_root: None,
             discovery_error: None,
+            scope: Some("user".into()),
+            layout: None,
         },
     ];
     sources.extend(claude_plugins());
+    sources.extend(crate::opencode::default_sources()?);
     Ok(sources)
 }
 
@@ -90,6 +106,210 @@ pub fn claude_home() -> Result<PathBuf> {
     Ok(std::env::var_os("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
         .unwrap_or(user_home()?.join(".claude")))
+}
+
+fn claude_user_path() -> Result<PathBuf> {
+    Ok(std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or(user_home()?)
+        .join(".claude.json"))
+}
+
+pub(crate) fn canonical_path(path: &Path) -> Result<PathBuf> {
+    let canonical = path.canonicalize()?;
+    #[cfg(windows)]
+    {
+        let text = canonical.to_string_lossy();
+        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            return Ok(PathBuf::from(format!(r"\\{rest}")));
+        }
+        if let Some(rest) = text.strip_prefix(r"\\?\") {
+            return Ok(PathBuf::from(rest));
+        }
+    }
+    Ok(canonical)
+}
+
+fn claude_project_key(project: PathBuf) -> PathBuf {
+    // Claude Code keys local settings by the Git project root, including when
+    // invoked from a subdirectory. Do not let inherited Git overrides select
+    // an unrelated repository.
+    let mut command = std::process::Command::new("git");
+    command
+        .args(["-C"])
+        .arg(&project)
+        .args(["rev-parse", "--show-toplevel"])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    }
+    if let Ok(output) = command.output()
+        && output.status.success()
+        && let Ok(text) = String::from_utf8(output.stdout)
+        && let Ok(root) = canonical_path(&PathBuf::from(text.trim_end_matches(['\r', '\n'])))
+        && project.starts_with(&root)
+    {
+        return root;
+    }
+    project
+}
+
+pub fn source_from_params(params: &Value, sources: &[Source]) -> Result<Source> {
+    if ["scope", "project", "path", "label"].iter().any(|key| {
+        params
+            .get(*key)
+            .is_some_and(|value| !value.is_null() && !value.is_string())
+    }) {
+        bail!("来源参数类型无效");
+    }
+    let agent: Agent =
+        serde_json::from_value(params.get("agent").cloned().context("请选择 Agent")?)
+            .map_err(|_| anyhow::anyhow!("Agent 类型无效"))?;
+    if agent == Agent::Opencode {
+        return crate::opencode::source_from_params(params, sources);
+    }
+    let scope = params.get("scope").and_then(Value::as_str);
+    if scope.is_some()
+        && (agent != Agent::Claude || !matches!(scope, Some("user" | "local" | "project")))
+    {
+        bail!("配置作用域无效；Claude Code 支持 user、local、project");
+    }
+    let mut project = params
+        .get("project")
+        .and_then(Value::as_str)
+        .map(PathBuf::from);
+    if let Some(path) = &project {
+        if !path.is_absolute() || !path.is_dir() {
+            bail!("请选择已存在的完整项目目录");
+        }
+        project = Some(canonical_path(path).context("项目目录无法访问")?);
+    }
+    if matches!(scope, Some("local" | "project")) && project.is_none() {
+        bail!("此作用域需要显式项目目录");
+    }
+    if project.is_some() && !matches!(scope, Some("local" | "project")) {
+        bail!("项目目录需要 local 或 project 作用域");
+    }
+    if scope == Some("local") {
+        project = project.map(claude_project_key);
+    }
+    let supplied_path = params
+        .get("path")
+        .and_then(Value::as_str)
+        .map(PathBuf::from);
+    let expected = match scope {
+        Some("local") => Some(claude_user_path()?),
+        Some("project") => Some(project.as_ref().unwrap().join(".mcp.json")),
+        _ => None,
+    };
+    if let (Some(supplied), Some(expected)) = (&supplied_path, &expected)
+        && canonical_path(supplied).unwrap_or(supplied.clone())
+            != canonical_path(expected).unwrap_or(expected.clone())
+    {
+        bail!("配置路径与所选 Claude Code 作用域不符");
+    }
+    let path = supplied_path
+        .or(expected)
+        .or_else(|| {
+            (scope == Some("user"))
+                .then(claude_user_path)
+                .and_then(Result::ok)
+        })
+        .context("请选择完整的配置文件路径")?;
+    if !path.is_absolute() {
+        bail!("请选择完整的配置文件路径");
+    }
+    let path = canonical_path(&path).unwrap_or(path);
+    for existing in sources {
+        if canonical_path(&existing.path).unwrap_or(existing.path.clone()) != path {
+            continue;
+        }
+        if existing.read_only
+            && (existing.plugin_root.is_some()
+                || existing
+                    .scope
+                    .as_deref()
+                    .is_some_and(|s| matches!(s, "plugin" | "managed")))
+        {
+            return Ok(existing.clone());
+        }
+        if existing.agent != agent {
+            return Ok(existing.clone());
+        }
+        if existing.scope.as_deref() == scope && existing.project == project {
+            return Ok(existing.clone());
+        }
+        if scope.is_none() {
+            return Ok(existing.clone());
+        }
+        if agent != Agent::Claude
+            || !matches!(scope, Some("user" | "local"))
+            || !matches!(existing.scope.as_deref(), None | Some("user" | "local"))
+        {
+            bail!("此文件已登记为另一配置作用域，请核对已有来源");
+        }
+    }
+    let plugin = path.starts_with(claude_home()?.join("plugins"));
+    let managed = path
+        .file_name()
+        .is_some_and(|name| name == "managed-mcp.json" || name == "managed-settings.json")
+        || crate::opencode::is_managed(&path);
+    let read_only = plugin || managed || (agent == Agent::Claude && scope.is_none());
+    let scope = if plugin {
+        Some("plugin")
+    } else if managed {
+        Some("managed")
+    } else {
+        scope
+    };
+    let id = if agent == Agent::Claude && matches!(scope, Some("local" | "project")) {
+        format!(
+            "claude:{}:{}",
+            scope.unwrap(),
+            digest(project.as_ref().unwrap().to_string_lossy().as_bytes())
+        )
+    } else {
+        format!(
+            "source:{}",
+            digest(
+                format!(
+                    "{}:{}:{}",
+                    agent.label(),
+                    path.display(),
+                    scope.unwrap_or("")
+                )
+                .as_bytes()
+            )
+        )
+    };
+    let source = Source {
+        id,
+        agent,
+        label: params
+            .get("label")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                format!(
+                    "{}{}",
+                    scope.unwrap_or("自定义配置"),
+                    if read_only { "（只读）" } else { "" }
+                )
+            }),
+        path,
+        project,
+        read_only,
+        plugin_root: None,
+        discovery_error: None,
+        scope: scope.map(str::to_owned),
+        layout: None,
+    };
+    read(&source)?;
+    Ok(source)
 }
 
 fn claude_plugins() -> Vec<Source> {
@@ -159,6 +379,8 @@ fn claude_plugins() -> Vec<Source> {
                         read_only: true,
                         plugin_root: Some(root),
                         discovery_error: None,
+                        scope: Some("plugin".into()),
+                        layout: None,
                     });
                 }
             }
@@ -175,6 +397,8 @@ fn claude_plugins() -> Vec<Source> {
             read_only: true,
             plugin_root: None,
             discovery_error: Some("Claude Code 插件登记或设置无法读取，请在原客户端核对".into()),
+            scope: Some("plugin".into()),
+            layout: None,
         }]
     })
 }
@@ -207,19 +431,32 @@ pub fn parse(source: &Source, text: &str) -> Result<Value> {
             Agent::Hermes => serde_yaml::from_str::<Value>(text)
                 .map_err(|_| anyhow::anyhow!("YAML 配置无法解析，请在来源文件中修复"))?,
             Agent::Claude => {
-                let raw: Value = serde_json::from_str(text).map_err(|_| {
-                    anyhow::anyhow!("Claude Code MCP JSON 无法解析，请在来源文件中修复")
-                })?;
+                let raw = crate::json_config::parse(text, false)?;
                 if !raw.is_object() {
                     bail!("Claude Code MCP JSON 根节点必须是映射");
                 }
                 let servers = if source.plugin_root.is_some() {
-                    raw.get("mcpServers").cloned().unwrap_or(raw)
+                    if raw.get("mcpServers").is_some() {
+                        crate::json_config::table(&raw, &["mcpServers".into()])?
+                    } else {
+                        raw
+                    }
+                } else if source.scope.as_deref() == Some("local") {
+                    let project = source.project.as_ref().context("local 来源缺少项目目录")?;
+                    crate::json_config::table(
+                        &raw,
+                        &[
+                            "projects".into(),
+                            project.to_string_lossy().into_owned(),
+                            "mcpServers".into(),
+                        ],
+                    )?
                 } else {
-                    raw.get("mcpServers").cloned().unwrap_or_else(|| json!({}))
+                    crate::json_config::table(&raw, &["mcpServers".into()])?
                 };
                 json!({"mcp_servers": servers})
             }
+            Agent::Opencode => crate::opencode::parse(source, text)?,
         }
     };
     if !value.is_object() {
@@ -257,6 +494,13 @@ fn string_map(value: Option<&Value>) -> BTreeMap<String, String> {
 }
 
 pub fn normalize(raw: &Value, agent: Agent) -> Result<Definition> {
+    normalize_context(raw, agent, None)
+}
+
+fn normalize_context(raw: &Value, agent: Agent, project: Option<&Path>) -> Result<Definition> {
+    if agent == Agent::Opencode {
+        return crate::opencode::normalize(raw, None, project);
+    }
     if !raw.is_object() {
         bail!("MCP 服务配置必须是映射");
     }
@@ -267,6 +511,18 @@ pub fn normalize(raw: &Value, agent: Agent) -> Result<Definition> {
             .is_some_and(|t| !matches!(t, "stdio" | "http"))
     {
         bail!("此 Claude Code MCP 传输尚未适配，保留原客户端配置");
+    }
+    if agent == Agent::Claude
+        && (raw.get("headersHelper").is_some()
+            || raw.get("cwd").is_some()
+            || raw.get("enabled").is_some()
+            || raw.get("disabled").is_some()
+            || raw
+                .get("oauth")
+                .and_then(Value::as_object)
+                .is_some_and(|oauth| oauth.keys().any(|key| key != "clientId")))
+    {
+        bail!("此 Claude Code 原生字段尚不能等价托管，请保留原客户端配置或显式建立托管连接");
     }
     for field in ["env", "headers", "http_headers", "env_http_headers"] {
         if let Some(value) = raw.get(field)
@@ -326,6 +582,11 @@ pub fn normalize(raw: &Value, agent: Agent) -> Result<Definition> {
         oauth: raw.get("auth").and_then(Value::as_str) == Some("oauth"),
         client_id: raw
             .pointer("/oauth/client_id")
+            .or_else(|| {
+                (agent == Agent::Claude)
+                    .then(|| raw.pointer("/oauth/clientId"))
+                    .flatten()
+            })
             .and_then(Value::as_str)
             .map(str::to_owned),
         include_tools: strings(
@@ -355,6 +616,8 @@ pub fn normalize(raw: &Value, agent: Agent) -> Result<Definition> {
         client_secret: None,
         oauth_scopes: Vec::new(),
         oauth_callback_port: None,
+        origin_project: project.map(Path::to_path_buf),
+        origin_layout: None,
     };
     validate(&definition)?;
     Ok(definition)
@@ -384,7 +647,8 @@ pub fn validate(def: &Definition) -> Result<()> {
         bail!("请填写启动命令或 MCP 地址中的一项");
     }
     if let Some(url) = &def.url {
-        let url = url::Url::parse(url).context("MCP 地址无效")?;
+        let resolved = resolve(url, def.origin_project.as_deref())?;
+        let url = url::Url::parse(&resolved).context("MCP 地址无效")?;
         if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
             bail!("MCP 地址需要 HTTP 或 HTTPS");
         }
@@ -414,14 +678,14 @@ pub fn scan(source: &Source) -> Result<Vec<Detected>> {
             if let Some(root) = &source.plugin_root {
                 resolve_plugin_root(&mut raw, &root.to_string_lossy());
             }
+            let mut definition = normalize_source(&raw, source).unwrap_or_default();
+            definition.origin_project = source.project.clone();
             Ok(Detected {
                 source: source.clone(),
                 name: name.clone(),
                 raw: raw.clone(),
-                definition: normalize(&raw, source.agent.clone()).unwrap_or_default(),
-                error: normalize(&raw, source.agent.clone())
-                    .err()
-                    .map(|e| e.to_string()),
+                definition,
+                error: normalize_source(&raw, source).err().map(|e| e.to_string()),
                 fingerprint: fingerprint(Some(&raw)),
             })
         })
@@ -443,16 +707,46 @@ pub fn fingerprint(value: Option<&Value>) -> String {
     digest(&serde_json::to_vec(&value).unwrap_or_default())
 }
 
-pub fn native(def: &Definition, target: &Agent) -> Result<Value> {
-    if *target == Agent::Claude {
-        bail!("Claude Code 来源当前只读，请在原客户端维护配置");
+pub fn normalize_source(raw: &Value, source: &Source) -> Result<Definition> {
+    if source.agent == Agent::Opencode {
+        crate::opencode::normalize(raw, source.layout, source.project.as_deref())
+    } else {
+        normalize_context(raw, source.agent.clone(), source.project.as_deref())
     }
+}
+
+pub fn check_source_import(source: &Source) -> Result<()> {
+    if source.agent == Agent::Opencode {
+        crate::opencode::check_import(source)
+    } else {
+        Ok(())
+    }
+}
+
+pub fn native(def: &Definition, source: &Source) -> Result<Value> {
+    let target = &source.agent;
     validate(def)?;
+    if *target == Agent::Opencode {
+        return crate::opencode::native(def, source);
+    }
     if def.client_secret.is_some()
         || !def.oauth_scopes.is_empty()
         || def.oauth_callback_port.is_some()
     {
         bail!("此连接含托管 OAuth 客户端参数，尚不能等价转换到原生配置；请使用共享接入");
+    }
+    if def
+        .original_agent
+        .as_ref()
+        .is_some_and(|agent| agent != target)
+        && ["${", "{env:", "{file:"].iter().any(|pattern| {
+            serde_json::to_string(&def.original).is_ok_and(|value| value.contains(pattern))
+        })
+    {
+        bail!("跨客户端直连不能保证变量引用等价，请使用共享接入或明确配置目标客户端的变量");
+    }
+    if *target == Agent::Claude {
+        return crate::json_config::claude_native(def, source);
     }
     if def
         .original_agent
@@ -514,7 +808,12 @@ pub fn native(def: &Definition, target: &Agent) -> Result<Value> {
         if !def.env.is_empty() {
             map.insert("env".into(), json!(def.env));
         }
-        if let Some(cwd) = &def.cwd {
+        if let Some(cwd) = def
+            .cwd
+            .as_ref()
+            .map(PathBuf::from)
+            .or(def.origin_project.clone())
+        {
             map.insert("cwd".into(), json!(cwd));
         }
     }
@@ -615,6 +914,22 @@ pub fn entry(source: &Source, name: &str) -> Result<Option<Value>> {
         .cloned())
 }
 
+pub fn set_native_enabled(value: &mut Value, source: &Source, enabled: bool) -> Result<()> {
+    if source.agent == Agent::Claude {
+        bail!("Claude Code 启停按项目偏好维护，请在原客户端 /mcp 中切换；此处可预览移除配置");
+    }
+    if source.agent == Agent::Opencode && source.layout == Some(crate::model::OpenCodeLayout::V2) {
+        value
+            .as_object_mut()
+            .context("服务配置需要映射")?
+            .remove("enabled");
+        value["disabled"] = json!(!enabled);
+    } else {
+        value["enabled"] = json!(enabled);
+    }
+    Ok(())
+}
+
 pub fn render(source: &Source, text: &str, name: &str, value: Option<&Value>) -> Result<String> {
     if source.read_only {
         bail!("该来源只读，请在原客户端或插件中维护配置；可将连接接入其他可写来源");
@@ -695,7 +1010,23 @@ pub fn render(source: &Source, text: &str, name: &str, value: Option<&Value>) ->
             }
             Ok(document.to_string())
         }
-        Agent::Claude => bail!("Claude Code 来源当前只读"),
+        Agent::Claude => {
+            let mut path = Vec::new();
+            if source.scope.as_deref() == Some("local") {
+                path.push("projects".to_owned());
+                path.push(
+                    source
+                        .project
+                        .as_ref()
+                        .context("local 来源缺少项目目录")?
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+            path.push("mcpServers".into());
+            crate::json_config::render(text, false, &path, name, value)
+        }
+        Agent::Opencode => crate::opencode::render(source, text, name, value),
     }
 }
 
@@ -732,11 +1063,23 @@ pub fn resolve(input: &str, project: Option<&Path>) -> Result<String> {
             return Ok(result);
         };
         let end = result[start..].find('}').context("环境变量引用不完整")? + start;
-        let name = result[start + 2..end]
+        let reference = result[start + 2..end]
             .strip_prefix("env:")
             .unwrap_or(&result[start + 2..end]);
-        let value =
-            std::env::var(name).with_context(|| format!("需要在运行环境配置变量 {name}"))?;
+        let (name, fallback) = reference
+            .split_once(":-")
+            .map_or((reference, None), |(name, value)| (name, Some(value)));
+        if name.is_empty()
+            || !name.bytes().enumerate().all(|(index, c)| {
+                c == b'_' || c.is_ascii_alphabetic() || (index > 0 && c.is_ascii_digit())
+            })
+        {
+            bail!("环境变量引用格式不受支持");
+        }
+        let value = std::env::var(name)
+            .ok()
+            .or_else(|| fallback.map(str::to_owned))
+            .with_context(|| format!("需要在运行环境配置变量 {name}"))?;
         result.replace_range(start..=end, &value);
     }
     bail!("环境变量嵌套引用超过限制")

@@ -17,6 +17,7 @@ clap = { version = "4", features = ["derive", "string"] }
 directories = "6"
 fs2 = "0.4"
 glob = "0.3"
+jsonc-parser = { version = "=0.34.0", features = ["cst", "serde"] }
 jsonschema = { version = "=0.60.2", default-features = false }
 keyring = "4.2"
 opener = "0.8"

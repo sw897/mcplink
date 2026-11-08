@@ -38,8 +38,8 @@ fn client_config() -> ClientConfig {
     config
 }
 
-fn http_endpoint(raw: &str) -> Result<String> {
-    let endpoint = config::resolve(raw, None)?;
+fn http_endpoint(raw: &str, project: Option<&std::path::Path>) -> Result<String> {
+    let endpoint = config::resolve(raw, project)?;
     let url = url::Url::parse(&endpoint).context("MCP 地址无效")?;
     let loopback = match url.host() {
         Some(url::Host::Domain(host)) => host == "localhost",
@@ -127,7 +127,7 @@ impl McpPool {
             Duration::from_secs(definition.startup_timeout.unwrap_or(40).clamp(5, 300)),
             async {
                 if let Some(endpoint) = &definition.url {
-                    let endpoint = http_endpoint(endpoint)?;
+                    let endpoint = http_endpoint(endpoint, definition.origin_project.as_deref())?;
                     let client = reqwest::Client::builder()
                         .redirect(reqwest::redirect::Policy::none())
                         .connect_timeout(Duration::from_secs(15))
@@ -139,9 +139,11 @@ impl McpPool {
                     for (key, value) in &definition.headers {
                         let key = reqwest::header::HeaderName::from_bytes(key.as_bytes())
                             .context("HTTP 头名称无效")?;
-                        let value =
-                            reqwest::header::HeaderValue::from_str(&config::resolve(value, None)?)
-                                .context("HTTP 认证字段无效")?;
+                        let value = reqwest::header::HeaderValue::from_str(&config::resolve(
+                            value,
+                            definition.origin_project.as_deref(),
+                        )?)
+                        .context("HTTP 认证字段无效")?;
                         transport.custom_headers.insert(key, value);
                     }
                     if definition.oauth {
@@ -201,16 +203,38 @@ impl McpPool {
                     }
                 } else {
                     let executable = definition.command.as_deref().context("未配置启动命令")?;
-                    let mut command =
-                        tokio::process::Command::new(config::resolve(executable, None)?);
+                    let mut command = tokio::process::Command::new(config::resolve(
+                        executable,
+                        definition.origin_project.as_deref(),
+                    )?);
                     for argument in &definition.args {
-                        command.arg(config::resolve(argument, None)?);
+                        command.arg(config::resolve(
+                            argument,
+                            definition.origin_project.as_deref(),
+                        )?);
                     }
                     for (key, value) in &definition.env {
-                        command.env(key, config::resolve(value, None)?);
+                        command.env(
+                            key,
+                            config::resolve(value, definition.origin_project.as_deref())?,
+                        );
                     }
                     if let Some(cwd) = &definition.cwd {
-                        command.current_dir(config::resolve(cwd, None)?);
+                        let cwd = std::path::PathBuf::from(config::resolve(
+                            cwd,
+                            definition.origin_project.as_deref(),
+                        )?);
+                        command.current_dir(if cwd.is_absolute() {
+                            cwd
+                        } else {
+                            definition
+                                .origin_project
+                                .as_ref()
+                                .map(|project| project.join(&cwd))
+                                .unwrap_or(cwd)
+                        });
+                    } else if let Some(project) = &definition.origin_project {
+                        command.current_dir(project);
                     }
                     command.stderr(Stdio::null()).kill_on_drop(true);
                     let transport = TokioChildProcess::new(command)
@@ -547,6 +571,7 @@ pub async fn start_oauth(engine: Arc<Engine>, id: &str) -> Result<Value> {
             .url
             .as_deref()
             .context("OAuth 需要 HTTP MCP 服务")?,
+        definition.origin_project.as_deref(),
     )?;
     config::validate(&definition)?;
     let refresh = engine.pool.refresh_lock(id);

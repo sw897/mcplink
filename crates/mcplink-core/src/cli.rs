@@ -109,13 +109,20 @@ enum Command {
 #[derive(Subcommand)]
 enum SourceCommand {
     List,
+    /// 添加真实来源；Claude 按作用域定位，OpenCode 须识别或选择配置版本
     Add {
-        #[arg(long, value_parser = ["codex", "hermes", "claude"])]
+        #[arg(long, value_parser = ["codex", "hermes", "claude", "opencode"])]
         agent: String,
         #[arg(long)]
-        path: PathBuf,
+        path: Option<PathBuf>,
         #[arg(long)]
         label: Option<String>,
+        #[arg(long, value_parser = ["user", "local", "project"])]
+        scope: Option<String>,
+        #[arg(long)]
+        project: Option<PathBuf>,
+        #[arg(long, value_parser=["v1","v2"])]
+        layout: Option<String>,
     },
 }
 
@@ -259,7 +266,7 @@ enum SkillCommand {
     Show,
     /// 安装独立副本；已存在不同内容时拒绝覆盖
     Install {
-        #[arg(long, value_parser = ["codex", "hermes", "claude"])]
+        #[arg(long, value_parser = ["codex", "hermes", "claude", "opencode"])]
         agent: String,
     },
 }
@@ -320,13 +327,15 @@ fn install_skill(agent: &str) -> Result<Value> {
     } else {
         agent
     };
-    let source = config::default_sources()?
-        .into_iter()
-        .find(|s| s.agent.label().eq_ignore_ascii_case(agent_label))
-        .context("不支持该 Agent")?;
     let root = if agent == "claude" {
         config::claude_home()?.join("skills")
+    } else if agent == "opencode" {
+        config::opencode_home()?.join("skills")
     } else {
+        let source = config::default_sources()?
+            .into_iter()
+            .find(|s| s.agent.label().eq_ignore_ascii_case(agent_label))
+            .context("不支持该 Agent")?;
         source
             .path
             .parent()
@@ -444,9 +453,16 @@ async fn execute(command: Command, data: PathBuf) -> Result<Value, Failure> {
         ),
         Command::Sources { command } => match command {
             SourceCommand::List => ("snapshot", json!({}), Some("sources"), false),
-            SourceCommand::Add { agent, path, label } => (
+            SourceCommand::Add {
+                agent,
+                path,
+                label,
+                scope,
+                project,
+                layout,
+            } => (
                 "sources.add",
-                json!({"agent":agent,"path":path,"label":label}),
+                json!({"agent":agent,"path":path,"label":label,"scope":scope,"project":project,"layout":layout}),
                 None,
                 false,
             ),
