@@ -35,6 +35,7 @@ class OpenCodeSources(ToolCalls):
         assert not config.exists()
         source=self.cli("sources","add","--agent","opencode","--layout","v1")
         assert source["layout"]=="v1" and not config.exists()
+        assert next(s for s in self.cli("status")["sources"] if s["id"]==source["id"])["layout"]=="v1"
         self.passed("an empty configuration requires an explicit layout and source registration does not create native files")
 
         process={"type":"local","command":[sys.executable,str(FIXTURE),"--stdio"],"environment":{"FIXTURE_PATH":"{env:MCPLINK_DATA_DIR}"},"enabled":True,"codemode":False}
@@ -71,6 +72,7 @@ class OpenCodeSources(ToolCalls):
         modern=self.cli("sources","add","--agent","opencode","--scope","project","--project",str(project),"--layout","v2")
         self.cli("sources","add","--agent","opencode","--path",str(target),"--layout","v1",exit_status=1)
         assert modern["layout"]=="v2"
+        assert next(s for s in self.cli("status")["sources"] if s["id"]==modern["id"])["layout"]=="v2"
         self.passed("V2 explicit project sources detect their native layout and reject incompatible version selection")
 
         self.cli("connections","probe",connection)

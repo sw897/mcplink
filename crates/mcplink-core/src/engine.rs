@@ -117,7 +117,7 @@ impl Engine {
         for source in self.sources()? {
             let result = config::scan(&source);
             let error = result.as_ref().err().map(ToString::to_string);
-            scopes.push(json!({"id":source.id,"agent":source.agent,"label":source.label,"path":source.path,"project":source.project,"scope":source.scope,"exists":source.path.exists(),"error":error,"readOnly":source.read_only}));
+            scopes.push(json!({"id":source.id,"agent":source.agent,"label":source.label,"path":source.path,"project":source.project,"scope":source.scope,"layout":source.layout,"exists":source.path.exists(),"error":error,"readOnly":source.read_only}));
             if let Ok(entries) = result {
                 for entry in entries {
                     let binding = bindings
