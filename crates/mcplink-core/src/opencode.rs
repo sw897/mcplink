@@ -258,6 +258,11 @@ pub fn render(source: &Source, text: &str, name: &str, value: Option<&Value>) ->
 }
 
 fn managed_string(value: &str) -> Result<String> {
+    if value.contains("${") {
+        bail!(
+            "OpenCode 字面变量与托管变量语法冲突，尚不能等价导入；请保留原生配置或显式建立托管连接"
+        );
+    }
     if value.contains("{file:") {
         bail!("OpenCode 文件变量尚不能等价托管，请保留原生配置或显式配置托管凭据");
     }
@@ -333,6 +338,27 @@ pub fn normalize(
     project: Option<&Path>,
 ) -> Result<Definition> {
     let map = raw.as_object().context("OpenCode 服务需要映射")?;
+    if map.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "type"
+                | "command"
+                | "environment"
+                | "cwd"
+                | "url"
+                | "headers"
+                | "oauth"
+                | "enabled"
+                | "disabled"
+                | "timeout"
+                | "protocol"
+                | "pool"
+                | "codemode"
+        )
+    }) || map.get("codemode").is_some_and(|value| value != false)
+    {
+        bail!("此 OpenCode 原生字段尚不能等价托管，请保留原生配置或显式建立托管连接");
+    }
     let selected = selected.unwrap_or(if map.contains_key("enabled") {
         OpenCodeLayout::V1
     } else {

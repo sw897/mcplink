@@ -122,7 +122,19 @@ impl Definition {
             .env
             .iter()
             .map(|(key, value)| {
-                let display = if value.starts_with("${") {
+                let reference = value
+                    .strip_prefix("${")
+                    .and_then(|value| value.strip_suffix('}'));
+                let plain_reference = reference.is_some_and(|name| {
+                    let name = name.strip_prefix("env:").unwrap_or(name);
+                    !name.is_empty()
+                        && name.bytes().enumerate().all(|(index, c)| {
+                            c == b'_'
+                                || c.is_ascii_alphabetic()
+                                || (index > 0 && c.is_ascii_digit())
+                        })
+                });
+                let display = if plain_reference {
                     value.clone()
                 } else {
                     "••••••••".into()

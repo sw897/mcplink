@@ -37,6 +37,8 @@ jobs:
             ~/.cargo/git
             target
           key: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'scripts/bundle.mjs', 'scripts/prepare-sidecar.mjs') }}
+          restore-keys: |
+            rust-v1-${{ runner.os }}-${{ runner.arch }}-
       - run: npm ci
       - run: npm run check
       - run: npm run bundle

@@ -127,7 +127,7 @@ class OpenCodeSources(ToolCalls):
             assert invalid_file.read_text()==text
         self.passed("mixed layouts, duplicate properties and unsupported JSON extensions fail without rewriting files")
 
-        unsupported={"file_macro":{"type":"remote","url":"https://example.invalid/mcp","headers":{"Authorization":"{file:synthetic-secret}"}},"modern_protocol":{"type":"remote","url":"https://example.invalid/mcp","protocol":"2026-07-28"},"native_oauth":{"type":"remote","url":"https://example.invalid/mcp","oauth":{"client_secret":"synthetic-special-secret"}},"native_timeout":{"type":"remote","url":"https://example.invalid/mcp","timeout":{"catalog":3456}}}
+        unsupported={"unknown_policy":{"type":"remote","url":"https://example.invalid/mcp","future_native_policy":True},"native_codemode":{"type":"remote","url":"https://example.invalid/mcp","codemode":True},"literal_variable":{"type":"remote","url":"https://example.invalid/${MCPLINK_DATA_DIR}"},"file_macro":{"type":"remote","url":"https://example.invalid/mcp","headers":{"Authorization":"{file:synthetic-secret}"}},"modern_protocol":{"type":"remote","url":"https://example.invalid/mcp","protocol":"2026-07-28"},"native_oauth":{"type":"remote","url":"https://example.invalid/mcp","oauth":{"client_secret":"synthetic-special-secret"}},"native_timeout":{"type":"remote","url":"https://example.invalid/mcp","timeout":{"catalog":3456}}}
         invalid_file.write_text(json.dumps({"mcp":{"servers":unsupported}}))
         other=self.cli("sources","add","--agent","opencode","--path",str(invalid_file),"--layout","v2")
         for name in unsupported:

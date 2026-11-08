@@ -158,6 +158,17 @@ fn claude_project_key(project: PathBuf) -> PathBuf {
     project
 }
 
+pub(crate) fn claude_project_json_key(project: &Path) -> String {
+    #[cfg(windows)]
+    {
+        project.to_string_lossy().replace('\\', "/")
+    }
+    #[cfg(not(windows))]
+    {
+        project.to_string_lossy().into_owned()
+    }
+}
+
 pub fn source_from_params(params: &Value, sources: &[Source]) -> Result<Source> {
     if ["scope", "project", "path", "label"].iter().any(|key| {
         params
@@ -447,7 +458,7 @@ pub fn parse(source: &Source, text: &str) -> Result<Value> {
                         &raw,
                         &[
                             "projects".into(),
-                            project.to_string_lossy().into_owned(),
+                            claude_project_json_key(project),
                             "mcpServers".into(),
                         ],
                     )?
@@ -524,6 +535,36 @@ fn normalize_context(raw: &Value, agent: Agent, project: Option<&Path>) -> Resul
     {
         bail!("此 Claude Code 原生字段尚不能等价托管，请保留原客户端配置或显式建立托管连接");
     }
+    if agent == Agent::Claude
+        && raw.as_object().is_some_and(|map| {
+            map.keys().any(|key| {
+                !matches!(
+                    key.as_str(),
+                    "type" | "command" | "args" | "env" | "url" | "headers" | "oauth"
+                )
+            })
+        })
+    {
+        bail!("此 Claude Code 原生字段尚不能等价托管，请保留原客户端配置或显式建立托管连接");
+    }
+    if agent == Agent::Claude
+        && (raw
+            .get("url")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.contains("${"))
+            || raw
+                .get("headers")
+                .and_then(Value::as_object)
+                .is_some_and(|headers| {
+                    headers
+                        .values()
+                        .any(|value| value.as_str().is_some_and(|value| value.contains("${")))
+                }))
+    {
+        bail!(
+            "Claude Code 远程变量有客户端专属的凭据过滤，尚不能等价托管；请保留原生配置或显式建立托管连接"
+        );
+    }
     for field in ["env", "headers", "http_headers", "env_http_headers"] {
         if let Some(value) = raw.get(field)
             && !value
@@ -568,7 +609,7 @@ fn normalize_context(raw: &Value, agent: Agent, project: Option<&Path>) -> Resul
             .entry(key.clone())
             .or_insert_with(|| format!("${{env:{key}}}"));
     }
-    let definition = Definition {
+    let mut definition = Definition {
         command: raw
             .get("command")
             .and_then(Value::as_str)
@@ -619,6 +660,9 @@ fn normalize_context(raw: &Value, agent: Agent, project: Option<&Path>) -> Resul
         origin_project: project.map(Path::to_path_buf),
         origin_layout: None,
     };
+    if definition.original_agent == Some(Agent::Claude) {
+        crate::json_config::claude_variables(&mut definition, true)?;
+    }
     validate(&definition)?;
     Ok(definition)
 }
@@ -1014,14 +1058,9 @@ pub fn render(source: &Source, text: &str, name: &str, value: Option<&Value>) ->
             let mut path = Vec::new();
             if source.scope.as_deref() == Some("local") {
                 path.push("projects".to_owned());
-                path.push(
-                    source
-                        .project
-                        .as_ref()
-                        .context("local 来源缺少项目目录")?
-                        .to_string_lossy()
-                        .into_owned(),
-                );
+                path.push(claude_project_json_key(
+                    source.project.as_ref().context("local 来源缺少项目目录")?,
+                ));
             }
             path.push("mcpServers".into());
             crate::json_config::render(text, false, &path, name, value)

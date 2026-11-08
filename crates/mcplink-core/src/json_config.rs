@@ -155,6 +155,64 @@ pub fn render(
     Ok(text)
 }
 
+fn claude_string(input: &str, importing: bool) -> Result<String> {
+    let mut output = String::new();
+    let mut rest = input;
+    while let Some(start) = rest.find("${") {
+        output.push_str(&rest[..start]);
+        let tail = &rest[start + 2..];
+        let end = tail.find('}').context("变量引用不完整")?;
+        let reference = &tail[..end];
+        let name_and_default = if importing {
+            reference
+        } else {
+            reference.strip_prefix("env:").unwrap_or(reference)
+        };
+        let (name, fallback) = name_and_default
+            .split_once(":-")
+            .map_or((name_and_default, None), |(name, fallback)| {
+                (name, Some(fallback))
+            });
+        if name.is_empty()
+            || !name.bytes().enumerate().all(|(index, c)| {
+                c == b'_' || c.is_ascii_alphabetic() || (index > 0 && c.is_ascii_digit())
+            })
+            || fallback.is_some_and(|value| value.contains("${"))
+        {
+            bail!("此变量引用尚不能等价转换，请保留原生配置或使用共享接入");
+        }
+        if !importing
+            && reference == name_and_default
+            && matches!(
+                name,
+                "userHome" | "workspaceFolder" | "workspaceFolderBasename"
+            )
+        {
+            bail!("托管项目变量不能直接写入 Claude Code，请使用共享接入");
+        }
+        output.push_str(if importing { "${env:" } else { "${" });
+        output.push_str(name_and_default);
+        output.push('}');
+        rest = &tail[end + 1..];
+    }
+    output.push_str(rest);
+    Ok(output)
+}
+
+pub(crate) fn claude_variables(def: &mut Definition, importing: bool) -> Result<()> {
+    for value in def
+        .command
+        .iter_mut()
+        .chain(def.url.iter_mut())
+        .chain(def.args.iter_mut())
+        .chain(def.env.values_mut())
+        .chain(def.headers.values_mut())
+    {
+        *value = claude_string(value, importing)?;
+    }
+    Ok(())
+}
+
 pub fn claude_native(def: &Definition, source: &Source) -> Result<Value> {
     if !def.enabled {
         bail!("Claude Code 不支持服务条目的 enabled 字段，请在原客户端 /mcp 中维护项目启停");
@@ -188,6 +246,14 @@ pub fn claude_native(def: &Definition, source: &Source) -> Result<Value> {
     {
         bail!("来源含 Claude Code 尚未适配的字段，请使用共享接入");
     }
+    if def.url.as_ref().is_some_and(|value| value.contains("${"))
+        || def.headers.values().any(|value| value.contains("${"))
+    {
+        bail!("Claude Code 远程变量过滤与托管层不同，请使用共享接入");
+    }
+    let mut encoded = def.clone();
+    claude_variables(&mut encoded, false)?;
+    let def = &encoded;
     let mut value = if def.original_agent == Some(Agent::Claude) {
         def.original.clone()
     } else {
