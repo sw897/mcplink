@@ -12,10 +12,11 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+#[cfg(not(windows))]
+use std::process::Stdio;
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Stdio,
     sync::Arc,
     time::Duration,
 };
@@ -136,7 +137,10 @@ pub async fn daemon(data: PathBuf, port: Option<u16>) -> Result<()> {
         .with_state(state);
     axum::serve(listener, router)
         .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
+            if tokio::signal::ctrl_c().await.is_err() {
+                // A Windows background process can have no console to receive Ctrl-C.
+                std::future::pending::<()>().await;
+            }
         })
         .await
         .context("本地后台已中断")?;
@@ -151,6 +155,85 @@ pub struct Client {
     key: String,
     http: reqwest::Client,
     management_api: u64,
+}
+
+#[cfg(windows)]
+fn spawn_background(executable: &Path, data: &Path) -> Result<()> {
+    use std::{ffi::OsStr, os::windows::ffi::OsStrExt, ptr};
+    use windows_sys::Win32::{
+        Foundation::CloseHandle,
+        System::Threading::{CREATE_NO_WINDOW, CreateProcessW, PROCESS_INFORMATION, STARTUPINFOW},
+    };
+
+    // Quote Windows argv without converting Unicode paths through UTF-8.
+    fn quoted(value: &OsStr) -> Result<Vec<u16>> {
+        let mut output = vec![b'"' as u16];
+        let mut slashes = 0;
+        for character in value.encode_wide() {
+            if character == 0 {
+                bail!("后台路径包含无效字符");
+            }
+            if character == b'\\' as u16 {
+                slashes += 1;
+                continue;
+            }
+            if character == b'"' as u16 {
+                output.extend(std::iter::repeat_n(b'\\' as u16, slashes * 2 + 1));
+            } else {
+                output.extend(std::iter::repeat_n(b'\\' as u16, slashes));
+            }
+            output.push(character);
+            slashes = 0;
+        }
+        output.extend(std::iter::repeat_n(b'\\' as u16, slashes * 2));
+        output.push(b'"' as u16);
+        Ok(output)
+    }
+
+    let application: Vec<_> = executable
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let mut command = quoted(executable.as_os_str())?;
+    command.extend(" daemon --data-dir ".encode_utf16());
+    command.extend(quoted(data.as_os_str())?);
+    command.push(0);
+    if command.len() > 32_767 {
+        bail!("后台命令路径过长");
+    }
+    let startup = STARTUPINFOW {
+        cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+        ..Default::default()
+    };
+    let mut process = PROCESS_INFORMATION::default();
+    // SAFETY: All pointers live through CreateProcessW; command is writable,
+    // NUL-terminated UTF-16. The daemon needs no inherited handles, including
+    // extra capture-pipe copies left by PowerShell/.NET or other parent hosts.
+    let started = unsafe {
+        CreateProcessW(
+            application.as_ptr(),
+            command.as_mut_ptr(),
+            ptr::null(),
+            ptr::null(),
+            0,
+            CREATE_NO_WINDOW,
+            ptr::null(),
+            ptr::null(),
+            &startup,
+            &mut process,
+        )
+    };
+    if started == 0 {
+        return Err(std::io::Error::last_os_error()).context("无法启动独立后台程序");
+    }
+    // SAFETY: Success returned two owned handles; closing them does not stop
+    // the process. No task waits on these handles after startup.
+    unsafe {
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+    }
+    Ok(())
 }
 
 impl Client {
@@ -191,41 +274,19 @@ impl Client {
         }
         let executable = std::env::current_exe().context("无法定位后台程序")?;
         #[cfg(windows)]
+        spawn_background(&executable, &data)?;
+        #[cfg(not(windows))]
         {
-            use windows_sys::Win32::Foundation::{
-                HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
-            };
-            use windows_sys::Win32::System::Console::{
-                GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
-            };
-
-            // Stdio::null replaces the daemon's standard streams, but Windows
-            // otherwise also inherits the CLI's original capture pipe handles.
-            // Explicit child stdio still works: Command duplicates those handles.
-            for stream in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
-                // SAFETY: These are borrowed process handles. Clearing inheritance
-                // neither closes them nor changes their input/output behavior.
-                unsafe {
-                    let handle = GetStdHandle(stream);
-                    if !handle.is_null()
-                        && handle != INVALID_HANDLE_VALUE
-                        && SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) == 0
-                    {
-                        return Err(std::io::Error::last_os_error())
-                            .context("无法隔离后台程序的输入输出句柄");
-                    }
-                }
-            }
+            let child = tokio::process::Command::new(executable)
+                .args(["daemon", "--data-dir"])
+                .arg(&data)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .context("无法启动后台程序")?;
+            drop(child);
         }
-        let child = tokio::process::Command::new(executable)
-            .args(["daemon", "--data-dir"])
-            .arg(&data)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("无法启动后台程序")?;
-        drop(child);
         for _ in 0..80 {
             tokio::time::sleep(Duration::from_millis(150)).await;
             if let Ok(client) = Self::read(&data).await {

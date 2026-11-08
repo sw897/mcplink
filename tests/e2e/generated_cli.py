@@ -43,8 +43,19 @@ class GeneratedCli(ToolCalls):
         name=json.loads(manifest.read_text())["name"]
         executable=manifest.parent/(name+(".ps1" if os.name=="nt" else ""))
         command=["powershell.exe","-NoProfile","-ExecutionPolicy","Bypass","-File",str(executable)] if os.name=="nt" else [str(executable)]
-        result=subprocess.run([*command,*args],input=json.dumps(value) if value is not None else raw or "",
-                              env=env or self.generated_env,capture_output=True,text=True,timeout=90)
+        process=subprocess.Popen([*command,*args],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+                                 env=env or self.generated_env,text=True)
+        try:
+            stdout,stderr=process.communicate(json.dumps(value) if value is not None else raw or "",timeout=30)
+        except subprocess.TimeoutExpired:
+            # An inherited pipe can keep communicate waiting after its parent exits.
+            # Stop only daemons belonging to this synthetic fixture before draining it.
+            for data in [self.data,*self.extra_data]:
+                try: os.kill(json.loads((data/"runtime.json").read_text())["pid"],signal.SIGTERM)
+                except (FileNotFoundError,ProcessLookupError): pass
+            process.kill();process.communicate(timeout=10)
+            raise AssertionError("Generated launcher exceeded 30 seconds; fixture daemons stopped")
+        result=subprocess.CompletedProcess(command,process.returncode,stdout,stderr)
         self.commands.append({"entry":"generated PowerShell" if os.name=="nt" else "generated POSIX", "arguments_sha256":hashlib.sha256(json.dumps(args).encode()).hexdigest(),"exit_status":result.returncode,"stdout_sha256":hashlib.sha256(result.stdout.encode()).hexdigest()})
         assert result.returncode==exit_status,(args,result.returncode,result.stdout,result.stderr)
         assert not result.stderr,(args,result.stderr)
@@ -169,7 +180,7 @@ class GeneratedCli(ToolCalls):
         assert self.launch(manifest,"read_document","--id","weekly-fixture")["output"]["isError"] is False
         self.passed("changed schemas and current filters refuse dispatch; credential updates preserve existing generated files")
 
-        foreign=self.record/"foreign-data";self.extra_data.append(foreign)
+        foreign=self.record/"foreign 数据 with spaces";self.extra_data.append(foreign)
         foreign_env=self.generated_env|{"MCPLINK_DATA_DIR":str(foreign)}
         before=self.stats()["calls"]
         failed=self.launch(manifest,"read_document","--id","weekly-fixture",env=foreign_env,exit_status=1)
