@@ -191,6 +191,8 @@ class GeneratedCli(ToolCalls):
         self.launch(manifest,"read_document","--id","weekly-fixture",exit_status=1)
         self.cli("cli","rebind",str(manifest),"--connection",connection)
         assert self.launch(manifest,"read_document","--id","weekly-fixture")["output"]["isError"] is False
+        lock=manifest.with_name("."+manifest.name+".lock")
+        assert lock.is_file() and lock.stat().st_size==0
         self.passed("another dataset requires explicit rebind, validates every selected contract and never falls back by display name")
 
         slow=self.save("slow_rebind",url=f"http://127.0.0.1:{self.port}/mcp-slow")
@@ -209,6 +211,10 @@ class GeneratedCli(ToolCalls):
         self.definition(slow,url=f"http://127.0.0.1:{self.port}/mcp-generated-changed")
         self.cli("cli","rebind",str(manifest),"--connection",slow,exit_status=1)
         assert manifest.read_bytes()==original+b"\n "
+        lock.write_text("preserve unknown lock content")
+        self.cli("cli","rebind",str(manifest),"--connection",connection,exit_status=1)
+        assert lock.read_text()=="preserve unknown lock content" and manifest.read_bytes()==original+b"\n "
+        lock.write_bytes(b"")
         self.passed("rebind refuses changed tool contracts and preserves a concurrent manifest edit")
 
         disposable=self.save("disposable_generated")

@@ -479,12 +479,25 @@ try {{
 
 pub async fn rebind(client: &Client, path: &Path, connection: &str) -> Result<Value> {
     let path = checked_path(path)?;
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&path)
-        .context("无法打开 CLI 清单")?;
+    let mut lock_name = OsString::from(".");
+    lock_name.push(path.file_name().context("CLI 清单位置无效")?);
+    lock_name.push(".lock");
+    let lock_path = checked_path(&path.with_file_name(lock_name))?;
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(lock_path).context("无法打开 CLI 重绑锁文件")?;
     fs2::FileExt::try_lock_exclusive(&file).context("CLI 清单正被其他进程使用")?;
+    if !file.metadata()?.is_file() || file.metadata()?.len() != 0 {
+        bail!("CLI 锁文件存在异常内容，已保留原文件");
+    }
+    // Keep an empty, stable lock file beside the manifest. LockFileEx is
+    // mandatory on Windows; locking the manifest itself blocks its readers
+    // and editors. Do not unlink this lock on release (that races waiters).
     let original = read_bytes(&path)?;
     let mut manifest = Manifest::read(&path)?;
     let names: Vec<_> = manifest

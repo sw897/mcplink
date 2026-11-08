@@ -137,7 +137,7 @@ mcplink cli inspect ./notes-cli/notes.mcplink.json
 mcplink cli rebind ./notes-cli/notes.mcplink.json --connection LOCAL_CONNECTION_ID
 ```
 
-重新绑定核对所有选定工具的 Schema 摘要及参数契约，原子更新清单，并检测并发修改。原连接丢失时不会按显示名选择其他账号。上游输入 Schema 的任何变化均要求重新核对、重新生成；工具筛选、连接停用和 Gateway 暂停即时生效。托管凭据更新、OAuth 刷新和后台重启不要求重新生成。
+重新绑定核对所有选定工具的 Schema 摘要及参数契约，原子更新清单，并检测并发修改。会在清单旁保留空的 `.清单文件名.lock`，用于跨数据目录的并发互斥；移动入口时无需复制它，操作期间不要删除。原连接丢失时不会按显示名选择其他账号。上游输入 Schema 的任何变化均要求重新核对、重新生成；工具筛选、连接停用和 Gateway 暂停即时生效。托管凭据更新、OAuth 刷新和后台重启不要求重新生成。
 
 终端和生成入口使用同样的任务授权边界，不继承原生 Agent 的确认步骤；工具结果不确定时先核对，入口不自动重发。
 
