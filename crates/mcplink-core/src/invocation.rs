@@ -190,7 +190,7 @@ pub async fn call(
     Ok(json!({"connectionId":id,"tool":name,"schemaHash":hash,"output":output}))
 }
 
-fn validate(schema: &Value, input: &Value) -> Result<()> {
+pub(crate) fn validator(schema: &Value) -> Result<jsonschema::Validator> {
     if !schema.is_object() || serde_json::to_vec(schema)?.len() > 1024 * 1024 {
         bail!(ToolFailure::new(ToolErrorCode::InvalidToolSchema));
     }
@@ -200,9 +200,13 @@ fn validate(schema: &Value, input: &Value) -> Result<()> {
     if schema.get("$schema").is_none() {
         options = options.with_draft(jsonschema::Draft::Draft202012);
     }
-    let validator = options
+    options
         .build(schema)
-        .map_err(|_| ToolFailure::new(ToolErrorCode::InvalidToolSchema))?;
+        .map_err(|_| ToolFailure::new(ToolErrorCode::InvalidToolSchema).into())
+}
+
+fn validate(schema: &Value, input: &Value) -> Result<()> {
+    let validator = validator(schema)?;
     let issues: Vec<_> = validator
         .iter_errors(input)
         .take(16)

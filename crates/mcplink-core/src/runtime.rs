@@ -57,7 +57,7 @@ async fn health(State(state): State<ServerState>, headers: HeaderMap) -> impl In
     (
         StatusCode::OK,
         Json(
-            json!({"application":"mcplink","instance":state.info.instance,"version":env!("CARGO_PKG_VERSION"),"managementApi":2}),
+            json!({"application":"mcplink","instance":state.info.instance,"version":env!("CARGO_PKG_VERSION"),"managementApi":3}),
         ),
     )
 }
@@ -236,6 +236,9 @@ impl Client {
     }
 
     pub async fn call(&self, method: &str, params: Value) -> Result<Value> {
+        if method == "workspace.identity" && self.management_api < 3 {
+            bail!("旧后台不支持当前 CLI 生成命令；请退出桌面并停止旧后台，再使用同一构建重试");
+        }
         if matches!(method, "tools.describe" | "tools.call") && self.management_api < 2 {
             bail!("旧后台不支持当前工具调用命令；请退出桌面并停止旧后台，再使用同一构建重试");
         }

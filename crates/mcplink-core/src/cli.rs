@@ -1,11 +1,12 @@
 use anyhow::{Context, Result, bail};
 use clap::{ArgAction, CommandFactory, Parser, Subcommand};
 use mcplink_core::{
-    config,
+    config, generated,
     runtime::{self, Client},
 };
 use serde_json::{Value, json};
 use std::{
+    ffi::OsString,
     fs,
     io::{IsTerminal, Write},
     path::PathBuf,
@@ -44,6 +45,11 @@ enum Command {
         /// 可选的固定工具 Schema 摘要；不匹配时拒绝派发
         #[arg(long)]
         schema_hash: Option<String>,
+    },
+    /// 生成、检查、重新绑定或运行不含凭据的轻量工具 CLI
+    Cli {
+        #[command(subcommand)]
+        command: CliCommand,
     },
     /// 管理 Codex/Hermes 和 Claude Code 只读配置来源
     Sources {
@@ -110,6 +116,36 @@ enum SourceCommand {
         path: PathBuf,
         #[arg(long)]
         label: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum CliCommand {
+    /// 为明确选定的工具生成 POSIX/Windows 入口和版本化清单
+    Generate {
+        id: String,
+        #[arg(long)]
+        name: String,
+        /// 尚不存在的目录；父目录须已存在
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long, required = true)]
+        tool: Vec<String>,
+    },
+    /// 离线检查清单，不打开凭据库或后台
+    Inspect { manifest: PathBuf },
+    /// 核对全部工具契约后，显式绑定当前数据目录的连接
+    Rebind {
+        manifest: PathBuf,
+        #[arg(long)]
+        connection: String,
+    },
+    /// 生成入口使用的执行命令；-- 后传递工具子命令和参数
+    Run {
+        #[arg(long)]
+        manifest: PathBuf,
+        #[arg(last = true)]
+        arguments: Vec<OsString>,
     },
 }
 
@@ -356,6 +392,37 @@ async fn execute(command: Command, data: PathBuf) -> Result<Value, Failure> {
         Command::Skill {
             command: SkillCommand::Install { agent },
         } => return install_skill(&agent).map_err(Failure::operation),
+        Command::Cli { command } => {
+            return match command {
+                CliCommand::Inspect { manifest } => generated::Manifest::read(&manifest)
+                    .and_then(|manifest| Ok(serde_json::to_value(manifest)?))
+                    .map_err(Failure::operation),
+                CliCommand::Generate {
+                    id,
+                    name,
+                    output,
+                    tool,
+                } => {
+                    generated::validate_selection(&name, &tool).map_err(Failure::input)?;
+                    let client = Client::connect(data).await.map_err(Failure::operation)?;
+                    generated::generate(&client, &id, name, &output, &tool)
+                        .await
+                        .map_err(Failure::operation)
+                }
+                CliCommand::Rebind {
+                    manifest,
+                    connection,
+                } => {
+                    // Validate locally before starting a backend or reading credentials.
+                    generated::Manifest::read(&manifest).map_err(Failure::operation)?;
+                    let client = Client::connect(data).await.map_err(Failure::operation)?;
+                    generated::rebind(&client, &manifest, &connection)
+                        .await
+                        .map_err(Failure::operation)
+                }
+                CliCommand::Run { .. } => unreachable!(),
+            };
+        }
         Command::Status => ("snapshot", json!({}), None, false),
         Command::Call {
             id,
@@ -551,6 +618,66 @@ async fn call(data: &std::path::Path, method: &str, mut params: Value) -> Result
         .await
 }
 
+async fn generated_run(
+    data: PathBuf,
+    path: PathBuf,
+    args: Vec<OsString>,
+) -> Result<Option<Value>, Failure> {
+    let manifest = generated::Manifest::read(&path).map_err(Failure::operation)?;
+    let (tool, arguments) = match manifest.parse(args).map_err(Failure::input)? {
+        generated::Parsed::Help(help) => {
+            println!("{help}");
+            return Ok(None);
+        }
+        generated::Parsed::Call { tool, arguments } => (tool, arguments),
+    };
+    let arguments = match arguments {
+        Some(value) => value,
+        None => stdin_json().await.map_err(Failure::input)?,
+    };
+    if serde_json::to_vec(&arguments)
+        .map_err(|_| Failure::input(anyhow::anyhow!("参数无法编码")))?
+        .len() as u64
+        > INPUT_LIMIT
+    {
+        return Err(Failure::input(anyhow::anyhow!("参数超过 8 MiB")));
+    }
+    let client = Client::connect(data).await.map_err(Failure::operation)?;
+    let value = generated::invoke(&client, &manifest, &tool, arguments)
+        .await
+        .map_err(Failure::operation)?;
+    if value["output"].get("rpcError").is_some() || value["output"]["isError"] == true {
+        return Err(Failure {
+            code: "upstream_failed",
+            message: "上游工具返回失败，执行结果需核对；不要自动重试".into(),
+            result: Some(value),
+        });
+    }
+    Ok(Some(value))
+}
+
+fn print_result(result: Result<Option<Value>, Failure>) -> i32 {
+    match result {
+        Ok(Some(value)) => {
+            println!("{}", json!({"ok":value}));
+            0
+        }
+        Ok(None) => 0,
+        Err(failure) => {
+            let mut response = json!({"error":{"code":failure.code,"message":failure.message}});
+            if let Some(result) = failure.result {
+                response["result"] = result;
+            }
+            println!("{response}");
+            if matches!(failure.code, "invalid_input" | "invalid_tool_arguments") {
+                2
+            } else {
+                1
+            }
+        }
+    }
+}
+
 pub async fn run() -> i32 {
     let args = match Args::try_parse() {
         Ok(args) => args,
@@ -585,26 +712,17 @@ pub async fn run() -> i32 {
     let result = match args.command {
         Command::Daemon { port } => runtime::daemon(data, port).await,
         Command::Bridge { connection } => crate::bridge(data, connection).await,
+        Command::Cli {
+            command:
+                CliCommand::Run {
+                    manifest,
+                    arguments,
+                },
+        } => {
+            return print_result(generated_run(data, manifest, arguments).await);
+        }
         command => {
-            return match execute(command, data).await {
-                Ok(value) => {
-                    println!("{}", json!({"ok":value}));
-                    0
-                }
-                Err(failure) => {
-                    let mut response =
-                        json!({"error":{"code":failure.code,"message":failure.message}});
-                    if let Some(result) = failure.result {
-                        response["result"] = result;
-                    }
-                    println!("{response}");
-                    if matches!(failure.code, "invalid_input" | "invalid_tool_arguments") {
-                        2
-                    } else {
-                        1
-                    }
-                }
-            };
+            return print_result(execute(command, data).await.map(Some));
         }
     };
     match result {

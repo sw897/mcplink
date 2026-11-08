@@ -693,6 +693,23 @@ impl Engine {
     pub async fn rpc(self: &Arc<Self>, method: &str, p: Value) -> Result<Value> {
         match method {
             "snapshot" => self.snapshot(),
+            "workspace.identity" => {
+                let _guard = self.mutation.lock().await;
+                let path = self.data.join("dataset-id");
+                let id = match fs::read_to_string(&path) {
+                    Ok(id) => {
+                        uuid::Uuid::parse_str(&id).context("数据目录身份无效，请核对本地数据")?;
+                        id
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        let id = uuid::Uuid::new_v4().to_string();
+                        private_write(&path, id.as_bytes())?;
+                        id
+                    }
+                    Err(_) => bail!("无法读取数据目录身份"),
+                };
+                Ok(json!({"id":id}))
+            }
             "sources.add" => {
                 let _guard = self.mutation.lock().await;
                 let agent: Agent =

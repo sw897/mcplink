@@ -2,7 +2,7 @@
 
 更新于 2026-11-08。当前基线为已公开发布的 [v0.1.0 预览版](https://github.com/sw897/mcplink/releases/tag/v0.1.0)，提供 macOS Apple Silicon 与 Windows x64 安装包。具体支持范围以[兼容说明](docs/compatibility.md)和实际验证结果为准。
 
-通用 CLI 工具调用增强已实现，当前正在执行阶段审查和两平台验收；通过后按连接生成轻量 CLI。签名、公证和平台实机验收按所需环境单独跟进，不作为 CLI 开发的前置条件。后续版本号和发布日期在验收后确定。
+通用 CLI 工具调用已通过阶段审查与两平台隔离验收，按连接生成轻量 CLI 已实现，正在执行阶段审查和两平台验收。签名、公证和平台实机验收按所需环境单独跟进，不作为 CLI 开发的前置条件。后续版本号和发布日期在验收后确定。
 
 ## 已完成：v0.1.0 预览版
 
@@ -18,8 +18,8 @@ macOS 包使用 ad-hoc 签名，尚无 Developer ID 和公证；Windows 包未�
 
 | 顺序 | 任务 | 完成条件 | 状态 |
 | --- | --- | --- | --- |
-| 1 | 完善通用 CLI 工具调用 | 工具发现、参数帮助与校验、实际调用、错误和退出码契约明确，并通过实际 CLI 入口验收 | 已实现；本地 60 项隔离场景通过，远端两平台 CI 待验证 |
-| 2 | 按连接生成轻量 CLI | 第一阶段契约稳定；生成入口可调用选定工具，支持显式重新绑定并处理参数契约变化 | 依赖第一阶段 |
+| 1 | 完善通用 CLI 工具调用 | 工具发现、参数帮助与校验、实际调用、错误和退出码契约明确，并通过实际 CLI 入口验收 | 完成；[macOS、Windows 各 60 项通过](https://github.com/sw897/mcplink/actions/runs/42436531934) |
+| 2 | 按连接生成轻量 CLI | 第一阶段契约稳定；生成入口可调用选定工具，支持显式重新绑定并处理参数契约变化 | 已实现；本地生成入口 15 项通过，远端两平台待验证 |
 | 3 | 补齐 GitHub 远程 MCP 互操作 | 复现当前不兼容，分别验证传输、手工 Token 与 OAuth，完成只读调用及共享回归 | 首个远程兼容目标，待实施 |
 | 4 | 扩展 Agent 配置适配 | Claude Code 的可写作用域及 OpenCode 的版本化配置完成扫描、预览、应用与恢复 | Claude Code → OpenCode，其他 Agent 按需求排期 |
 | 5 | 验证真实上游认证与刷新 | 腾讯会议、飞书、IMA 按实际入口记录认证归属、调用、到期、更新/刷新及撤销结论 | 依赖官方入口、应用权限与授权账号 |
@@ -28,7 +28,7 @@ macOS 包使用 ad-hoc 签名，尚无 Developer ID 和公证；Windows 包未�
 
 ## MCP 工具的 CLI 调用与生成
 
-现有 `connections tools`、`mcp describe` 和 `mcp request --stdin` 提供底层发现与请求入口；通用调用增强已进入验收，CLI 生成仍待实施。两阶段复用现有管理核心、后台、托管连接和系统凭据库，让同一条 MCP 连接可供原生 Agent、终端、脚本和 Skill 使用。新增命令暂未包含在 v0.1.0 发布包中，以当前程序的 `schema` 为准。
+现有 `connections tools`、`mcp describe` 和 `mcp request --stdin` 提供底层发现与请求入口；通用调用增强已验收，CLI 生成已进入验收。两阶段复用现有管理核心、后台、托管连接和系统凭据库，让同一条 MCP 连接可供原生 Agent、终端、脚本和 Skill 使用。新增命令暂未包含在 v0.1.0 发布包中，以当前程序的 `schema` 为准。
 
 ### 第一阶段：完善通用 CLI 调用
 
@@ -50,7 +50,7 @@ macOS 包使用 ad-hoc 签名，尚无 Developer ID 和公证；Windows 包未�
 
 ### 第二阶段：按连接生成轻量 CLI
 
-在通用调用契约稳定后，把选定 MCP 工具映射为子命令及参数，生成可供 Skill 和脚本使用的专用命令入口。生成的 CLI 依赖本机 mcplink，调用继续交给同一个后台。
+已增加 `cli generate`、`cli inspect`、`cli rebind` 与 `cli run`，把选定 MCP 工具映射为子命令及参数，输出 POSIX/PowerShell 入口和版本化清单。生成的 CLI 依赖本机 mcplink，调用继续交给同一个后台。具体契约见 [CLI 指南](docs/agent-cli.md)，失败方式见[端到端验收清单](tests/e2e/generated-cli-failure-modes.md)。
 
 - 支持选择要导出的工具，由 Schema 生成子命令、参数和 `--help`；后台仍执行连接当前的工具筛选。
 - 生成产物只保存连接引用、工具清单、生成器版本和参数契约摘要，不包含 Token、OAuth grant 或完整敏感连接定义。

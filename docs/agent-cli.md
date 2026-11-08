@@ -64,6 +64,8 @@ Cargo 默认将程序放入 `~/.cargo/bin`，该目录需在 PATH 中。也可�
 | `mcp describe ID` / `mcp request ID --stdin` | 查看上游能力，或派发一条协议请求，不自动重试。 |
 | `connections tools ID --tool TOOL` | 源码开发能力：发现指定工具，返回 Schema、描述和 `schemaHash`。 |
 | `call ID TOOL --stdin [--schema-hash HASH]` | 源码开发能力：校验参数后调用精确工具，不自动重试。 |
+| `cli generate ID --name NAME --output NEW_DIRECTORY --tool TOOL ...` | 源码开发能力：为明确选定的工具生成轻量入口。 |
+| `cli inspect MANIFEST` / `cli rebind MANIFEST --connection ID` | 离线检查清单，或核对契约后显式重新绑定当前数据目录中的连接。 |
 | `skill show` / `skill install --agent AGENT` | 导出或安装 mcplink 自身管理 Skill。 |
 
 `AGENT` 为 `codex`、`hermes`、`claude`。`ACTION` 为 `upsert`、`disable`、`enable`、`remove`。目标使用来源 ID（如 `hermes:user`），连接使用导入或保存返回的托管 ID。
@@ -108,6 +110,36 @@ response = json.loads(result.stdout)
 `--schema-hash` 可固定发现时的输入 Schema 摘要；不匹配时在工具派发前失败。发现期间连接修订变化同样失败。固定摘要采用保守策略：输入 Schema 的任何变化均需重新核对，即使变化可能兼容。
 
 终端调用不继承原生 Agent 的工具确认流程。按当前任务授权核对工具与参数，不能把工具的 `readOnlyHint` 当作授权依据。超时或连接中断后先核对执行结果，不自动重发。
+
+## 按连接生成 CLI（源码开发能力）
+
+该能力未包含在 v0.1.0 发布包中；先核对当前二进制的 `schema`，并让后台使用同一构建。
+
+```sh
+mcplink cli generate CONNECTION_ID --name notes --output ./notes-cli --tool search_documents --tool read_document
+./notes-cli/notes --help
+./notes-cli/notes read_document --help
+./notes-cli/notes read_document --id example-document
+mcplink cli inspect ./notes-cli/notes.mcplink.json
+```
+
+输出目录须尚不存在、父目录须已存在；生成器拒绝符号链接、覆盖和并发占用。目录包含 POSIX 入口 `notes`、Windows PowerShell 入口 `notes.ps1` 和 `notes.mcplink.json`，移动时一起保留。入口使用 PATH 中的 `mcplink`；可用环境变量 `MCPLINK_BIN` 指定可信的二进制完整路径，不导出该路径到清单。Windows 可用系统 PowerShell 运行 `powershell.exe -NoProfile -File ./notes-cli/notes.ps1 read_document --id example-document`，脚本执行遵循系统策略。入口的帮助离线可用，实际调用才连接后台。
+
+参数名称保持原 Schema 属性名。`STRING` 原样传递，`BOOLEAN` 使用 `true`/`false`，`NUMBER`/`INTEGER` 使用 JSON 数值；数组、对象、联合类型以及未声明类型的参数使用一个 JSON 值，帮助标记为 `JSON`。不注入默认值、不转换类型。属性名与 `--stdin`、`--help` 等冲突或不能安全映射时，该工具只提供 `--stdin`。每次调用都由后台按当前 Schema 和工具筛选再次验证。
+
+`--stdin` 与参数标志互斥，输入同样是最多 8 MiB 的 JSON 对象，输出和退出码与 `call` 相同。含 Shell 特殊字符、业务正文或敏感值时优先经 stdin；自动化也可直接调用原生命令 `mcplink cli run --manifest MANIFEST -- TOOL --stdin`，用参数数组及 `input=` 传递，避免 Shell 解析。
+
+版本 1 清单只保存生成器版本、命令名称、数据目录 UUID、托管连接 ID、精确工具名、Schema 摘要及参数名称/类型/必填性；不保存端点、认证头、Token、OAuth grant、完整 Schema、描述、默认值、样例、枚举值或机器路径。清单不是授权凭据，仍须妥善管理命令和工具名称等元数据。检查命令拒绝未知字段、未知版本、损坏或超过 1 MiB 的清单。
+
+复制到另一个数据目录或设备后，先创建当地的托管连接，再显式重新绑定：
+
+```sh
+mcplink cli rebind ./notes-cli/notes.mcplink.json --connection LOCAL_CONNECTION_ID
+```
+
+重新绑定核对所有选定工具的 Schema 摘要及参数契约，原子更新清单，并检测并发修改。原连接丢失时不会按显示名选择其他账号。上游输入 Schema 的任何变化均要求重新核对、重新生成；工具筛选、连接停用和 Gateway 暂停即时生效。托管凭据更新、OAuth 刷新和后台重启不要求重新生成。
+
+终端和生成入口使用同样的任务授权边界，不继承原生 Agent 的确认步骤；工具结果不确定时先核对，入口不自动重发。
 
 ## 其他 stdin 对象
 
@@ -161,6 +193,7 @@ python3 tests/e2e/agent_cli.py --record artifacts/e2e/agent-cli/local-run
 python3 tests/e2e/run.py
 python3 tests/e2e/claude_sources.py --record artifacts/e2e/claude/local-run
 python3 tests/e2e/tool_calls.py --record artifacts/e2e/tool-calls/local-run
+python3 tests/e2e/generated_cli.py --record artifacts/e2e/generated-cli/local-run
 ```
 
 测试使用隔离配置、合成 MCP/OAuth 与 fixture Vault，不修改日常 Agent 配置。报告记录命令、退出码、断言和二进制／Skill 哈希，输出到忽略的 `artifacts/` 目录。默认测试不要求真实账号或模型登录；`run.py --native-agents` 可额外检查已安装的原生客户端命令。

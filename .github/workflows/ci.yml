@@ -61,6 +61,9 @@ jobs:
       - name: Isolated tool invocation acceptance
         timeout-minutes: 5
         run: python -u tests/e2e/tool_calls.py --record artifacts/e2e/ci-tools
+      - name: Isolated generated CLI acceptance
+        timeout-minutes: 5
+        run: python -u tests/e2e/generated_cli.py --record artifacts/e2e/ci-generated
       - name: macOS DMG acceptance
         if: runner.os == 'macOS'
         run: |
@@ -82,6 +85,7 @@ jobs:
             artifacts/e2e/ci-core/report.json
             artifacts/e2e/ci-claude/report.json
             artifacts/e2e/ci-tools/report.json
+            artifacts/e2e/ci-generated/report.json
             artifacts/e2e/ci-package/package-report.json
             artifacts/e2e/ci-installed/report.json
             artifacts/e2e/ci-manifest/release-manifest.json

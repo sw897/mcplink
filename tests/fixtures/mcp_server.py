@@ -27,6 +27,11 @@ CALL_TOOLS = [
     {"name":"external_schema","inputSchema":{"type":"object","properties":{"value":{"$ref":"http://127.0.0.1:9/private-schema"}}}},
 ]
 
+GENERATED_TOOLS = [
+    {"name":"odd_parameters","inputSchema":{"type":"object","properties":{"stdin":{"type":"string"},"odd/name":{"type":"boolean"}},"required":["stdin","odd/name"]}},
+    {"name":"schema_secrets","description":"synthetic-schema-description-private","inputSchema":{"type":"object","properties":{"value":{"type":"string","default":"synthetic-schema-default-private","examples":["synthetic-schema-example-private"],"enum":["synthetic-schema-enum-private"]}}}},
+]
+
 
 class LoopbackHTTPServer(ThreadingHTTPServer):
     def server_bind(self):
@@ -46,12 +51,16 @@ def handle(request, endpoint="", origin=""):
     if method == "ping":
         return {}
     if method == "tools/list":
-        if endpoint in {"/mcp-tools", "/mcp-slow", "/mcp-cycle", "/mcp-duplicates"}:
+        if endpoint in {"/mcp-tools", "/mcp-slow", "/mcp-cycle", "/mcp-duplicates", "/mcp-generated", "/mcp-generated-changed"}:
             if endpoint == "/mcp-cycle":
                 return {"tools":[],"nextCursor":"repeat"}
             if endpoint == "/mcp-duplicates":
                 return {"tools":[TOOLS[0],TOOLS[0]]}
             tools = TOOLS + CALL_TOOLS
+            if endpoint.startswith("/mcp-generated"):
+                tools = tools + GENERATED_TOOLS
+            if endpoint == "/mcp-generated-changed":
+                tools = [{**tool,"inputSchema":{**tool["inputSchema"],"properties":{**tool["inputSchema"]["properties"],"newOptionalFlag":{"type":"boolean"}}}} if tool["name"]=="read_document" else tool for tool in tools]
             if origin:
                 tools = [{**tool,"inputSchema":{"type":"object","properties":{"value":{"$ref":origin+"/schema-external"}}}} if tool["name"]=="external_schema" else tool for tool in tools]
             offset = int(params.get("cursor", "0"))
@@ -63,7 +72,7 @@ def handle(request, endpoint="", origin=""):
         if endpoint == "/mcp-rpc-error":
             raise ValueError("Synthetic upstream RPC failure")
         args = params.get("arguments", {})
-        if params.get("name") == "inspect_payload" and endpoint in {"/mcp-tools","/mcp-slow"}:
+        if params.get("name") in {"inspect_payload","odd_parameters","schema_secrets"} and endpoint in {"/mcp-tools","/mcp-slow","/mcp-generated","/mcp-generated-changed"}:
             output = {"received":args,"account":"synthetic-work-account"}
         elif params.get("name") == "search_documents":
             output = {"account": "synthetic-work-account", "documents": [{"id": DOCUMENT["id"], "title": DOCUMENT["title"]}]}
