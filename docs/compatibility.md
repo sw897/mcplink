@@ -7,7 +7,7 @@
 | 项目 | 范围 |
 | --- | --- |
 | macOS | Apple Silicon；已在 macOS 27 上验证本地构建与桌面流程。候选包使用 ad-hoc 签名，Developer ID 与公证尚待完成。 |
-| Windows | 提供 x64/NSIS 构建配置及 CI 场景；构建和测试状态以实际 CI 为准，不能代替桌面实机验收。 |
+| Windows | 提供 x64/NSIS 预览包；CI 已通过构建及 44 项核心/CLI/来源隔离场景，安装包内容、许可及编译路径已核验；桌面交互尚未实机验收。 |
 | Linux / Intel Mac | 未实机验收。 |
 | Codex | 用户 config.toml，以及手动添加的 TOML 来源；已检查 CLI 0.166.0、0.167.0 的相关入口。 |
 | Hermes | 用户 config.yaml，以及手动添加的 YAML 来源；已检查 0.23.0 的相关入口。 |

@@ -56,3 +56,13 @@ npm run release:macos -- --signed
 签名、安装包和 CLI 验收都通过后，工作流创建带产物的 **Release 草稿**；正式公开发布从草稿单独执行。工作流固定第三方 Action 的提交 SHA。Runner 平台依据 [GitHub 官方标签表](https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/choose-the-runner-for-a-job)。
 
 发布前核对待公开的源码、文档和 Git 历史，扫描凭据，避免纳入本机配置、账号验收记录或签名材料。根据两平台 CI 的实际结果记录兼容性；合成测试不能代替 Windows 桌面实机验收。
+
+## 公开预览版
+
+v0.1.0 以 GitHub **Pre-release** 发布，包含 macOS Apple Silicon 的 DMG、App ZIP、独立 CLI，以及 Windows x64 NSIS 安装包。macOS 为 ad-hoc 签名，尚无 Developer ID 和公证；Windows 未签名。预览版不运行要求 Apple 凭据的正式签名工作流，也不把合成测试描述为桌面实机验收。
+
+预览发布使用独立、干净的公开源码检出目录。固定最终提交后执行本地 macOS 发布入口，并等待同一提交的两平台 CI 完成。Windows 安装包从该次成功 CI 获取，解包核对 CLI、桌面程序、许可及编译路径；Tauri 会将桌面 PE 内唯一的 bundle-type 标记从 `UNK` 改为 `NSS`，其余内容应与构建清单一致。
+
+为两平台产物汇总 `release-manifest.json` 和 `SHA256SUMS`，记录相同的源码提交、逐文件哈希、平台验收范围与签名状态。公开清单只保留必要的版本、源码相对路径和产物元数据，不附测试 home、系统凭据库、机器绝对路径或原始日志。
+
+核对 tag 与源码版本一致后，先创建 Release 草稿并上传已验证产物；文件名与 README 下载链接一致，检查草稿及校验值后公开为 Pre-release。发布后重新下载附件并核对哈希，确认 tag 指向、Release 状态和下载入口。签名状态不同的后续产物须单独标明来源及校验值，不静默替换已发布文件。

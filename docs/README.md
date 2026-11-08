@@ -1,5 +1,7 @@
 # 项目文档
 
+- [English README](../README.md) · [中文项目说明与下载](../README.zh-CN.md)。
+- [v0.1.0 发布说明](releases/v0.1.0.md)：下载、平台范围与首版限制。
 - [Agent CLI](agent-cli.md)：无 UI 管理、命令契约和操作流程。
 - [架构](architecture.md)：当前分层与数据流。
 - [兼容与限制](compatibility.md)：当前支持范围、验证结果和平台限制。

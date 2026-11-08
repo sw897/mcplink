@@ -34,7 +34,7 @@
       "binaries/mcplink"
     ],
     "category": "DeveloperTool",
-    "shortDescription": "个人桌面 MCP 接入管理器",
+    "shortDescription": "Desktop MCP manager and local gateway for AI agents",
     "resources": [
       "../LICENSE",
       "../THIRD_PARTY_NOTICES.txt"

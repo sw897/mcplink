@@ -1,53 +1,86 @@
-# mcplink
+# mcplink — MCP Manager for AI Agents
 
-一个本地桌面 MCP 接入管理器。在同一处查看服务、维护托管凭据，并把已有连接接给常用的 AI Agent。
+[![CI](https://github.com/sw897/mcplink/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/sw897/mcplink/actions/workflows/ci.yml)
+[![Version](https://img.shields.io/badge/version-0.1.0%20preview-blue)](https://github.com/sw897/mcplink/releases/tag/v0.1.0)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-**当前状态：0.1.0 预览版，macOS Apple Silicon 优先。** Windows 构建与兼容性验证正在推进；本地 macOS 包使用 ad-hoc 签名，尚未完成 Developer ID 签名和公证。
+**English · [简体中文](README.zh-CN.md)**
 
-## 能做什么
+mcplink is a local desktop **MCP (Model Context Protocol) manager and gateway** for **Codex** and **Hermes**, with read-only discovery and import from **Claude Code**. Inspect MCP servers, manage credentials, and share connections across AI agents from a Tauri desktop app or a JSON CLI.
 
-- 盘点 Codex、Hermes 的原生 MCP 配置，以及 Claude Code 用户和已启用用户插件的只读来源。
-- 将已有服务接给另一个 Agent，按服务选择直连或共享本地 Gateway。
-- 在应用前预览配置变更，检查并发修改，备份并逐条恢复操作。
-- 用系统凭据库保存托管凭据，通过共享连接复用授权。
-- 从桌面或 JSON CLI 完成同一组管理操作。
-- 安装内置管理 Skill，让 Agent 通过 CLI 管理连接。
+本地 MCP 接入管理器：统一查看服务与账号，预览配置变更，并在多个 AI Agent 之间复用连接和托管凭据。
 
-Claude Code 来源当前只读；配置写入支持 Codex、Hermes。业务 Skill 的编写和版本分发由用户自行管理。完整边界见[兼容范围](docs/compatibility.md)。
+**v0.1.0 is a preview release for macOS Apple Silicon and Windows x64.** macOS packages are ad-hoc signed and not notarized; the Windows installer is unsigned. See [platform support](#platform-support) before installing.
 
-## 从源码运行
+## What you can do
 
-开发需要 Node.js、Rust、Python 3.11+，以及目标平台的原生构建工具。Node/Rust 的构建版本由 [.node-version](.node-version) 和 [rust-toolchain.toml](rust-toolchain.toml) 固定。macOS 需要 Xcode Command Line Tools。
+- **Discover existing MCP servers:** inspect native agent configuration and import selected connections into mcplink.
+- **Choose direct or shared access:** keep a connection in the agent's configuration or route it through the local MCP gateway. Shared connections continue working after the desktop window closes.
+- **Preview configuration changes:** review target files and edits before applying, detect concurrent changes, and restore individual operations from history.
+- **Reuse managed credentials:** store secrets in the system credential store and update shared authorization in one place.
+- **Use desktop or CLI:** the UI and JSON CLI share the same Rust management core, gateway, and transaction logic.
+- **Let agents manage connections:** install the bundled mcplink management Skill for supported agents.
+
+mcplink supports STDIO and Streamable HTTP MCP connections. Authentication and protocol details are documented in [compatibility](docs/compatibility.md) and [architecture](docs/architecture.md).
+
+## Download and install
+
+Get the [v0.1.0 release](https://github.com/sw897/mcplink/releases/tag/v0.1.0), including checksums and a source/artifact manifest.
+
+| Platform | Download |
+| --- | --- |
+| macOS · Apple Silicon | [DMG installer](https://github.com/sw897/mcplink/releases/download/v0.1.0/mcplink_0.1.0_aarch64.dmg) · [App ZIP](https://github.com/sw897/mcplink/releases/download/v0.1.0/mcplink_0.1.0_aarch64.app.zip) |
+| Windows · x64 | [NSIS installer](https://github.com/sw897/mcplink/releases/download/v0.1.0/mcplink_0.1.0_x64-setup.exe) |
+| macOS · Apple Silicon · CLI only | [CLI tar.gz](https://github.com/sw897/mcplink/releases/download/v0.1.0/mcplink_cli_0.1.0_aarch64-apple-darwin.tar.gz) |
+| SHA-256 checksums | [SHA256SUMS](https://github.com/sw897/mcplink/releases/download/v0.1.0/SHA256SUMS) |
+
+On macOS, copy `mcplink.app` from the DMG to `/Applications` before setting up shared connections. If macOS blocks this preview, review [Apple's guidance for opening an app from an unidentified developer](https://support.apple.com/en-us/102445). On Windows, run the x64 installer; Windows may display an unsigned-publisher warning.
+
+Compare the downloaded file's SHA-256 with its entry in `SHA256SUMS`:
 
 ```sh
-npm ci
-npm run desktop
+# macOS
+shasum -a 256 mcplink_0.1.0_aarch64.dmg
 ```
 
-`desktop` 会构建 Rust 核心和 sidecar，再启动 Tauri。
+```powershell
+# Windows PowerShell
+Get-FileHash .\mcplink_0.1.0_x64-setup.exe -Algorithm SHA256
+```
 
-## 使用流程
+Keep the application or standalone CLI in a permanent location. Shared agent configuration uses its absolute path; after moving it, preview and apply the connection again from the new location.
 
-1. 打开应用，核对扫描到的服务及配置来源。其他项目或 profile 可通过“配置来源”添加真实配置文件。
-2. 选中连接并检查工具。配置扫描本身不代表认证有效或运行中的 Agent 已加载。
-3. 选择目标 Agent、直连或共享模式，核对预览后应用。
-4. 按结果提示重新加载 MCP 或开启新的 Agent 会话。
+## Get started
 
-直连适用于本地工具或自行管理授权的服务。共享模式通过本机 Gateway 复用 mcplink 托管的连接；关闭桌面窗口后，已接入的共享服务仍可调用。应用移动后，需要重新预览并更新共享入口路径。
+1. Open mcplink and review discovered services and configuration sources. Add a real configuration file to include another project or profile.
+2. Select a connection and inspect its tools and authentication state.
+3. Choose the target agent and direct or shared mode, review the preview, then apply it.
+4. Reload MCP or start a new agent session as prompted.
 
-## CLI 与管理 Skill
+Configuration discovery and a successful file write do not prove that a running agent has loaded the connection.
 
-独立 CLI 可以从源码安装，也可直接使用 macOS app 内的 `Contents/MacOS/mcplink`：
+### Agent support
+
+| Agent | Discover and import | Write configuration |
+| --- | --- | --- |
+| Codex | User configuration and explicitly added TOML files | Yes |
+| Hermes | User configuration and explicitly added YAML files | Yes |
+| Claude Code | User configuration and enabled user plugins; explicitly added JSON files | Read-only |
+
+Claude Code configuration remains under Claude Code and plugin control. Project overrides, enterprise policies, and cloud connectors are not inferred. See [compatibility and limits](docs/compatibility.md).
+
+### CLI and management Skill
+
+Unpack the standalone CLI archive and keep its license files, or use the CLI inside the installed macOS app at `/Applications/mcplink.app/Contents/MacOS/mcplink`. With `mcplink` on your PATH:
 
 ```sh
-cargo install --path crates/mcplink-core --locked
 mcplink schema
 mcplink status
 mcplink skill install --agent codex
 mcplink skill install --agent hermes
 ```
 
-例如，将已有服务纳入管理后，预览接给另一个 Agent：
+Import an existing service and preview sharing it with another agent:
 
 ```sh
 mcplink connections import --source codex:user --name notes
@@ -56,48 +89,62 @@ mcplink changes preview --connection CONNECTION_ID --target hermes:user --mode s
 mcplink changes apply PLAN_ID
 ```
 
-`CONNECTION_ID` 和 `PLAN_ID` 使用前一步返回的值。凭据通过标准输入传入。命令、输入格式、退出码和恢复流程见 [CLI 指南](docs/agent-cli.md)。
+Replace `notes` with an existing server name; use the connection and plan IDs returned by the preceding commands. Pass credentials through stdin. The [CLI guide](docs/agent-cli.md) covers JSON input, semantic exit codes, MCP requests, and recovery. `mcplink schema` exposes the command contract.
 
-## 构建与验证
+## Platform support
+
+| Platform | v0.1.0 validation | Signing |
+| --- | --- | --- |
+| macOS Apple Silicon | Local desktop flow; CI build and 44 isolated core/CLI/source scenarios; DMG and 5 installed-app scenarios | Ad-hoc; no Developer ID or notarization |
+| Windows x64 | CI build and 44 isolated core/CLI/source scenarios; installer payload, license, and build-path checks | Unsigned |
+| Intel Mac / Linux | No release package or real-device acceptance | — |
+
+Windows desktop interaction, first Keychain access under a new macOS account, and downloaded-app Gatekeeper acceptance remain unverified. Isolated tests use synthetic MCP/OAuth services and fixture credentials; upstream services require their own compatibility checks. The preview has no automatic updater.
+
+## Build from source
+
+mcplink uses **React + TypeScript, Tauri 2, and Rust**. Install the Node.js and Rust versions pinned in [.node-version](.node-version) and [rust-toolchain.toml](rust-toolchain.toml), Python 3.11+, and the [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/). macOS requires Xcode Command Line Tools; Windows requires the MSVC build tools and WebView2.
+
+```sh
+git clone https://github.com/sw897/mcplink.git
+cd mcplink
+npm ci
+npm run desktop
+```
+
+For a standalone CLI built from the checkout:
+
+```sh
+cargo install --path crates/mcplink-core --locked
+```
+
+Build and verify:
 
 ```sh
 npm run build
 npm run check
 npm run bundle
-```
-
-macOS app 和 DMG 位于 `target/release/bundle/`。生成带验收结果、发布说明与 SHA256 清单的候选包：
-
-```sh
-npm run release:macos
-```
-
-无账号的隔离端到端验证：
-
-```sh
 python3 tests/e2e/run.py
 python3 tests/e2e/agent_cli.py --record artifacts/e2e/agent-cli/local
 python3 tests/e2e/claude_sources.py --record artifacts/e2e/claude/local
 ```
 
-先构建核心程序；这些测试默认使用 `target/debug/mcplink`，可用 `MCPLINK_E2E_BINARY` 指向其他构建。测试使用合成配置、MCP/OAuth 上游和 fixture Vault，不操作日常 Agent 配置。记录输出到忽略的 `artifacts/`。
+`npm run check` builds the debug sidecar used by the default tests. Set `MCPLINK_E2E_BINARY` to test another binary. The tests use isolated homes and synthetic services; reports go to the ignored `artifacts/` directory. `npm run release:macos` builds and validates macOS release candidates with checksums and normalized archives. See the [release guide](docs/release.md) for signing and publication.
 
-## 数据与认证
+## Data and credentials
 
-配置、管理数据和后台保存在本机。原生配置反映客户端现状，SQLite 保存管理元数据，托管 Secret 保存在系统凭据库。配置备份可能包含原客户端已有的敏感字段，应按本地凭据管理。
+Configuration, management metadata, and the gateway stay on your computer. SQLite stores management metadata; managed secrets use the system credential store. Configuration backups may retain sensitive fields already present in native client files. Connections contact their configured upstream services.
 
-标准 OAuth、手工 Token 和原生客户端登录由各自的维护方处理。支持一种认证流程并不代表任意上游服务均已兼容，详见[架构与认证](docs/architecture.md)。
+Standard OAuth, manual tokens, and native agent login have separate support boundaries. See [architecture and authentication](docs/architecture.md). Do not include real credentials, configurations, or databases in bug reports; report vulnerabilities through [SECURITY.md](SECURITY.md).
 
-## 项目文档
+## Documentation and contributing
 
-- [兼容范围与限制](docs/compatibility.md)
-- [架构](docs/architecture.md)
-- [CLI 与管理 Skill](docs/agent-cli.md)
-- [构建、签名与发布](docs/release.md)
-- [开发与贡献](CONTRIBUTING.md)
-- [路线图](ROADMAP.md)
-- [安全问题](SECURITY.md)
+Detailed guides are currently in Chinese:
 
-## 许可
+- [Compatibility](docs/compatibility.md) · [Architecture](docs/architecture.md) · [CLI guide](docs/agent-cli.md)
+- [Release guide](docs/release.md) · [v0.1.0 notes](docs/releases/v0.1.0.md)
+- [Contributing](CONTRIBUTING.md) · [Roadmap](ROADMAP.md) · [Issues](https://github.com/sw897/mcplink/issues)
 
-mcplink 使用 [MIT License](LICENSE)。分发时请保留 [第三方许可声明](THIRD_PARTY_NOTICES.txt)；依赖信息见[依赖与许可](docs/DEPENDENCIES.md)。
+## License
+
+[MIT](LICENSE). Keep [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt) when redistributing; see [dependency and license details](docs/DEPENDENCIES.md).
