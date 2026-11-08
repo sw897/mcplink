@@ -64,6 +64,9 @@ pub struct Definition {
     pub enabled: bool,
     pub oauth: bool,
     pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    pub oauth_scopes: Vec<String>,
+    pub oauth_callback_port: Option<u16>,
     pub include_tools: Vec<String>,
     pub exclude_tools: Vec<String>,
     pub timeout: Option<u64>,
@@ -149,7 +152,9 @@ impl Definition {
             url.map(|u| u.to_string())
                 .unwrap_or_else(|| "••••••••".into())
         });
-        json!({"command":self.command,"args":args,"env":env,"cwd":self.cwd,"url":url,"headers":headers,"enabled":self.enabled,"oauth":self.oauth,"clientId":self.client_id,"includeTools":self.include_tools,"excludeTools":self.exclude_tools,"timeout":self.timeout,"startupTimeout":self.startup_timeout,"includeSpecified":self.include_specified,"resourcesDisabled":self.resources_disabled,"promptsDisabled":self.prompts_disabled,"transport":self.transport()})
+        json!({"command":self.command,"args":args,"env":env,"cwd":self.cwd,"url":url,"headers":headers,"enabled":self.enabled,"oauth":self.oauth,"clientId":self.client_id,
+            "clientSecret":self.client_secret.as_ref().map(|_|"••••••••"),"oauthScopes":self.oauth_scopes,"oauthCallbackPort":self.oauth_callback_port,
+            "includeTools":self.include_tools,"excludeTools":self.exclude_tools,"timeout":self.timeout,"startupTimeout":self.startup_timeout,"includeSpecified":self.include_specified,"resourcesDisabled":self.resources_disabled,"promptsDisabled":self.prompts_disabled,"transport":self.transport()})
     }
 }
 

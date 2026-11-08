@@ -59,6 +59,8 @@ mcplink changes restore OPERATION_ID
 
 OAuth 用 `credentials login CONNECTION_ID` 返回 URL，CLI 不打开浏览器；若上游要求用户交互，交给用户完成，随后检查连接。系统凭据库首次访问也可能需要用户在系统安全窗口授权，不能承诺绕过。
 
+若 `schema` 包含 `credentials oauth-config`，可经 stdin 部分更新 `clientId`、`clientSecret`、`scopes` 数组和 `callbackPort`。只使用用户有权使用的注册应用；省略字段保留原值，`null` 清除可选字段，机密掩码表示保留，空 scope 使用服务建议。机密不经过 argv、文件或聊天；配置后再登录。更改已有 OAuth 参数会使旧授权失效，含托管参数的连接使用共享入口。无 DCR 或缺应用机密时按错误补齐，不借用其他客户端身份；手工 Token 成功不代表 OAuth/刷新已通过。
+
 `needs_auth` 先处理认证；`disconnected` 先核对是否应恢复；协议或网络故障核对端点和服务。`gateway status|pause|resume` 只影响共享路径，暂停会影响所有共享连接。
 
 需要核对协议能力时使用 `mcp describe CONNECTION_ID`。`mcp request CONNECTION_ID --stdin` 接受 `{"method":"tools/list","params":{}}` 等 MCP 请求；工具调用可能产生业务副作用，应在用户授权范围内执行。失败或通信中断后先核对执行结果，不自动重发。

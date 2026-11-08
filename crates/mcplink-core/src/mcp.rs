@@ -9,7 +9,8 @@ use rmcp::{
         StreamableHttpClientTransport, TokioChildProcess,
         auth::{
             AuthClient, AuthError, AuthorizationManager, AuthorizationRequest,
-            CredentialRefreshGuard, CredentialStore, OAuthState, StoredCredentials,
+            CredentialRefreshGuard, CredentialStore, OAuthClientConfig, OAuthState,
+            StoredCredentials,
         },
         streamable_http_client::StreamableHttpClientTransportConfig,
     },
@@ -23,7 +24,37 @@ use std::{
 };
 use tokio::{net::TcpListener, sync::Mutex as AsyncMutex};
 
-type Session = RunningService<RoleClient, ()>;
+type Session = RunningService<RoleClient, ClientConfig>;
+
+fn client_config() -> ClientConfig {
+    // ServiceExt::serve performs legacy initialize, not 2026 server/discover.
+    // Advertise the implemented legacy version rather than the SDK's newest
+    // default, which produces invalid sessions on the GitHub remote server.
+    let mut config = ClientConfig::new(
+        ClientCapabilities::default(),
+        Implementation::new("mcplink", env!("CARGO_PKG_VERSION")),
+    );
+    config.protocol_version = ProtocolVersion::V_2025_11_25;
+    config
+}
+
+fn http_endpoint(raw: &str) -> Result<String> {
+    let endpoint = config::resolve(raw, None)?;
+    let url = url::Url::parse(&endpoint).context("MCP 地址无效")?;
+    let loopback = match url.host() {
+        Some(url::Host::Domain(host)) => host == "localhost",
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    };
+    if url.scheme() != "https" && !(url.scheme() == "http" && loopback) {
+        bail!("共享 HTTP 连接需要 HTTPS，或本机 loopback 地址");
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        bail!("请通过认证字段配置凭据");
+    }
+    Ok(endpoint)
+}
 type SessionSlot = Arc<AsyncMutex<Option<(u64, Arc<Session>)>>>;
 #[derive(Default)]
 pub struct McpPool {
@@ -89,18 +120,14 @@ impl McpPool {
             return Ok(session.peer().clone());
         }
         let definition = engine.definition(&connection)?;
+        if definition.oauth && connection.status == "needs_auth" {
+            bail!("需要 OAuth 授权，请在账号页登录");
+        }
         let started = tokio::time::timeout(
             Duration::from_secs(definition.startup_timeout.unwrap_or(40).clamp(5, 300)),
             async {
                 if let Some(endpoint) = &definition.url {
-                    let endpoint = config::resolve(endpoint, None)?;
-                    let url = url::Url::parse(&endpoint).context("MCP 地址无效")?;
-                    let loopback = url
-                        .host_str()
-                        .is_some_and(|host| matches!(host, "127.0.0.1" | "localhost" | "::1"));
-                    if url.scheme() != "https" && !loopback {
-                        bail!("共享 HTTP 连接需要 HTTPS，或本机 loopback 地址");
-                    }
+                    let endpoint = http_endpoint(endpoint)?;
                     let client = reqwest::Client::builder()
                         .redirect(reqwest::redirect::Policy::none())
                         .connect_timeout(Duration::from_secs(15))
@@ -132,15 +159,45 @@ impl McpPool {
                         {
                             bail!("需要 OAuth 授权，请在账号页登录");
                         }
+                        let (stored_client, _) = manager
+                            .get_credentials()
+                            .await
+                            .context("无法读取 OAuth 客户端身份，请重新登录")?;
+                        if definition
+                            .client_id
+                            .as_ref()
+                            .is_some_and(|id| id != &stored_client)
+                        {
+                            bail!("OAuth 应用身份已变化，请重新登录");
+                        }
+                        if let Some(secret) = &definition.client_secret {
+                            let redirect = format!(
+                                "http://127.0.0.1:{}/callback",
+                                definition.oauth_callback_port.unwrap_or(0)
+                            );
+                            manager
+                                .configure_client(
+                                    OAuthClientConfig::new(stored_client, redirect)
+                                        .with_client_secret(secret.clone())
+                                        .with_scopes(definition.oauth_scopes.clone()),
+                                )
+                                .context("无法恢复 OAuth 客户端认证，请重新登录")?;
+                        }
                         let transport = StreamableHttpClientTransport::with_client(
                             AuthClient::new(client, manager),
                             transport,
                         );
-                        Ok(().serve(transport).await.map_err(connection_error)?)
+                        Ok(client_config()
+                            .serve(transport)
+                            .await
+                            .map_err(connection_error)?)
                     } else {
                         let transport =
                             StreamableHttpClientTransport::with_client(client, transport);
-                        Ok(().serve(transport).await.map_err(connection_error)?)
+                        Ok(client_config()
+                            .serve(transport)
+                            .await
+                            .map_err(connection_error)?)
                     }
                 } else {
                     let executable = definition.command.as_deref().context("未配置启动命令")?;
@@ -158,7 +215,10 @@ impl McpPool {
                     command.stderr(Stdio::null()).kill_on_drop(true);
                     let transport = TokioChildProcess::new(command)
                         .context("无法启动 MCP 服务，请检查命令和运行环境")?;
-                    Ok(().serve(transport).await.map_err(connection_error)?)
+                    Ok(client_config()
+                        .serve(transport)
+                        .await
+                        .map_err(connection_error)?)
                 }
             },
         )
@@ -394,11 +454,160 @@ impl CredentialStore for VaultCredentials {
     }
 }
 
+pub async fn configure_oauth(engine: Arc<Engine>, params: &Value) -> Result<Value> {
+    let _mutation = engine.mutation.lock().await;
+    let id = params["id"].as_str().context("缺少连接 ID")?;
+    let mut connection = engine.store.connection(id)?;
+    let mut definition = engine.definition(&connection)?;
+    if definition.url.is_none() {
+        bail!("OAuth 客户端配置只适用于 HTTP 连接");
+    }
+    let settings = params["settings"]
+        .as_object()
+        .context("OAuth 设置须为 JSON 对象")?;
+    if settings
+        .keys()
+        .any(|key| !["clientId", "clientSecret", "scopes", "callbackPort"].contains(&key.as_str()))
+    {
+        bail!("OAuth 设置含不支持的字段");
+    }
+    let previous = serde_json::to_value(&definition)?;
+    if let Some(value) = settings.get("clientId") {
+        definition.client_id = if value.is_null() {
+            None
+        } else {
+            Some(
+                value
+                    .as_str()
+                    .context("clientId 须为字符串或 null")?
+                    .to_owned(),
+            )
+        };
+    }
+    if let Some(value) = settings.get("clientSecret") {
+        if value.is_null() {
+            definition.client_secret = None;
+        } else {
+            let secret = value.as_str().context("clientSecret 须为字符串或 null")?;
+            if secret == "••••••••" {
+                if definition.client_secret.is_none() {
+                    bail!("当前未保存 OAuth 客户端机密，请重新填写");
+                }
+            } else {
+                definition.client_secret = Some(secret.to_owned());
+            }
+        }
+    }
+    if let Some(value) = settings.get("scopes") {
+        definition.oauth_scopes = value
+            .as_array()
+            .context("scopes 须为字符串数组")?
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .context("scopes 须为字符串数组")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut seen = std::collections::HashSet::new();
+        definition
+            .oauth_scopes
+            .retain(|scope| seen.insert(scope.clone()));
+    }
+    if let Some(value) = settings.get("callbackPort") {
+        definition.oauth_callback_port = if value.is_null() {
+            None
+        } else {
+            Some(
+                value
+                    .as_u64()
+                    .and_then(|port| u16::try_from(port).ok())
+                    .context("callbackPort 须为 1–65535 或 null")?,
+            )
+        };
+    }
+    config::validate(&definition)?;
+    let changed = previous != serde_json::to_value(&definition)?;
+    if changed {
+        engine.save_definition(&mut connection, &definition)?;
+        engine.pool.invalidate(id).await;
+    }
+    Ok(
+        json!({"status":if changed {"configured"}else{"unchanged"},"connection":connection.public_value(),"definition":definition.public_value()}),
+    )
+}
+
 pub async fn start_oauth(engine: Arc<Engine>, id: &str) -> Result<Value> {
     let _mutation = engine.mutation.lock().await;
     let mut connection = engine.store.connection(id)?;
     let mut definition = engine.definition(&connection)?;
-    let endpoint = definition.url.clone().context("OAuth 需要 HTTP MCP 服务")?;
+    let endpoint = http_endpoint(
+        definition
+            .url
+            .as_deref()
+            .context("OAuth 需要 HTTP MCP 服务")?,
+    )?;
+    config::validate(&definition)?;
+    let refresh = engine.pool.refresh_lock(id);
+    let _refresh = refresh.lock().await;
+    let listener = TcpListener::bind((
+        std::net::Ipv4Addr::LOCALHOST,
+        definition.oauth_callback_port.unwrap_or(0),
+    ))
+    .await
+    .context("无法建立本地授权回调")?;
+    let address = listener.local_addr()?;
+    let redirect = format!("http://127.0.0.1:{}/callback", address.port());
+    let (mut state, auth_url) = tokio::time::timeout(Duration::from_secs(45), async {
+        let mut manager = AuthorizationManager::new(endpoint)
+            .await
+            .context("无法发现上游 OAuth 元数据")?;
+        let metadata = manager
+            .resolve_metadata()
+            .await
+            .context("无法发现上游 OAuth 元数据")?
+            .metadata;
+        if definition.client_id.is_none() && metadata.registration_endpoint.is_none() {
+            bail!("上游不支持动态客户端注册；请先配置你注册应用的 clientId 及其要求的客户端机密");
+        }
+        let github = url::Url::parse(&metadata.authorization_endpoint).is_ok_and(|url| {
+            url.host_str() == Some("github.com") && url.path() == "/login/oauth/authorize"
+        });
+        if github && definition.client_secret.is_none() {
+            bail!("GitHub 授权码流程需要自有注册应用的客户端机密，请先配置 OAuth 客户端");
+        }
+        manager.set_metadata(metadata);
+        // Prepare with the SDK's in-memory store. Discovery/registration failures
+        // must not delete an existing Token or grant before a URL can be returned.
+        let mut state = OAuthState::Unauthorized(manager);
+        let mut request = AuthorizationRequest::new(&redirect)
+            .with_client_name("mcplink")
+            .with_initial_scope_selection();
+        if let Some(client) = &definition.client_id {
+            request = request.with_preregistered_client(client.clone());
+        }
+        if let Some(secret) = &definition.client_secret {
+            request = request.with_client_secret(secret.clone());
+        }
+        if !definition.oauth_scopes.is_empty() {
+            request = request.with_scopes(definition.oauth_scopes.clone());
+        }
+        state
+            .start_authorization(request)
+            .await
+            .context("无法准备 OAuth 授权，请核对注册应用、回调与客户端认证")?;
+        let url = state
+            .get_authorization_url()
+            .await
+            .context("无法创建浏览器授权地址")?;
+        Ok::<_, anyhow::Error>((state, url))
+    })
+    .await
+    .context("OAuth 授权准备超时，原有认证保持不变")??;
+    if !matches!(state, OAuthState::Session(_)) {
+        bail!("OAuth 授权会话未就绪");
+    }
     definition.oauth = true;
     definition
         .headers
@@ -407,33 +616,13 @@ pub async fn start_oauth(engine: Arc<Engine>, id: &str) -> Result<Value> {
     connection.auth_kind = "oauth".into();
     connection.status = "authorizing".into();
     engine.save_definition(&mut connection, &definition)?;
+    engine.vault.delete(&format!("oauth/{id}"))?;
     engine.pool.invalidate(id).await;
-    let refresh = engine.pool.refresh_lock(id);
-    let _refresh = refresh.lock().await;
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .context("无法建立本地授权回调")?;
-    let address = listener.local_addr()?;
-    let redirect = format!("http://127.0.0.1:{}/callback", address.port());
-    let mut manager = AuthorizationManager::new(endpoint)
-        .await
-        .context("无法发现上游 OAuth 元数据")?;
-    manager.set_credential_store(VaultCredentials::new(engine.clone(), &connection));
-    let mut state = OAuthState::Unauthorized(manager);
-    let mut request = AuthorizationRequest::new(&redirect)
-        .with_client_name("mcplink")
-        .with_initial_scope_selection();
-    if let Some(client) = definition.client_id {
-        request = request.with_preregistered_client(client);
+    if let OAuthState::Session(session) = &mut state {
+        session
+            .auth_manager
+            .set_credential_store(VaultCredentials::new(engine.clone(), &connection));
     }
-    state
-        .start_authorization(request)
-        .await
-        .context("上游未提供当前支持的 OAuth 授权方式")?;
-    let auth_url = state
-        .get_authorization_url()
-        .await
-        .context("无法创建浏览器授权地址")?;
     let state = Arc::new(AsyncMutex::new(state));
     let (finished, mut completed) = tokio::sync::mpsc::channel::<()>(1);
     let callback_engine = engine.clone();

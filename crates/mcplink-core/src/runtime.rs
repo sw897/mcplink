@@ -58,7 +58,7 @@ async fn health(State(state): State<ServerState>, headers: HeaderMap) -> impl In
     (
         StatusCode::OK,
         Json(
-            json!({"application":"mcplink","instance":state.info.instance,"version":env!("CARGO_PKG_VERSION"),"managementApi":3}),
+            json!({"application":"mcplink","instance":state.info.instance,"version":env!("CARGO_PKG_VERSION"),"managementApi":4}),
         ),
     )
 }
@@ -297,6 +297,15 @@ impl Client {
     }
 
     pub async fn call(&self, method: &str, params: Value) -> Result<Value> {
+        if self.management_api < 4
+            && (matches!(method, "oauth.configure" | "oauth.start")
+                || (method == "connections.save"
+                    && ["clientSecret", "oauthScopes", "oauthCallbackPort"]
+                        .iter()
+                        .any(|key| params["definition"].get(*key).is_some())))
+        {
+            bail!("旧后台不支持当前 OAuth 客户端配置；请退出桌面并停止旧后台，再使用同一构建重试");
+        }
         if method == "workspace.identity" && self.management_api < 3 {
             bail!("旧后台不支持当前 CLI 生成命令；请退出桌面并停止旧后台，再使用同一构建重试");
         }

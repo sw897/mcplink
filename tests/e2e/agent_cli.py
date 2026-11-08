@@ -14,8 +14,8 @@ from run import BINARY, Harness, ROOT
 
 
 class AgentCli(Harness):
-    def __init__(self, record):
-        super().__init__(record)
+    def __init__(self, record, **options):
+        super().__init__(record, **options)
         self.commands = []
 
     def cli(self, *args, value=None, raw=None, exit_status=0, env=None):

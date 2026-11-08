@@ -69,7 +69,7 @@ class McpClient:
 
 
 class Harness:
-    def __init__(self, record, native_agents=False):
+    def __init__(self, record, native_agents=False, fixture_args=()):
         self.record = record
         self.native_agents = native_agents
         self.home = record / "home"
@@ -80,7 +80,7 @@ class Harness:
         for path in (self.home / ".codex", self.home / ".hermes"):
             path.mkdir(parents=True)
         (self.home / ".mcplink-test-fixture").touch()
-        self.server = subprocess.Popen([sys.executable, str(FIXTURE), "--auth"], stdout=subprocess.PIPE, stderr=(record / "fixture.log").open("w"), text=True)
+        self.server = subprocess.Popen([sys.executable, str(FIXTURE), "--auth", *fixture_args], stdout=subprocess.PIPE, stderr=(record / "fixture.log").open("w"), text=True)
         startup = queue.Queue()
         threading.Thread(target=lambda: startup.put(self.server.stdout.readline()), daemon=True).start()
         try:

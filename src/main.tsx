@@ -110,6 +110,9 @@ type Definition = {
   enabled: boolean;
   oauth: boolean;
   clientId?: string;
+  clientSecret?: string;
+  oauthScopes?: string[];
+  oauthCallbackPort?: number;
   includeTools?: string[];
   excludeTools?: string[];
   timeout?: number;
@@ -133,7 +136,8 @@ type Dialog =
   | { kind: "detail"; connection: Connection }
   | { kind: "credential"; connection: Connection };
 
-const agentLabel = (agent: Agent) => ({ codex: "Codex", hermes: "Hermes", claude: "Claude Code" })[agent];
+const agentLabel = (agent: Agent) =>
+  ({ codex: "Codex", hermes: "Hermes", claude: "Claude Code" })[agent];
 const time = (value?: number) =>
   value
     ? new Date(value * 1000).toLocaleString("zh-CN", {
@@ -506,7 +510,9 @@ function App() {
           <div className="empty loading">
             <Loader2 className="spin" size={25} />
             <p>正在读取本机配置…</p>
-            <p className="muted">如有系统文件访问提示，请先处理；完成后可点击右上角“刷新”。</p>
+            <p className="muted">
+              如有系统文件访问提示，请先处理；完成后可点击右上角“刷新”。
+            </p>
           </div>
         )}
         {data && (
@@ -626,7 +632,8 @@ function App() {
                           <span className="agent-avatar hermes">H</span>Hermes
                         </th>
                         <th className="agent-column">
-                          <span className="agent-avatar claude">Cl</span>Claude Code
+                          <span className="agent-avatar claude">Cl</span>Claude
+                          Code
                         </th>
                         <th>连接状态</th>
                         <th />
@@ -973,7 +980,8 @@ function App() {
                   <code>{source.path}</code>
                   <small className={source.error ? "inline-error" : "muted"}>
                     {source.error ||
-                      ((source.exists ? "已找到配置" : "尚未创建配置文件") + (source.readOnly ? " · 只读来源" : ""))}
+                      (source.exists ? "已找到配置" : "尚未创建配置文件") +
+                        (source.readOnly ? " · 只读来源" : "")}
                   </small>
                 </div>
               </div>
@@ -991,7 +999,11 @@ function App() {
                         {
                           name: "配置文件",
                           extensions:
-                            agent === "codex" ? ["toml"] : agent === "claude" ? ["json"] : ["yaml", "yml"],
+                            agent === "codex"
+                              ? ["toml"]
+                              : agent === "claude"
+                                ? ["json"]
+                                : ["yaml", "yml"],
                         },
                       ],
                     });
@@ -1463,7 +1475,10 @@ function ConnectDialog({
                   <strong>
                     {agentLabel(source.agent)} · {source.label}
                   </strong>
-                  <small>{source.path}{source.readOnly ? " · 只读，请在原客户端维护" : ""}</small>
+                  <small>
+                    {source.path}
+                    {source.readOnly ? " · 只读，请在原客户端维护" : ""}
+                  </small>
                 </div>
                 {bindings.some(
                   (binding) =>
@@ -1625,6 +1640,10 @@ function Editor({
         next.args = args.split("\n").filter(Boolean);
         next.headers = {};
         next.oauth = false;
+        next.clientId = undefined;
+        next.clientSecret = undefined;
+        next.oauthScopes = [];
+        next.oauthCallbackPort = undefined;
         next.cwd = cwd || undefined;
         next.env = JSON.parse(environment);
       } else {
@@ -1827,6 +1846,45 @@ function CredentialDialog({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const [oauth, setOauth] = useState(false);
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const [scopes, setScopes] = useState("");
+  const [callbackPort, setCallbackPort] = useState("");
+  const [oauthLoaded, setOauthLoaded] = useState(false);
+  const [oauthSaved, setOauthSaved] = useState(false);
+  useEffect(() => {
+    let active = true;
+    void rpc<{ definition: Definition }>("connections.detail", {
+      id: connection.id,
+    })
+      .then(({ definition }) => {
+        if (!active) return;
+        setClientId(definition.clientId || "");
+        setClientSecret(definition.clientSecret || "");
+        setScopes((definition.oauthScopes || []).join(" "));
+        setCallbackPort(definition.oauthCallbackPort?.toString() || "");
+        setOauthLoaded(true);
+      })
+      .catch((error) => {
+        if (active) setError(error.message);
+      });
+    return () => {
+      active = false;
+    };
+  }, [connection.id]);
+  const saveOauth = async () => {
+    const result = await rpc<{ definition: Definition }>("oauth.configure", {
+      id: connection.id,
+      settings: {
+        clientId: clientId.trim() || null,
+        clientSecret: clientSecret || null,
+        scopes: scopes.trim() ? scopes.trim().split(/\s+/) : [],
+        callbackPort: callbackPort ? Number(callbackPort) : null,
+      },
+    });
+    setClientSecret(result.definition.clientSecret || "");
+    setOauthSaved(true);
+  };
   const update = async (event: React.FormEvent) => {
     event.preventDefault();
     setPending(true);
@@ -1881,16 +1939,92 @@ function CredentialDialog({
         <details className="oauth-option">
           <summary>服务使用 OAuth 浏览器授权</summary>
           <p className="muted">
-            适用于提供标准 MCP OAuth 元数据与客户端注册的服务。
+            适用于提供标准 MCP OAuth
+            元数据的服务；可使用动态注册或你自己的预注册应用。
+          </p>
+          <label className="field">
+            <span>Client ID · 预注册应用</span>
+            <input
+              value={clientId}
+              onChange={(event) => {
+                setClientId(event.target.value);
+                setOauthSaved(false);
+              }}
+              placeholder="支持动态注册时可留空"
+              autoComplete="off"
+            />
+          </label>
+          <label className="field">
+            <span>客户端机密 · 按注册应用要求填写</span>
+            <input
+              type="password"
+              value={clientSecret}
+              onChange={(event) => {
+                setClientSecret(event.target.value);
+                setOauthSaved(false);
+              }}
+              autoComplete="off"
+              placeholder="保存在系统凭据库；清空可删除已存值"
+            />
+          </label>
+          <label className="field">
+            <span>授权 scope · 用空格分隔</span>
+            <input
+              value={scopes}
+              onChange={(event) => {
+                setScopes(event.target.value);
+                setOauthSaved(false);
+              }}
+              placeholder="留空使用服务建议的 scope"
+            />
+          </label>
+          <label className="field">
+            <span>本地回调端口 · 可选</span>
+            <input
+              type="number"
+              min={1}
+              max={65535}
+              value={callbackPort}
+              onChange={(event) => {
+                setCallbackPort(event.target.value);
+                setOauthSaved(false);
+              }}
+              placeholder="留空自动分配，路径为 /callback"
+            />
+          </label>
+          <p className="field-help">
+            •••••••• 表示保留已存机密。更换 OAuth
+            应用或权限后需要重新授权；授权准备失败会保留原有认证。
           </p>
           <button
             className="button"
             type="button"
-            disabled={pending}
+            disabled={pending || !oauthLoaded}
             onClick={async () => {
               setPending(true);
               setError("");
               try {
+                await saveOauth();
+                await onDone();
+              } catch (error) {
+                setError((error as Error).message);
+              } finally {
+                setPending(false);
+              }
+            }}
+          >
+            保存 OAuth 设置
+          </button>
+          {oauthSaved && <p className="muted">OAuth 客户端设置已保存。</p>}
+          <button
+            className="button"
+            type="button"
+            disabled={pending || !oauthLoaded}
+            onClick={async () => {
+              setPending(true);
+              setError("");
+              try {
+                await saveOauth();
                 const result = await rpc<{ url: string }>("oauth.start", {
                   id: connection.id,
                 });

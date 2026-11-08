@@ -69,6 +69,19 @@ impl Engine {
         definition: &Definition,
     ) -> Result<()> {
         let old = connection.definition_ref.clone();
+        let reset_oauth = if old.is_empty() {
+            false
+        } else {
+            let previous = self.definition(connection)?;
+            previous.url != definition.url
+                || previous.client_id != definition.client_id
+                || previous.client_secret != definition.client_secret
+                || previous.oauth_scopes != definition.oauth_scopes
+                || previous.oauth_callback_port != definition.oauth_callback_port
+        };
+        if reset_oauth && definition.oauth {
+            connection.status = "needs_auth".into();
+        }
         let reference = format!("definition/{}", uuid::Uuid::new_v4());
         self.vault
             .set(&reference, &serde_json::to_string(definition)?)?;
@@ -77,6 +90,9 @@ impl Engine {
         connection.transport = definition.transport().into();
         connection.endpoint = definition.summary();
         self.store.save_connection(connection)?;
+        if reset_oauth {
+            self.vault.delete(&format!("oauth/{}", connection.id))?;
+        }
         if !old.is_empty() {
             self.vault.delete(&old)?;
         }
@@ -226,6 +242,14 @@ impl Engine {
             .transpose()?;
         if let Some(old) = &existing {
             let old_definition = self.definition(old)?;
+            if definition.client_secret.as_deref() == Some("••••••••") {
+                definition.client_secret = Some(
+                    old_definition
+                        .client_secret
+                        .clone()
+                        .context("需要重新填写 OAuth 客户端机密")?,
+                );
+            }
             for (key, value) in &mut definition.headers {
                 if value == "••••••••" {
                     *value = old_definition
@@ -910,6 +934,7 @@ impl Engine {
                 }
                 result
             }
+            "oauth.configure" => crate::mcp::configure_oauth(self.clone(), &p).await,
             "gateway.pause" => {
                 self.paused.store(true, Ordering::SeqCst);
                 self.pool.clear().await;

@@ -29,7 +29,7 @@ Bridge 每次派发前检查后台并按需重新连接。派发后通信失败�
 
 ## 认证
 
-HTTP 令牌按上游要求原样保存，不自动添加 Bearer。标准 OAuth 使用 rmcp AuthorizationManager：系统浏览器、PKCE S256、state/issuer 检查、单次授权会话及 loopback 回调。支持上游动态注册或已有 public client ID，不接管客户端私有凭据文件。
+HTTP 令牌按上游要求原样保存，不自动添加 Bearer。标准 OAuth 使用 rmcp AuthorizationManager：系统浏览器、PKCE S256、state/issuer 检查、单次授权会话及 loopback 回调。源码开发能力支持上游动态注册或预注册应用、系统凭据库存储的客户端机密、显式 scope 和可选固定回调端口；不接管客户端私有凭据文件。授权流程准备成功后才替换原认证，配置变更使旧 grant 失效。含托管 OAuth 参数的定义经共享 Bridge 复用，不能等价转换时拒绝直连导出。
 
 每份 OAuth grant 使用同一刷新锁；更新、断开和回调按连接修订校验，旧授权无法覆盖新状态。断开停止新调用并删除托管令牌/grant；已派发调用的副作用不会被撤销。原客户端保存的直连凭据仍由相应客户端维护。
 

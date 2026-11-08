@@ -57,6 +57,7 @@ Cargo 默认将程序放入 `~/.cargo/bin`，该目录需在 PATH 中。也可�
 | `connections delete ID` | 删除无绑定的托管连接；有绑定时拒绝。 |
 | `credentials update ID --stdin` / `credentials disconnect ID` | 更新原样 HTTP 凭据，或断开托管认证。 |
 | `credentials login ID` | 返回 OAuth URL 和过期时间，不打开浏览器。 |
+| `credentials oauth-config ID --stdin` | 源码开发能力：配置预注册 OAuth 应用、scope 与回调端口，不启动登录。 |
 | `changes preview --connection ID --target SOURCE_ID [--mode direct\|shared] [--action ACTION]` | 生成 10 分钟有效的脱敏计划，不写原生配置。两个标志都可重复。 |
 | `changes apply PLAN_ID` | 应用指定计划，检查修订与文件哈希，逐目标报告结果。 |
 | `changes history` / `changes restore OPERATION_ID` | 查看最近 25 条历史，恢复指定条目并保留无关后续修改。 |
@@ -140,6 +141,16 @@ mcplink cli rebind ./notes-cli/notes.mcplink.json --connection LOCAL_CONNECTION_
 重新绑定核对所有选定工具的 Schema 摘要及参数契约，原子更新清单，并检测并发修改。会在清单旁保留空的 `.清单文件名.lock`，用于跨数据目录的并发互斥；移动入口时无需复制它，操作期间不要删除。原连接丢失时不会按显示名选择其他账号。上游输入 Schema 的任何变化均要求重新核对、重新生成；工具筛选、连接停用和 Gateway 暂停即时生效。托管凭据更新、OAuth 刷新和后台重启不要求重新生成。
 
 终端和生成入口使用同样的任务授权边界，不继承原生 Agent 的确认步骤；工具结果不确定时先核对，入口不自动重发。
+
+## OAuth 客户端配置（源码开发能力）
+
+该能力未包含在 v0.1.0 发布包中。`credentials oauth-config ID --stdin` 接受部分更新对象，可选 `clientId`、`clientSecret`、`scopes`（字符串数组）和 `callbackPort`（1–65535）。省略字段保留原值；`clientId`、`clientSecret`、`callbackPort` 可用 `null` 清除。机密的 `••••••••` 掩码表示保留已存值。`scopes: []` 使用服务建议的 scope，回调端口留空自动分配，回调路径为 `/callback`。
+
+使用你有权使用的注册应用和权限。机密经 stdin 传入系统凭据库，管理输出只返回掩码；不将机密写入命令参数或文件。配置完成后运行 `credentials login ID`，由用户打开返回的 URL 同意授权，再运行 `connections probe ID`。支持 DCR 的上游可不提供预注册应用；不支持 DCR 的上游须先配置 Client ID 及其要求的客户端机密。机密客户端的 `client_secret_basic` / `client_secret_post` 按发现的元数据选择。
+
+配置本身保留当前 Token/OAuth 模式。更改已有 OAuth 的端点、应用身份、机密、scope 或回调配置会使旧 grant 失效，须重新授权。授权发现、注册或回调监听准备失败时保留原认证；返回授权 URL 后进入新的授权会话。含托管 OAuth 参数的连接使用共享入口，不能直接转换为原生 Agent 配置。
+
+GitHub 远程 MCP 不提供 DCR，授权码流程要求预注册应用及客户端认证。GitHub App 的业务权限来自应用注册，scope 按应用支持情况选择；不要把资源端建议的 scope 当作应用已获权限。真实 Token 与 OAuth 验证范围分别见[兼容说明](compatibility.md)。
 
 ## 其他 stdin 对象
 

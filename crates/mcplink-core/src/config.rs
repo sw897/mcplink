@@ -352,12 +352,34 @@ pub fn normalize(raw: &Value, agent: Agent) -> Result<Definition> {
         prompts_disabled: raw.pointer("/tools/prompts").and_then(Value::as_bool) == Some(false),
         original: raw.clone(),
         original_agent: Some(agent),
+        client_secret: None,
+        oauth_scopes: Vec::new(),
+        oauth_callback_port: None,
     };
     validate(&definition)?;
     Ok(definition)
 }
 
 pub fn validate(def: &Definition) -> Result<()> {
+    if def.client_id.as_ref().is_some_and(|value| {
+        value.trim().is_empty() || value.len() > 2048 || value.chars().any(char::is_control)
+    }) || def.client_secret.as_ref().is_some_and(|value| {
+        value.is_empty() || value.len() > 65536 || value.chars().any(char::is_control)
+    }) || (def.client_secret.is_some() && def.client_id.is_none())
+        || def.oauth_callback_port == Some(0)
+        || def.oauth_scopes.len() > 32
+        || def.oauth_scopes.iter().any(|scope| {
+            scope.is_empty()
+                || scope.len() > 256
+                || !scope
+                    .bytes()
+                    .all(|c| c == 0x21 || (0x23..=0x5b).contains(&c) || (0x5d..=0x7e).contains(&c))
+        })
+    {
+        bail!(
+            "OAuth 客户端配置无效；机密须配合 clientId，scope 须为独立标识，回调端口须为 1–65535 或留空"
+        );
+    }
     if def.command.is_some() == def.url.is_some() {
         bail!("请填写启动命令或 MCP 地址中的一项");
     }
@@ -426,6 +448,12 @@ pub fn native(def: &Definition, target: &Agent) -> Result<Value> {
         bail!("Claude Code 来源当前只读，请在原客户端维护配置");
     }
     validate(def)?;
+    if def.client_secret.is_some()
+        || !def.oauth_scopes.is_empty()
+        || def.oauth_callback_port.is_some()
+    {
+        bail!("此连接含托管 OAuth 客户端参数，尚不能等价转换到原生配置；请使用共享接入");
+    }
     if def
         .original_agent
         .as_ref()

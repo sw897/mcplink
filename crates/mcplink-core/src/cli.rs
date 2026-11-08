@@ -192,6 +192,12 @@ enum ConnectionCommand {
 
 #[derive(Subcommand)]
 enum CredentialCommand {
+    /// stdin JSON: 可选 clientId/clientSecret/scopes/callbackPort；未提供的字段保持原值
+    OauthConfig {
+        id: String,
+        #[arg(long, required = true)]
+        stdin: bool,
+    },
     /// stdin JSON: {"value":"原样凭据","header":"Authorization"}
     Update {
         id: String,
@@ -277,9 +283,10 @@ fn schema() -> Value {
         "exitCodes":{"0":"success","1":"operation failure, non-ready probe, upstream error or partial apply","2":"invalid CLI arguments or stdin"},
         "stdin":{"limitBytes":INPUT_LIMIT,"encoding":"UTF-8 JSON object; close stdin after one request",
             "connections save":{"required":["name","definition"],"optional":["id","title","accountLabel"],
-                "definition":{"command":"string (stdio)","args":"string[]","env":"object<string,string>","cwd":"string","url":"string (HTTP)","headers":"object<string,string>","enabled":"boolean (default true)","oauth":"boolean","clientId":"string","includeTools":"string[]","excludeTools":"string[]","includeSpecified":"boolean (true to restrict even when includeTools is empty)","timeout":"integer seconds","startupTimeout":"integer seconds","resourcesDisabled":"boolean","promptsDisabled":"boolean"},
+                "definition":{"command":"string (stdio)","args":"string[]","env":"object<string,string>","cwd":"string","url":"string (HTTP)","headers":"object<string,string>","enabled":"boolean (default true)","oauth":"boolean","clientId":"string or null","clientSecret":"string or null; masked on output","oauthScopes":"string[] (empty uses server suggestions)","oauthCallbackPort":"integer 1–65535 or null (automatic)","includeTools":"string[]","excludeTools":"string[]","includeSpecified":"boolean (true to restrict even when includeTools is empty)","timeout":"integer seconds","startupTimeout":"integer seconds","resourcesDisabled":"boolean","promptsDisabled":"boolean"},
                 "semantics":"Complete replacement. To edit, start from connections show .ok.definition and preserve masked fields. Omit transport; do not pass native config field names."},
             "credentials update":{"required":["value"],"optional":["header (default Authorization)"],"semantics":"Value stored verbatim, no Bearer prefix added"},
+            "credentials oauth-config":{"optional":{"clientId":"string or null","clientSecret":"string, retained mask or null","scopes":"string[]; empty uses server suggestions","callbackPort":"integer 1–65535 or null"},"semantics":"Partial update. Omitted fields retain values; null clears optional fields. Does not start login or switch Token mode; changes invalidate an existing OAuth grant. Secrets use stdin and the system credential store; direct native export is unavailable for managed OAuth parameters."},
             "mcp request":{"required":["method"],"optional":["params"]},
             "call":{"encoding":"tool arguments JSON object, preserved without string coercion","schema":"upstream inputSchema; drafts 4/6/7/2019-09/2020-12, default 2020-12; external retrieval disabled; format is annotation","invalidArgumentsExitCode":2},
             "rpc --stdin":{"required":["method"],"optional":["params"],"semantics":"Legacy RPC envelope preserved; inspect nested results/status as well as process exit"}},
@@ -478,6 +485,12 @@ async fn execute(command: Command, data: PathBuf) -> Result<Value, Failure> {
             } => ("tools.describe", json!({"id":id,"tool":tool}), None, false),
         },
         Command::Credentials { command } => match command {
+            CredentialCommand::OauthConfig { id, .. } => (
+                "oauth.configure",
+                json!({"id":id,"settings":stdin_json().await.map_err(Failure::input)?}),
+                None,
+                false,
+            ),
             CredentialCommand::Update { id, .. } => {
                 let mut value = stdin_json().await.map_err(Failure::input)?;
                 value["id"] = json!(id);

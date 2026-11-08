@@ -2,7 +2,7 @@
 
 更新于 2026-11-08。当前基线为已公开发布的 [v0.1.0 预览版](https://github.com/sw897/mcplink/releases/tag/v0.1.0)，提供 macOS Apple Silicon 与 Windows x64 安装包。具体支持范围以[兼容说明](docs/compatibility.md)和实际验证结果为准。
 
-通用 CLI 工具调用已通过阶段审查与两平台隔离验收，按连接生成轻量 CLI 已实现，正在执行阶段审查和两平台验收。签名、公证和平台实机验收按所需环境单独跟进，不作为 CLI 开发的前置条件。后续版本号和发布日期在验收后确定。
+通用 CLI 工具调用与按连接生成轻量 CLI 已通过阶段审查及两平台隔离验收。GitHub 远程 Token 链路已定位并修复初始化版本问题，预注册 OAuth 客户端配置已通过本地合成验收，正在执行两平台回归；真实 GitHub OAuth 仍需可用的注册应用与账号同意。签名、公证和平台实机验收按所需环境单独跟进，不作为 CLI 开发的前置条件。后续版本号和发布日期在验收后确定。
 
 ## 已完成：v0.1.0 预览版
 
@@ -19,8 +19,8 @@ macOS 包使用 ad-hoc 签名，尚无 Developer ID 和公证；Windows 包未�
 | 顺序 | 任务 | 完成条件 | 状态 |
 | --- | --- | --- | --- |
 | 1 | 完善通用 CLI 工具调用 | 工具发现、参数帮助与校验、实际调用、错误和退出码契约明确，并通过实际 CLI 入口验收 | 完成；[macOS、Windows 各 60 项通过](https://github.com/sw897/mcplink/actions/runs/42436531934) |
-| 2 | 按连接生成轻量 CLI | 第一阶段契约稳定；生成入口可调用选定工具，支持显式重新绑定并处理参数契约变化 | 已实现；本地生成入口 15 项通过，远端两平台待验证 |
-| 3 | 补齐 GitHub 远程 MCP 互操作 | 复现当前不兼容，分别验证传输、手工 Token 与 OAuth，完成只读调用及共享回归 | 首个远程兼容目标，待实施 |
+| 2 | 按连接生成轻量 CLI | 第一阶段契约稳定；生成入口可调用选定工具，支持显式重新绑定并处理参数契约变化 | 完成；[macOS、Windows 各 75 项通过](https://github.com/sw897/mcplink/actions/runs/42440060881) |
+| 3 | 补齐 GitHub 远程 MCP 互操作 | 复现当前不兼容，分别验证传输、手工 Token 与 OAuth，完成只读调用及共享回归 | 真实 Token 已通过；远程/预注册 OAuth 合成回归 14 项本地通过，两平台及真实 OAuth 待完成 |
 | 4 | 扩展 Agent 配置适配 | Claude Code 的可写作用域及 OpenCode 的版本化配置完成扫描、预览、应用与恢复 | Claude Code → OpenCode，其他 Agent 按需求排期 |
 | 5 | 验证真实上游认证与刷新 | 腾讯会议、飞书、IMA 按实际入口记录认证归属、调用、到期、更新/刷新及撤销结论 | 依赖官方入口、应用权限与授权账号 |
 | 需求驱动 | 扩展其他 MCP 协议能力 | 按客户端、上游及规范版本逐项通过端到端验收，能力声明与转发行为一致 | GitHub 等上游暴露的基础缺口随对应任务补齐；高级能力后置 |
@@ -28,7 +28,7 @@ macOS 包使用 ad-hoc 签名，尚无 Developer ID 和公证；Windows 包未�
 
 ## MCP 工具的 CLI 调用与生成
 
-现有 `connections tools`、`mcp describe` 和 `mcp request --stdin` 提供底层发现与请求入口；通用调用增强已验收，CLI 生成已进入验收。两阶段复用现有管理核心、后台、托管连接和系统凭据库，让同一条 MCP 连接可供原生 Agent、终端、脚本和 Skill 使用。新增命令暂未包含在 v0.1.0 发布包中，以当前程序的 `schema` 为准。
+现有 `connections tools`、`mcp describe` 和 `mcp request --stdin` 提供底层发现与请求入口；通用调用增强和 CLI 生成已验收。两阶段复用现有管理核心、后台、托管连接和系统凭据库，让同一条 MCP 连接可供原生 Agent、终端、脚本和 Skill 使用。新增命令暂未包含在 v0.1.0 发布包中，以当前程序的 `schema` 为准。
 
 ### 第一阶段：完善通用 CLI 调用
 
@@ -125,9 +125,11 @@ macOS 包使用 ad-hoc 签名，尚无 Developer ID 和公证；Windows 包未�
 
 ### MCP 协议能力与 GitHub 远程兼容
 
-GitHub 远程 MCP 当前未完成兼容，作为首个待复现、待修复的真实远程用例。尚未从实际失败请求确定根因，先分别检查传输、认证和服务端策略，不把问题直接归为缺少某个 MCP 协议能力。
+GitHub 远程 MCP 已从 v0.1.0 的失败请求定位初始化版本问题：SDK 默认在 legacy `initialize` 中请求 `2026-07-28`，而上游会话按初始版本建立、响应协商为 `2025-11-25`，后续通知携带协商版本时得到 `invalid session`。仅将初始化版本改为已实现的 `2025-11-25` 即可通过，不把此问题归为 Token 失效或代理配置。
 
-GitHub [远程接入指南](https://github.com/github/github-mcp-server/blob/main/docs/host-integration.md)说明可使用已有 Token，OAuth 不支持动态客户端注册（DCR），并有预注册应用及客户端认证要求。当前 mcplink 的[连接定义](crates/mcplink-core/src/model.rs)中，OAuth 专用配置仅有开关和 `clientId`，[授权入口](crates/mcplink-core/src/mcp.rs)自动分配 loopback 回调端口；这提示需要核对注册方式、客户端认证、回调和令牌交换，但尚不能证明它们就是本次失败的根因。
+已用官方只读远程入口和公开测试仓库完成 Token 发现、读取、两个 Bridge、通用及生成 CLI、凭据更新对照，业务结果摘要一致。源码另增加预注册 OAuth 应用机密、显式 scope 和固定 loopback 端口，授权准备失败保留原认证；合成环境覆盖 PKCE、两种客户端认证、刷新轮换、并发和后台重启。详见[失败方式与验收](tests/e2e/remote-auth-failure-modes.md)。
+
+GitHub [远程接入指南](https://github.com/github/github-mcp-server/blob/main/docs/host-integration.md)说明 OAuth 不提供 DCR，需有权使用的预注册应用及客户端认证。真实 OAuth 的同意、刷新、撤销仍待相应注册应用和账号授权；合成 OAuth 与真实 Token 不计为该项通过。v0.1.0 发布附件保持原样，修复通过后续版本发布。
 
 GitHub 互操作按序推进：
 

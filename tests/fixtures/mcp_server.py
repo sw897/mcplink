@@ -113,11 +113,16 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path)
         origin = f"http://127.0.0.1:{self.server.server_port}"
         if path.path.startswith("/.well-known/oauth-protected-resource"):
-            return self.send(200, {"resource": origin + "/mcp", "authorization_servers": [origin], "scopes_supported": ["documents:read"]})
+            return self.send(200, {"resource": origin + "/mcp", "authorization_servers": [origin], "scopes_supported": ["documents:read","documents:write"] if self.server.registered else ["documents:read"]})
         if path.path.startswith("/.well-known/oauth-authorization-server") or path.path.startswith("/.well-known/openid-configuration"):
-            return self.send(200, {"issuer": origin, "authorization_endpoint": origin + "/authorize", "token_endpoint": origin + "/token", "registration_endpoint": origin + "/register", "response_types_supported": ["code"], "grant_types_supported": ["authorization_code", "refresh_token"], "token_endpoint_auth_methods_supported": ["none"], "code_challenge_methods_supported": ["S256"], "scopes_supported": ["documents:read", "offline_access"], "authorization_response_iss_parameter_supported": True})
+            metadata={"issuer": origin, "authorization_endpoint": origin + "/authorize", "token_endpoint": origin + "/token", "response_types_supported": ["code"], "grant_types_supported": ["authorization_code", "refresh_token"], "token_endpoint_auth_methods_supported": ["client_secret_"+self.server.token_auth] if self.server.registered else ["none"], "code_challenge_methods_supported": ["S256"], "scopes_supported": ["documents:read", "offline_access"], "authorization_response_iss_parameter_supported": True}
+            if not self.server.registered: metadata["registration_endpoint"]=origin+"/register"
+            return self.send(200,metadata)
         if path.path == "/authorize":
             query = {key: values[0] for key, values in parse_qs(path.query).items()}
+            if self.server.registered and query.get("client_id")!="synthetic-registered-client":
+                return self.send(400,{"error":"invalid_client"})
+            self.server.requested_scopes=query.get("scope","").split()
             if query.get("code_challenge_method") != "S256":
                 return self.send(400, {"error": "PKCE S256 required"})
             code = f"synthetic-code-{time.monotonic_ns()}"
@@ -129,7 +134,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         if path.path == "/stats":
-            return self.send(200, {"refreshes": self.server.refreshes, "calls": self.server.calls,"lists":self.server.lists,"schemaReads":self.server.schema_reads})
+            return self.send(200, {"refreshes": self.server.refreshes, "calls": self.server.calls,"lists":self.server.lists,"schemaReads":self.server.schema_reads,"sessionVersions":list(self.server.sessions.values()),"registrations":self.server.registrations,"tokenAuthChecks":self.server.token_auth_checks,"requestedScopes":self.server.requested_scopes})
         if path.path == "/schema-external":
             self.server.schema_reads += 1
             return self.send(200,{"type":"string"})
@@ -141,10 +146,21 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         origin = f"http://127.0.0.1:{self.server.server_port}"
         if path == "/register":
+            self.server.registrations+=1
+            if self.server.registered: return self.send(400,{"error":"registration_not_supported"})
             body = json.loads(raw)
             return self.send(201, {"client_id": "mcplink-synthetic-client", "redirect_uris": body["redirect_uris"], "token_endpoint_auth_method": "none", "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"]})
         if path == "/token":
             body = {key: values[0] for key, values in parse_qs(raw.decode()).items()}
+            if self.server.registered:
+                client,secret=body.get("client_id"),body.get("client_secret")
+                basic=self.headers.get("Authorization","").startswith("Basic ")
+                if basic:
+                    try: client,secret=base64.b64decode(self.headers["Authorization"][6:]).decode().split(":",1)
+                    except (ValueError,UnicodeDecodeError): return self.send(400,{"error":"invalid_client"})
+                self.server.token_auth_checks+=1
+                if client!="synthetic-registered-client" or secret!="synthetic-registered-secret" or basic!=(self.server.token_auth=="basic"):
+                    return self.send(400,{"error":"invalid_client"})
             if body.get("grant_type") == "authorization_code":
                 original = self.server.codes.pop(body.get("code"), None)
                 challenge = base64.urlsafe_b64encode(hashlib.sha256(body.get("code_verifier", "").encode()).digest()).decode().rstrip("=")
@@ -166,6 +182,20 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(401, {"jsonrpc": "2.0", "id": None, "error": {"code": -32001, "message": "Synthetic authentication required"}}, challenge)
         try:
             request = json.loads(raw)
+            if path == "/mcp-session":
+                if request.get("method")=="initialize":
+                    # Reproduce the observed remote behavior: the session is bound
+                    # to the requested legacy version while the result negotiates
+                    # 2025-11-25. Advertising 2026 in a legacy flow breaks it.
+                    session=f"synthetic-session-{time.monotonic_ns()}"
+                    self.server.sessions[session]=request["params"]["protocolVersion"]
+                    result=handle(request,path,origin)|{"protocolVersion":"2025-11-25"}
+                    data=("event: message\ndata: "+json.dumps({"jsonrpc":"2.0","id":request["id"],"result":result})+"\n\n").encode()
+                    self.send_response(200);self.send_header("Content-Type","text/event-stream");self.send_header("Content-Length",str(len(data)));self.send_header("Mcp-Session-Id",session);self.end_headers();self.wfile.write(data)
+                    return
+                session=self.headers.get("Mcp-Session-Id","")
+                if self.server.sessions.get(session)!=self.headers.get("MCP-Protocol-Version"):
+                    return self.send(400,{"error":"invalid session"})
             if "id" not in request:
                 return self.send(202, {})
             if request.get("method") == "tools/call":
@@ -188,6 +218,8 @@ def main():
     parser.add_argument("--stdio", action="store_true")
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--auth", action="store_true")
+    parser.add_argument("--registered-client", action="store_true")
+    parser.add_argument("--token-auth", choices=["post","basic"], default="post")
     args = parser.parse_args()
     if args.stdio:
         for line in sys.stdin:
@@ -207,6 +239,9 @@ def main():
         faulthandler.cancel_dump_traceback_later()
     server.auth, server.codes, server.refreshes, server.calls = args.auth, {}, 0, 0
     server.lists, server.schema_reads = 0, 0
+    server.sessions = {}
+    server.registered, server.token_auth = args.registered_client, args.token_auth
+    server.registrations, server.token_auth_checks, server.requested_scopes = 0, 0, []
     server.access_token, server.refresh_token = "unissued-synthetic-access", "unissued-synthetic-refresh"
     print(json.dumps({"port": server.server_port}), flush=True)
     server.serve_forever()
