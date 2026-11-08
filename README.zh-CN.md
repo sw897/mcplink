@@ -138,6 +138,7 @@ python3 tests/e2e/claude_sources.py --record artifacts/e2e/claude/local
 ## 项目文档
 
 - [兼容范围](docs/compatibility.md) · [架构](docs/architecture.md) · [CLI 指南](docs/agent-cli.md)
+- [Agent 配置适配](docs/agent-adapters.md) · [真实上游验收](docs/real-upstreams.md)
 - [构建、签名与发布](docs/release.md) · [v0.1.0 发布说明](docs/releases/v0.1.0.md)
 - [开发与贡献](CONTRIBUTING.md) · [路线图](ROADMAP.md) · [反馈问题](https://github.com/sw897/mcplink/issues)
 

@@ -2,7 +2,7 @@
 
 更新于 2026-11-08。当前基线为已公开发布的 [v0.1.0 预览版](https://github.com/sw897/mcplink/releases/tag/v0.1.0)，提供 macOS Apple Silicon 与 Windows x64 安装包。具体支持范围以[兼容说明](docs/compatibility.md)和实际验证结果为准。
 
-通用 CLI、CLI 生成、远程传输及预注册 OAuth 实现已通过阶段审查和两平台隔离验收；真实 GitHub Token 链路已通过，真实 OAuth 仍需可用的注册应用与账号同意。Claude Code 与 OpenCode 适配已完成本地隔离及指定版本原生连接检查，正在执行完整回归及两平台验收。签名、公证和平台实机验收按所需环境单独跟进，后续版本号和发布日期在验收后确定。
+通用 CLI、CLI 生成、远程传输及预注册 OAuth 实现已通过阶段审查和两平台隔离验收；真实 GitHub Token 链路已通过，真实 OAuth 仍需可用的注册应用与账号同意。Claude Code 与 OpenCode 适配已通过本机 116 项和两平台各 115 项验收。腾讯会议官方 MCP 的真实 Token、只读调用、共享与更新恢复已通过，其他真实 OAuth 及上游接入继续按所需应用和账号推进。签名、公证和平台实机验收按所需环境单独跟进，后续版本号和发布日期在验收后确定。
 
 ## 已完成：v0.1.0 预览版
 
@@ -21,8 +21,8 @@ macOS 包使用 ad-hoc 签名，尚无 Developer ID 和公证；Windows 包未�
 | 1 | 完善通用 CLI 工具调用 | 工具发现、参数帮助与校验、实际调用、错误和退出码契约明确，并通过实际 CLI 入口验收 | 完成；[macOS、Windows 各 60 项通过](https://github.com/sw897/mcplink/actions/runs/42436531934) |
 | 2 | 按连接生成轻量 CLI | 第一阶段契约稳定；生成入口可调用选定工具，支持显式重新绑定并处理参数契约变化 | 完成；[macOS、Windows 各 75 项通过](https://github.com/sw897/mcplink/actions/runs/42440060881) |
 | 3 | 补齐 GitHub 远程 MCP 互操作 | 复现当前不兼容，分别验证传输、手工 Token 与 OAuth，完成只读调用及共享回归 | 真实 Token 通过；[macOS、Windows 各 89 项通过](https://github.com/sw897/mcplink/actions/runs/42444023309)；真实 OAuth 待应用与账号授权 |
-| 4 | 扩展 Agent 配置适配 | Claude Code 的可写作用域及 OpenCode 的版本化配置完成扫描、预览、应用与恢复 | 已实现；本机 Claude 2.1.319、OpenCode 1.19.5/2.2.1 连接检查通过，两平台完整回归待完成 |
-| 5 | 验证真实上游认证与刷新 | 腾讯会议、飞书、IMA 按实际入口记录认证归属、调用、到期、更新/刷新及撤销结论 | 依赖官方入口、应用权限与授权账号 |
+| 4 | 扩展 Agent 配置适配 | Claude Code 的可写作用域及 OpenCode 的版本化配置完成扫描、预览、应用与恢复 | 完成；[macOS、Windows 各 115 项通过](https://github.com/sw897/mcplink/actions/runs/42449440207)；Claude 2.1.319 两平台原生检查通过，OpenCode 1.19.5/2.2.1 原生检查限本机 macOS |
+| 5 | 验证真实上游认证与刷新 | 腾讯会议、飞书、IMA 按实际入口记录认证归属、调用、到期、更新/刷新及撤销结论 | 腾讯会议专用 Token 与只读共享/更新通过；真实 OAuth、飞书与 IMA 仍依赖相应应用和接入，见[真实验收](docs/real-upstreams.md) |
 | 需求驱动 | 扩展其他 MCP 协议能力 | 按客户端、上游及规范版本逐项通过端到端验收，能力声明与转发行为一致 | GitHub 等上游暴露的基础缺口随对应任务补齐；高级能力后置 |
 | 独立跟进 | 补齐 0.1 系列分发与实机验收 | 完成签名、公证、干净账号与 Windows 桌面验收，记录升级和卸载边界 | 依赖证书、账号及桌面环境 |
 
@@ -84,14 +84,14 @@ macOS 包使用 ad-hoc 签名，尚无 Developer ID 和公证；Windows 包未�
 
 ## 后续方向
 
-以下为待实施计划，官方文档核对日期为 2026-11-08。保持通用 CLI、CLI 生成的先后顺序；后续先建立 GitHub 远程不兼容的复现用例，再按 Agent 适配和真实上游认证逐项推进。协议缺口在需要它的接入任务中解决，不等待所有高级协议能力完成。
+以下保留各方向的设计边界及后续工作，官方文档核对日期为 2026-11-08；完成状态以上表为准。通用 CLI、CLI 生成、GitHub 远程修复和首批 Agent 适配已依次验收，真实上游继续逐项推进。协议缺口在需要它的接入任务中解决，不等待所有高级协议能力完成。
 
 ### Agent 配置适配：Claude Code、OpenCode 等
 
 | 对象 | 当前基线 | 首批适配范围 |
 | --- | --- | --- |
-| Claude Code | 源码已支持 user/local/project 读写及逐条恢复；插件/托管只读 | 两平台验收；保留原生审批与启停边界，其他原生专用字段按实际需求补齐 |
-| OpenCode | 源码已支持 V1/V2、JSON/JSONC、直连/共享、启停及恢复 | 两平台验收；文件变量、原生毫秒超时、专用 OAuth 和非 legacy 生命周期尚不能完整托管，明确拒绝导入，不静默丢失 |
+| Claude Code | 源码已支持 user/local/project 读写及逐条恢复；插件/托管只读 | 两平台验收已通过；保留原生审批与启停边界，其他原生专用字段按实际需求补齐 |
+| OpenCode | 源码已支持 V1/V2、JSON/JSONC、直连/共享、启停及恢复 | 两平台配置验收已通过，原生加载限 macOS；变量语法冲突、文件变量、原生毫秒超时、专用 OAuth 和非 legacy 生命周期尚不能完整托管，明确拒绝导入 |
 | 其他 Agent | 按实际需求选择 | 先收集版本、配置样例、作用域及加载方式，再分别登记可读、可写、直连、共享和认证边界 |
 
 实施步骤：
@@ -110,7 +110,7 @@ macOS 包使用 ad-hoc 签名，尚无 Developer ID 和公证；Windows 包未�
 | 上游 | 入口与认证核对 | 计划验证的只读任务与失效路径 |
 | --- | --- | --- |
 | GitHub 远程 MCP | 官方托管端点、Bearer Token 与预注册应用 OAuth，作为远程互操作对照；详见下一节 | 对已授权测试仓库完成工具发现及读取；分别记录 Token 撤销、权限不足，以及所选 OAuth 应用是否提供刷新令牌 |
-| 腾讯会议 | 官方 MCP/Skill 当前使用专用 Token 与代理；开放平台另有 OAuth/刷新接口，两条路径须分别核实，不能假定 Token 互通 | 查询授权范围内的测试会议或纪要，验证无权限、过期及 Token 更换；只有确认 MCP 可用的 OAuth 入口后才验收自动刷新。依据：[MCP 说明](https://meeting.tencent.com/support/articles/14/index.html)、[开放平台凭证说明](https://cloud.tencent.com/document/product/1095/43551) |
+| 腾讯会议 | 官方 MCP/Skill 当前使用专用 Token 与代理；开放平台另有 OAuth/刷新接口，两条路径须分别核实，不能假定 Token 互通 | 已通过官方 `v1.1.0` 接入的只读会议列表、双 Bridge、通用/生成 CLI、托管 Token 更新、无效值恢复和后台重启；未重置现有 Token，不计为 OAuth 刷新。业务错误包装及未验收范围见[真实验收](docs/real-upstreams.md)。依据：[MCP 说明](https://meeting.tencent.com/support/articles/14/index.html)、[开放平台凭证说明](https://cloud.tencent.com/document/product/1095/43551) |
 | 飞书 | 固定官方 MCP 版本与 STDIO/HTTP 模式，区分应用身份和用户 OAuth；明确 App 权限、回调与本地登录状态的归属 | 读取专用测试文档或知识库条目，检查到期后的刷新或重授权、是否轮换刷新令牌，以及撤销和租户隔离；以[官方 MCP 配置指南](https://github.com/larksuite/lark-openapi-mcp/blob/main/docs/usage/configuration/configuration.md)为接入依据 |
 | 腾讯 IMA 知识库 | 从 [IMA 官方开放入口](https://ima.qq.com/agent-interface)核实可用接口和 MCP 封装；[腾讯维护的 Octop 接入目录](https://github.com/TencentCloud/Octop/blob/main/src/octop/infra/connectors/catalog.json)提供 API Key/Client ID 线索，尚需回到 IMA 官方契约复核，不预设 OAuth | 检索、读取指定测试知识库，核对访问范围、Key 更换与撤销；若只有业务 API，明确外部 MCP 适配依赖，确认 OAuth/刷新接口后另行验收 |
 | 腾讯文档（回归） | 已验证手工 Token 共享与更新 | 保留双端读取、一次凭据更新恢复已有共享入口的基线，不将手工更新记为 OAuth 自动刷新 |

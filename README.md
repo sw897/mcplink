@@ -142,6 +142,7 @@ Standard OAuth, manual tokens, and native agent login have separate support boun
 Detailed guides are currently in Chinese:
 
 - [Compatibility](docs/compatibility.md) · [Architecture](docs/architecture.md) · [CLI guide](docs/agent-cli.md)
+- [Agent adapters](docs/agent-adapters.md) · [Real upstream validation](docs/real-upstreams.md)
 - [Release guide](docs/release.md) · [v0.1.0 notes](docs/releases/v0.1.0.md)
 - [Contributing](CONTRIBUTING.md) · [Roadmap](ROADMAP.md) · [Issues](https://github.com/sw897/mcplink/issues)
 

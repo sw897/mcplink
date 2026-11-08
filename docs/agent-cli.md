@@ -15,7 +15,7 @@ mcplink skill install --agent hermes
 
 Cargo 默认将程序放入 `~/.cargo/bin`，该目录需在 PATH 中。也可直接使用构建产物 `target/release/mcplink`，或 macOS 应用内的 `/Applications/mcplink.app/Contents/MacOS/mcplink`。共享配置会固定使用发起预览的程序绝对路径，请使用长期保留的位置。
 
-管理 Skill 的源文件为 [`skills/mcplink/SKILL.md`](../skills/mcplink/SKILL.md)，随二进制嵌入，安装时不需要源码目录或网络。安装目标是 `CODEX_HOME/skills/mcplink` 或 `HERMES_HOME/skills/mcplink`，未指定时使用用户默认目录。安装独立副本；相同内容重复执行返回 `unchanged`，不同内容或目标符号链接会被拒绝，不覆盖已有包。后续 Skill 版本可通过用户选择的版本管理流程维护。`mcplink skill show` 返回当前二进制内的 Skill 内容。
+管理 Skill 的源文件为 [`skills/mcplink/SKILL.md`](../skills/mcplink/SKILL.md)，随二进制嵌入，安装时不需要源码目录或网络。安装目标为 Codex、Hermes 或 Claude 的 Skill 目录；指定 `CODEX_HOME`、`HERMES_HOME`、`CLAUDE_CONFIG_DIR` 时使用对应目录，未指定时使用客户端默认目录。源码 API 5 还支持 OpenCode 配置目录下的 `skills/mcplink`，目录选择见 [Agent 适配](agent-adapters.md)。安装独立副本；相同内容重复执行返回 `unchanged`，不同内容或目标符号链接会被拒绝，不覆盖已有包。后续 Skill 版本可通过用户选择的版本管理流程维护。`mcplink skill show` 返回当前二进制内的 Skill 内容。
 
 安装后在新会话中使用 `$mcplink`，或让支持自动发现的 Agent 按任务选择它。例如：“用 mcplink 把已有文档服务以共享方式接给 Hermes，先核对变更预览，再按本次授权应用。”
 
@@ -38,6 +38,8 @@ Cargo 默认将程序放入 `~/.cargo/bin`，该目录需在 PATH 中。也可�
 | `2` | CLI 参数或 stdin 格式无效。错误信息不回显输入。 |
 
 `--help`、`--version` 输出普通文本。`bridge` 的 stdout 仅用于 MCP 协议，`daemon` 是前台后台进程。底层 `rpc` 保留原有成功 envelope：管理 RPC 出错现在退出 `1`，但兼容路径不重新解释嵌套的检查状态或批次结果，调用者还须核对它们；新脚本优先使用具名命令。
+
+工具错误退出码依据 MCP 的 RPC 错误或 `isError`。部分服务把业务 HTTP 错误包装在成功的工具正文中，此时 `call` 会原样返回并退出 `0`；自动化须按该服务的契约另行校验业务状态。已观察到的腾讯会议行为见[真实上游验收](real-upstreams.md#mcp-成功与业务成功)。
 
 `mcplink schema` 提供版本化 JSON，包括命令树、参数、允许值、stdin 对象字段、输出和退出码。每条命令也支持 `--help`。
 
@@ -69,7 +71,7 @@ Cargo 默认将程序放入 `~/.cargo/bin`，该目录需在 PATH 中。也可�
 | `cli inspect MANIFEST` / `cli rebind MANIFEST --connection ID` | 离线检查清单，或核对契约后显式重新绑定当前数据目录中的连接。 |
 | `skill show` / `skill install --agent AGENT` | 导出或安装 mcplink 自身管理 Skill。 |
 
-`AGENT` 为 `codex`、`hermes`、`claude`。`ACTION` 为 `upsert`、`disable`、`enable`、`remove`。目标使用来源 ID（如 `hermes:user`），连接使用导入或保存返回的托管 ID。
+`AGENT` 为 `codex`、`hermes`、`claude`；源码 management API 5 另支持 `opencode`。`ACTION` 为 `upsert`、`disable`、`enable`、`remove`。目标使用来源 ID（如 `hermes:user`），连接使用导入或保存返回的托管 ID。
 
 v0.1.0 中 Claude Code 来源只读。源码开发能力支持可写 user，以及显式添加的 local/project 作用域；插件、托管和未明确作用域的其他 JSON 仍只读。OpenCode 支持显式 V1/V2 JSON/JSONC 来源。参数、覆盖关系、保留格式与转换限制见 [Agent 配置适配](agent-adapters.md)。只读来源不会因以其他 Agent 或路径重复登记而变为可写。
 

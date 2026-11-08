@@ -7,7 +7,7 @@
 | 项目 | 范围 |
 | --- | --- |
 | macOS | Apple Silicon；已在 macOS 27 上验证本地构建与桌面流程。候选包使用 ad-hoc 签名，Developer ID 与公证尚待完成。 |
-| Windows | 提供 x64/NSIS 预览包；CI 已通过构建及 44 项核心/CLI/来源隔离场景，安装包内容、许可及编译路径已核验；桌面交互尚未实机验收。 |
+| Windows | 提供 x64/NSIS 预览包；v0.1.0 的 CI 已通过构建及 44 项核心/CLI/来源隔离场景，安装包内容、许可及编译路径已核验；桌面交互尚未实机验收。 |
 | Linux / Intel Mac | 未实机验收。 |
 | Codex | 用户 config.toml，以及手动添加的 TOML 来源；已检查 CLI 0.166.0、0.167.0 的相关入口。 |
 | Hermes | 用户 config.yaml，以及手动添加的 YAML 来源；已检查 0.23.0 的相关入口。 |
@@ -15,6 +15,8 @@
 | OpenCode | 源码开发能力支持 V1/V2 全局和显式项目 JSON/JSONC 的读写、启停、共享及恢复；本机 1.19.5、2.2.1 已加载共享入口并连接。 |
 
 v0.1.0 配置写入支持 Codex、Hermes。源码新增 Agent 适配及限制见[详细说明](agent-adapters.md)；不修改 Claude Code 审批、信任或项目启停偏好，不读取原生登录缓存。文件事务、原生加载和模型侧工具调用分别记录，后者不因配置写入或连接检查通过而自动视为通过。
+
+源码开发分支已通过[macOS、Windows 各 115 项隔离验收](https://github.com/sw897/mcplink/actions/runs/42449440207)，macOS 另通过 DMG 与 5 项安装后场景；本机完整回归 116 项通过。Claude Code 2.1.319 在两平台核对原生项目键、local 作用域和 MCP 连接；OpenCode 1.19.5、2.2.1 的原生连接仅在本机 macOS 验证，Windows 原生 OpenCode 尚未验收。原生连接检查不包含模型侧业务工具执行。
 
 默认扫描已支持的用户入口。项目/profile 通过手动添加真实配置文件纳入管理，不推断尚未选择的项目或运行中会话的覆盖关系。
 
@@ -36,7 +38,7 @@ v0.1.0 配置写入支持 Codex、Hermes。源码新增 Agent 适配及限制见
 
 源码开发能力已修复 GitHub 远程 MCP 的初始化版本兼容：使用已实现的 legacy `initialize` 流程时明确请求 `2025-11-25`，避免 SDK 默认 `2026-07-28` 与上游会话版本不一致。已在官方只读远程入口验证手工 Token 的发现、只读仓库文件读取、两个 Bridge、通用及生成 CLI，以及同一连接的凭据更新。v0.1.0 发布包仍含原问题；以上不代表全部 2026 协议能力或原生 Agent 加载已验收。
 
-预注册应用的 PKCE、显式 scope、固定回调、`client_secret_basic` / `client_secret_post`、并发刷新和后台重启已完成合成端到端验证。GitHub 真实 OAuth 尚缺可用的注册应用与账号同意，不能以手工 Token 或合成结果代替。腾讯会议、飞书及腾讯 IMA 知识库仍待真实验证；腾讯会议官方 MCP/Skill 使用专用 Token，各入口须分别确认标准 OAuth、专用 Token、API Key 或官方进程管理授权的边界。实施步骤见[路线图](../ROADMAP.md#后续方向)。
+预注册应用的 PKCE、显式 scope、固定回调、`client_secret_basic` / `client_secret_post`、并发刷新和后台重启已完成合成端到端验证。GitHub 真实 OAuth 尚缺可用的注册应用与账号同意，不能以手工 Token 或合成结果代替。腾讯会议官方 MCP 已验证真实专用 Token、只读会议列表、双 Bridge、通用/生成 CLI、托管凭据更新、无效值后恢复和后台重启；该长期 Token 不计为 OAuth 刷新验收。该服务会把部分业务 HTTP 错误包装在 `isError: false` 的结果中，须另行校验业务状态。详细范围见[真实上游验收](real-upstreams.md)。飞书与腾讯 IMA 仍待相应官方接入、应用权限及测试对象；实施步骤见[路线图](../ROADMAP.md#后续方向)。
 
 ## 加载与恢复
 
