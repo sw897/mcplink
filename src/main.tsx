@@ -27,248 +27,25 @@ import {
   Users,
   X,
 } from "lucide-react";
+import {
+  Agent,
+  agents,
+  Json,
+  Connection,
+  Operation,
+  Snapshot,
+  DesktopStatus,
+  Tool,
+  Dialog,
+  agentLabel,
+  time,
+  rpc,
+} from "./contracts";
+import { Status, ModalNotice, Modal } from "./Modal";
+import { SourceDialog } from "./SourceDialog";
+import { ConnectDialog } from "./ConnectDialog";
+import { Editor, CredentialDialog } from "./ConnectionEditor";
 import "./style.css";
-
-type Agent =
-  | "codex"
-  | "hermes"
-  | "claude"
-  | "opencode"
-  | "zcode"
-  | "deepseek"
-  | "openclaw"
-  | "kimicode";
-const agents: Agent[] = [
-  "codex",
-  "hermes",
-  "claude",
-  "opencode",
-  "zcode",
-  "deepseek",
-  "openclaw",
-  "kimicode",
-];
-type LocalAgent = {
-  id: Agent;
-  label: string;
-  detected: boolean;
-  installed: boolean;
-  configurable: boolean;
-  profilePath: string;
-  management: "writable" | "readOnly" | "discovery";
-};
-type Json = Record<string, unknown>;
-type Connection = {
-  id: string;
-  name: string;
-  title: string;
-  transport: string;
-  endpoint: string;
-  accountLabel: string;
-  authKind: string;
-  active: boolean;
-  status: string;
-  checkedAt?: number;
-  toolCount?: number;
-  lastError?: string;
-  detected?: boolean;
-  sourceId?: string;
-};
-type Source = {
-  id: string;
-  agent: Agent;
-  label: string;
-  path: string;
-  exists: boolean;
-  error?: string;
-  readOnly?: boolean;
-  scope?: string;
-  project?: string;
-};
-type Binding = {
-  id: string;
-  connectionId?: string;
-  sourceId: string;
-  agent: Agent;
-  name: string;
-  enabled: boolean;
-  changed: boolean;
-  needsUpdate?: boolean;
-  missing?: boolean;
-  mode: string;
-  overriddenIn?: { sourceId: string; project: string; scope: string }[];
-};
-type Operation = {
-  id: string;
-  name: string;
-  sourceId: string;
-  status: string;
-  createdAt: number;
-  error?: string;
-};
-type Snapshot = {
-  agents: LocalAgent[];
-  connections: Connection[];
-  bindings: Binding[];
-  sources: Source[];
-  history: Operation[];
-  gateway: { paused: boolean; sessions: number };
-  platform: string;
-  version: string;
-};
-type DesktopStatus = {
-  supported: boolean;
-  autostartEnabled?: boolean;
-  platform?: string;
-};
-type Change = {
-  id: string;
-  agent: Agent;
-  sourceId: string;
-  sourceLabel: string;
-  path: string;
-  name: string;
-  mode: string;
-  action: string;
-  reload: string;
-  before?: Json;
-  after?: Json;
-};
-type Plan = { planId: string; changes: Change[]; connection: Connection };
-type Tool = { name: string; description?: string; inputSchema?: Json };
-type Definition = {
-  command?: string;
-  args: string[];
-  env: Record<string, string>;
-  cwd?: string;
-  url?: string;
-  headers: Record<string, string>;
-  enabled: boolean;
-  oauth: boolean;
-  clientId?: string;
-  clientSecret?: string;
-  oauthScopes?: string[];
-  oauthCallbackPort?: number;
-  includeTools?: string[];
-  excludeTools?: string[];
-  timeout?: number;
-  startupTimeout?: number;
-  includeSpecified?: boolean;
-  resourcesDisabled?: boolean;
-  promptsDisabled?: boolean;
-};
-type Dialog =
-  | {
-      kind: "confirm";
-      title: string;
-      message: string;
-      method: string;
-      params: Json;
-    }
-  | { kind: "sources" }
-  | { kind: "addSource"; agent: Agent }
-  | { kind: "history" }
-  | { kind: "background" }
-  | { kind: "editor"; connection?: Connection }
-  | { kind: "connect"; connections: Connection[]; targetAgent?: Agent }
-  | { kind: "detail"; connection: Connection }
-  | { kind: "credential"; connection: Connection };
-
-const agentLabel = (agent: Agent) =>
-  ({
-    codex: "Codex",
-    hermes: "Hermes",
-    claude: "Claude Code",
-    opencode: "OpenCode",
-    zcode: "ZCode",
-    deepseek: "DeepSeek Harness",
-    openclaw: "OpenClaw",
-    kimicode: "Kimi Code",
-  })[agent] || agent;
-const time = (value?: number) =>
-  value
-    ? new Date(value * 1000).toLocaleString("zh-CN", {
-        month: "numeric",
-        day: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-      })
-    : "尚未检查";
-
-async function rpc<T>(method: string, params: Json = {}): Promise<T> {
-  const response = await invoke<{ ok?: T; error?: { message: string } }>(
-    "rpc",
-    { method, params },
-  );
-  if (response.error) throw new Error(response.error.message);
-  if (response.ok === undefined) throw new Error("后台返回的结果不完整");
-  return response.ok;
-}
-
-function Status({ value, label }: { value: string; label?: string }) {
-  const labels: Record<string, string> = {
-    ready: "检查可用",
-    configured: "已配置",
-    error: "连接异常",
-    needs_auth: "需要认证",
-    disconnected: "已断开",
-    authorizing: "等待授权",
-    applied: "待 Agent 加载",
-    failed: "操作失败",
-    restored: "已恢复",
-    conflict: "需要核对",
-    pending: "处理中",
-  };
-  return (
-    <span className={`status ${value}`}>
-      <i />
-      {label || labels[value] || value}
-    </span>
-  );
-}
-
-function Modal({
-  title,
-  children,
-  onClose,
-  wide,
-}: {
-  title: string;
-  children: React.ReactNode;
-  onClose: () => void;
-  wide?: boolean;
-}) {
-  useEffect(() => {
-    const close = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", close);
-    return () => window.removeEventListener("keydown", close);
-  }, [onClose]);
-  return (
-    <div
-      className="overlay"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
-    >
-      <section
-        className={`modal ${wide ? "wide" : ""}`}
-        role="dialog"
-        aria-modal="true"
-        aria-label={title}
-      >
-        <header>
-          <h2>{title}</h2>
-          <button className="icon" onClick={onClose} aria-label="关闭">
-            <X size={19} />
-          </button>
-        </header>
-        {children}
-      </section>
-    </div>
-  );
-}
 
 function App() {
   const [page, setPage] = useState<"services" | "accounts" | "agents">(
@@ -285,6 +62,8 @@ function App() {
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState<{ text: string; error?: boolean }>();
   const [failure, setFailure] = useState("");
+  const [olderHistory, setOlderHistory] = useState<Operation[]>([]);
+  const [historyEnd, setHistoryEnd] = useState(false);
   const [checked, setChecked] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
   const loadSequence = useRef(0);
@@ -468,6 +247,29 @@ function App() {
     setAgentOnlyConfigured(false);
   };
 
+  const addSource = async (agent: Agent) => {
+    if (agent !== "codex" && agent !== "hermes") {
+      setDialog({ kind: "addSource", agent });
+      return;
+    }
+    try {
+      const path = await open({
+        title: `选择 ${agentLabel(agent)} 配置`,
+        multiple: false,
+        filters: [
+          {
+            name: "配置文件",
+            extensions: agent === "codex" ? ["toml"] : ["yaml", "yml"],
+          },
+        ],
+      });
+      if (typeof path === "string")
+        await action("添加来源", "sources.add", { agent, path });
+    } catch (error) {
+      setNotice({ text: String(error), error: true });
+    }
+  };
+
   const bindingCell = (connection: Connection, agent: Agent) => {
     if (!isInstalled(agent)) return <span className="muted">未安装</span>;
     const bindings = ownBindings(connection).filter(
@@ -482,9 +284,7 @@ function App() {
           className="cell-add"
           disabled={!writable && !missing}
           onClick={() =>
-            missing
-              ? setDialog({ kind: "addSource", agent })
-              : void connect([connection], agent)
+            missing ? void addSource(agent) : void connect([connection], agent)
           }
         >
           <Plus size={13} />
@@ -527,7 +327,20 @@ function App() {
     );
   };
 
-  return (
+  const toast = notice && (
+    <div className={`toast ${notice.error ? "error" : ""}`} role="status">
+      {notice.error ? <CircleHelp size={18} /> : <CheckCircle2 size={18} />}
+      <span>{notice.text}</span>
+      <button
+        className="icon"
+        onClick={() => setNotice(undefined)}
+        aria-label="关闭提示"
+      >
+        <X size={14} />
+      </button>
+    </div>
+  );
+  const content = (
     <div className="app-shell">
       <aside className="sidebar">
         <a className="brand" onClick={() => setPage("services")}>
@@ -577,15 +390,30 @@ function App() {
           </button>
           <button
             className="utility"
-            onClick={() => setDialog({ kind: "history" })}
+            onClick={() => {
+              setOlderHistory([]);
+              setHistoryEnd(false);
+              setDialog({ kind: "history" });
+            }}
           >
             <History size={16} />
             变更与恢复
           </button>
           <div className="runtime">
-            <i className={data?.gateway.paused ? "paused" : ""} />
+            <i
+              className={
+                failure || !data || data.gateway.paused ? "paused" : ""
+              }
+            />
             <span>
-              本机管理{data?.gateway.paused ? " · 共享已暂停" : "已连接"}
+              本机管理
+              {failure
+                ? "连接异常"
+                : !data
+                  ? "连接中"
+                  : data.gateway.paused
+                    ? " · 共享已暂停"
+                    : "已连接"}
             </span>
             <small>v{data?.version || "0.1.0"}</small>
           </div>
@@ -712,6 +540,7 @@ function App() {
                     <Search size={16} />
                     <input
                       placeholder="搜索服务或账号"
+                      aria-label="搜索服务或账号"
                       value={query}
                       onChange={(event) => setQuery(event.target.value)}
                     />
@@ -829,6 +658,7 @@ function App() {
                         <div className="service-card-footer">
                           <div
                             className="linked-agents"
+                            role="group"
                             aria-label="已接入 Agent"
                           >
                             {linkedAgents.length ? (
@@ -887,14 +717,16 @@ function App() {
                     <div className="empty">
                       <Server size={30} />
                       <h3>
-                        {query ? "没有匹配的服务" : "把已有的 MCP 接到一起"}
+                        {query || filter !== "all"
+                          ? "没有匹配的服务"
+                          : "把已有的 MCP 接到一起"}
                       </h3>
                       <p>
-                        {query
+                        {query || filter !== "all"
                           ? "尝试其他名称或筛选条件。"
                           : "支持的配置会自动显示，也可以添加服务或配置位置。"}
                       </p>
-                      {!query && (
+                      {!query && filter === "all" && (
                         <button
                           className="button"
                           onClick={() => setDialog({ kind: "sources" })}
@@ -939,11 +771,13 @@ function App() {
                         <div>
                           <dt>认证维护</dt>
                           <dd>
-                            {connection.detected
-                              ? "原客户端 / 服务"
-                              : connection.authKind === "oauth"
-                                ? "mcplink · OAuth"
-                                : "mcplink · 令牌"}
+                            {connection.authKind === "none"
+                              ? "无需认证"
+                              : connection.detected
+                                ? "原客户端 / 服务"
+                                : connection.authKind === "oauth"
+                                  ? "mcplink · OAuth"
+                                  : "mcplink · 令牌"}
                           </dd>
                         </div>
                         <div>
@@ -980,29 +814,38 @@ function App() {
                             const managed = await manage(connection);
                             if (managed)
                               setDialog({
-                                kind: "credential",
+                                kind:
+                                  managed.transport === "http"
+                                    ? "credential"
+                                    : "editor",
                                 connection: managed,
                               });
                           }}
                         >
-                          更新认证
+                          {connection.transport === "stdio"
+                            ? "编辑启动配置"
+                            : connection.authKind === "none"
+                              ? "设置认证"
+                              : "更新认证"}
                         </button>
-                        {!connection.detected && (
-                          <button
-                            className="text-button danger"
-                            onClick={() =>
-                              setDialog({
-                                kind: "confirm",
-                                title: "断开托管认证",
-                                message: `断开 ${connection.title} 的认证？共享此账号的 Agent 将需要重新认证；原生直连凭据需在相应客户端处理。`,
-                                method: "credentials.disconnect",
-                                params: { id: connection.id },
-                              })
-                            }
-                          >
-                            断开
-                          </button>
-                        )}
+                        {!connection.detected &&
+                          connection.active &&
+                          connection.authKind !== "none" && (
+                            <button
+                              className="text-button danger"
+                              onClick={() =>
+                                setDialog({
+                                  kind: "confirm",
+                                  title: "断开托管认证",
+                                  message: `断开 ${connection.title} 的认证？共享此账号的 Agent 将需要重新认证；原生直连凭据需在相应客户端处理。`,
+                                  method: "credentials.disconnect",
+                                  params: { id: connection.id },
+                                })
+                              }
+                            >
+                              断开
+                            </button>
+                          )}
                       </div>
                     </article>
                   ))}
@@ -1086,29 +929,10 @@ function App() {
                       <button
                         className="button small"
                         disabled={!currentAgent.configurable}
-                        onClick={() =>
-                          setDialog({
-                            kind: "addSource",
-                            agent: currentAgent.id,
-                          })
-                        }
+                        onClick={() => void addSource(currentAgent.id)}
                       >
                         <FolderPlus size={14} />
                         添加来源
-                      </button>
-                      <button
-                        className="button small primary"
-                        disabled={
-                          !currentAgent.configurable ||
-                          !data.connections.length ||
-                          !currentSources.some((source) => !source.readOnly)
-                        }
-                        onClick={() =>
-                          connect(data.connections, currentAgent.id)
-                        }
-                      >
-                        <Plus size={14} />
-                        接入服务
                       </button>
                     </div>
                   </header>
@@ -1120,10 +944,30 @@ function App() {
                         <p>
                           安装 {currentAgent.label} 后点击刷新，即可接入 MCP
                           服务。
-                          {currentAgent.detected
-                            ? "检测到的配置残留仅供查看。"
-                            : ""}
+                          {currentAgent.detected ? "已找到配置文件。" : ""}
                         </p>
+                        <button
+                          className="button small"
+                          disabled={!!busy}
+                          onClick={async () => {
+                            try {
+                              const path = await open({
+                                multiple: false,
+                                title: `选择 ${currentAgent.label} 的 CLI 可执行文件`,
+                              });
+                              if (typeof path === "string")
+                                await action(
+                                  "核验客户端程序",
+                                  "agents.launcher",
+                                  { agent: currentAgent.id, path },
+                                );
+                            } catch (e) {
+                              setNotice({ text: String(e), error: true });
+                            }
+                          }}
+                        >
+                          选择已安装的 CLI
+                        </button>
                       </div>
                     </div>
                   ) : (
@@ -1248,19 +1092,7 @@ function App() {
           </>
         )}
       </main>
-      {notice && (
-        <div className={`toast ${notice.error ? "error" : ""}`} role="status">
-          {notice.error ? <CircleHelp size={18} /> : <CheckCircle2 size={18} />}
-          <span>{notice.text}</span>
-          <button
-            className="icon"
-            onClick={() => setNotice(undefined)}
-            aria-label="关闭提示"
-          >
-            <X size={14} />
-          </button>
-        </div>
-      )}
+      {!dialog && toast}
       {busy && (
         <div className="busy-indicator">
           <Loader2 className="spin" size={15} />
@@ -1301,25 +1133,7 @@ function App() {
                   className="button"
                   key={agent}
                   disabled={!isInstalled(agent)}
-                  onClick={async () => {
-                    if (agent !== "codex" && agent !== "hermes") {
-                      setDialog({ kind: "addSource", agent });
-                      return;
-                    }
-                    const path = await open({
-                      title: `选择 ${agentLabel(agent)} 配置`,
-                      multiple: false,
-                      filters: [
-                        {
-                          name: "配置文件",
-                          extensions:
-                            agent === "codex" ? ["toml"] : ["yaml", "yml"],
-                        },
-                      ],
-                    });
-                    if (path)
-                      await action("添加来源", "sources.add", { agent, path });
-                  }}
+                  onClick={() => void addSource(agent)}
                 >
                   <FolderPlus size={15} />
                   {isInstalled(agent)
@@ -1348,7 +1162,12 @@ function App() {
               恢复仅处理该次操作涉及的条目，后续改动会先核对。
             </p>
             {data?.history.length ? (
-              data.history.map((operation) => (
+              [
+                ...data.history,
+                ...olderHistory.filter(
+                  (op) => !data.history.some((recent) => recent.id === op.id),
+                ),
+              ].map((operation) => (
                 <div className="history-row" key={operation.id}>
                   <Clock3 size={17} />
                   <div>
@@ -1366,7 +1185,28 @@ function App() {
                     )}
                   </div>
                   <Status value={operation.status} />
-                  {operation.status === "applied" && (
+                  {operation.status === "pending" && (
+                    <button
+                      className="button small"
+                      disabled={!!busy}
+                      onClick={async () => {
+                        const result = await action<{ remaining: number }>(
+                          "核对写入",
+                          "changes.reconcile",
+                        );
+                        if (result)
+                          setNotice({
+                            text: result.remaining
+                              ? "仍有待核对的写入，请查看记录中的原因"
+                              : "已核对写入记录",
+                            error: result.remaining > 0,
+                          });
+                      }}
+                    >
+                      重新核对
+                    </button>
+                  )}
+                  {["applied", "failed"].includes(operation.status) && (
                     <button
                       className="button small"
                       disabled={
@@ -1383,13 +1223,17 @@ function App() {
                           "changes.restore",
                           { operationId: operation.id },
                         );
+                        if (result) {
+                          setOlderHistory([]);
+                          setHistoryEnd(false);
+                        }
                         if (result)
                           setNotice({
                             text: "配置已恢复，请在对应 Agent 重新加载",
                           });
                       }}
                     >
-                      恢复
+                      {operation.status === "failed" ? "核对并恢复" : "恢复"}
                     </button>
                   )}
                 </div>
@@ -1400,27 +1244,30 @@ function App() {
                 <p>配置变更后，恢复记录会显示在这里。</p>
               </div>
             )}
-            <div className="gateway-control">
-              <div>
-                <strong>共享后台</strong>
-                <p className="muted">
-                  {data?.gateway.paused
-                    ? "共享调用已暂停"
-                    : "共享连接按调用需要启动上游服务"}
-                </p>
-              </div>
+            {data?.history.length === 25 && !historyEnd && (
               <button
                 className="button"
-                onClick={() =>
-                  void action(
-                    "调整共享后台",
-                    data?.gateway.paused ? "gateway.resume" : "gateway.pause",
-                  )
-                }
+                disabled={!!busy}
+                onClick={async () => {
+                  setBusy("读取历史");
+                  try {
+                    const before = (olderHistory.at(-1) || data.history.at(-1))!
+                      .cursor;
+                    const next = await rpc<Operation[]>("changes.history", {
+                      before,
+                    });
+                    setOlderHistory([...olderHistory, ...next]);
+                    setHistoryEnd(next.length < 25);
+                  } catch (e) {
+                    setNotice({ text: String(e), error: true });
+                  } finally {
+                    setBusy("");
+                  }
+                }}
               >
-                {data?.gateway.paused ? "恢复共享" : "暂停共享"}
+                查看更早的记录
               </button>
-            </div>
+            )}
           </div>
         </Modal>
       )}
@@ -1767,946 +1614,7 @@ function App() {
       )}
     </div>
   );
-}
-
-function SourceDialog({
-  agent,
-  onClose,
-  onSaved,
-}: {
-  agent: Agent;
-  onClose: () => void;
-  onSaved: () => Promise<void>;
-}) {
-  const [scope, setScope] = useState("user");
-  const [path, setPath] = useState("");
-  const [project, setProject] = useState("");
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState("");
-  const scoped = scope === "local" || scope === "project";
-  return (
-    <Modal title={`添加 ${agentLabel(agent)} 来源`} onClose={onClose}>
-      <form
-        className="modal-body"
-        onSubmit={async (event) => {
-          event.preventDefault();
-          setPending(true);
-          setError("");
-          try {
-            await rpc("sources.add", {
-              agent,
-              scope: scope === "readonly" ? null : scope,
-              path: scoped && agent === "claude" ? null : path || null,
-              project: scoped ? project : null,
-            });
-            await onSaved();
-          } catch (error) {
-            setError((error as Error).message);
-          } finally {
-            setPending(false);
-          }
-        }}
-      >
-        <label className="field">
-          <span>配置作用域</span>
-          <select
-            value={scope}
-            onChange={(event) => setScope(event.target.value)}
-          >
-            <option value="user">User · 所有项目</option>
-            {agent === "claude" && (
-              <option value="local">Local · 个人项目配置</option>
-            )}
-            {["claude", "opencode", "zcode", "kimicode"].includes(agent) && (
-              <option value="project">Project · 项目配置</option>
-            )}
-            {agent === "claude" && (
-              <option value="readonly">其他 JSON · 只读盘点</option>
-            )}
-          </select>
-        </label>
-        {scoped && (
-          <label className="field">
-            <span>项目目录</span>
-            <input
-              value={project}
-              onChange={(event) => setProject(event.target.value)}
-              required
-              placeholder="完整目录路径"
-            />
-            <button
-              type="button"
-              className="button"
-              onClick={async () => {
-                const selected = await open({
-                  directory: true,
-                  multiple: false,
-                  title: "选择项目目录",
-                });
-                if (typeof selected === "string") setProject(selected);
-              }}
-            >
-              选择项目目录
-            </button>
-          </label>
-        )}
-        {(!scoped || agent === "opencode") && (
-          <label className="field">
-            <span>配置文件</span>
-            <input
-              value={path}
-              onChange={(event) => setPath(event.target.value)}
-              required={scope === "readonly"}
-              placeholder={
-                agent === "opencode"
-                  ? "留空自动选择 opencode.json(c)"
-                  : scope === "user"
-                    ? agent === "claude"
-                      ? "留空使用当前用户 .claude.json"
-                      : agent === "deepseek"
-                        ? "留空使用 desktop profile 的 cordis.patch.yml"
-                        : "留空使用当前用户的原生 MCP 配置"
-                    : "完整 JSON 文件路径"
-              }
-            />
-            <button
-              type="button"
-              className="button"
-              onClick={async () => {
-                const selected = await open({
-                  multiple: false,
-                  filters: [
-                    {
-                      name: "原生 MCP 配置",
-                      extensions:
-                        agent === "deepseek"
-                          ? ["yml", "yaml"]
-                          : ["json", "jsonc"],
-                    },
-                  ],
-                });
-                if (typeof selected === "string") setPath(selected);
-              }}
-            >
-              选择配置文件
-            </button>
-          </label>
-        )}
-        <p className="field-help">
-          {agent === "opencode"
-            ? "使用当前 OpenCode 配置格式，支持 JSON/JSONC 及空 MCP 配置，保留注释和其他设置。"
-            : agent === "claude"
-              ? "User 与 Local 使用 .claude.json 的不同位置；Local 按 Git 项目根目录定位。Project 使用所选目录的 .mcp.json，客户端审批及信任由 Claude Code 维护。插件与托管来源保持只读。"
-              : agent === "deepseek"
-                ? "按 profile 管理 cordis.patch.yml 中的 MCP 插件，可选择 desktop、web 或其他实际 profile。共享代理写入原生 stdio 入口。"
-                : "使用当前原生 MCP 格式，支持配置管理及共享代理。文件仅在应用预览后的变更时写入。"}
-        </p>
-        {error && (
-          <div className="warning-banner" role="alert">
-            {error}
-          </div>
-        )}
-        <footer className="modal-footer">
-          <button type="button" className="button" onClick={onClose}>
-            取消
-          </button>
-          <button className="button primary" disabled={pending}>
-            {pending && <Loader2 className="spin" size={15} />}添加来源
-          </button>
-        </footer>
-      </form>
-    </Modal>
-  );
-}
-
-function ConnectDialog({
-  connections,
-  targetAgent,
-  onManage,
-  sources,
-  clients,
-  bindings,
-  onClose,
-  onDone,
-  onNotice,
-}: {
-  connections: Connection[];
-  targetAgent?: Agent;
-  onManage: (connection: Connection) => Promise<Connection | undefined>;
-  sources: Source[];
-  clients: LocalAgent[];
-  bindings: Binding[];
-  onClose: () => void;
-  onDone: () => Promise<void>;
-  onNotice: (notice: { text: string; error?: boolean }) => void;
-}) {
-  const [targets, setTargets] = useState<string[]>(() =>
-    targetAgent
-      ? sources
-          .filter(
-            (source) =>
-              source.agent === targetAgent &&
-              !source.readOnly &&
-              clients.some(
-                (client) => client.id === targetAgent && client.configurable,
-              ),
-          )
-          .map((source) => source.id)
-      : [],
-  );
-  const [mode, setMode] = useState("direct");
-  const [operation, setOperation] = useState("upsert");
-  const [plans, setPlans] = useState<Plan[]>([]);
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState("");
-  const [results, setResults] =
-    useState<{ sourceId: string; status: string; message: string }[]>();
-  const isAvailable = (source: Source) =>
-    !source.readOnly &&
-    clients.some((client) => client.id === source.agent && client.configurable);
-  useEffect(() => {
-    const available = new Set(
-      sources
-        .filter(
-          (source) =>
-            !source.readOnly &&
-            clients.some(
-              (client) => client.id === source.agent && client.configurable,
-            ),
-        )
-        .map((source) => source.id),
-    );
-    setTargets((previous) => previous.filter((id) => available.has(id)));
-    setPlans((previous) =>
-      previous.some((plan) =>
-        plan.changes.some((change) => !available.has(change.sourceId)),
-      )
-        ? []
-        : previous,
-    );
-  }, [clients, sources]);
-  const preview = async () => {
-    setPending(true);
-    setError("");
-    try {
-      const managed: Connection[] = [];
-      for (const connection of connections) {
-        const result = await onManage(connection);
-        if (!result) throw new Error("服务暂时无法纳入管理，请核对后重试");
-        managed.push(result);
-      }
-      const plan = await rpc<Plan>("changes.preview", {
-        connectionIds: managed.map((connection) => connection.id),
-        targetSourceIds: targets,
-        mode,
-        action: operation,
-      });
-      setPlans([plan]);
-    } catch (error) {
-      setError((error as Error).message);
-    } finally {
-      setPending(false);
-    }
-  };
-  const apply = async () => {
-    setPending(true);
-    setError("");
-    try {
-      const all = [];
-      for (const plan of plans) {
-        const result = await rpc<{
-          results: { sourceId: string; status: string; message: string }[];
-        }>("changes.apply", { planId: plan.planId });
-        all.push(...result.results);
-      }
-      setResults(all);
-      await onDone();
-      onNotice({
-        text: all.every((result) => result.status === "applied")
-          ? "配置已写入，请在对应 Agent 重新加载 MCP"
-          : "部分目标未完成，请核对每项结果",
-        error: all.some((result) => result.status !== "applied"),
-      });
-    } catch (error) {
-      setError((error as Error).message);
-    } finally {
-      setPending(false);
-    }
-  };
-  return (
-    <Modal
-      title={
-        results ? "接入结果" : plans.length ? "核对配置变更" : "接给 Agent"
-      }
-      wide
-      onClose={onClose}
-    >
-      <div className="modal-body">
-        <div className="connection-summary">
-          <Server size={20} />
-          <div>
-            <strong>
-              {connections.length === 1
-                ? connections[0].title
-                : `${connections.length} 项服务`}
-            </strong>
-            <p>{connections.map((connection) => connection.name).join("、")}</p>
-          </div>
-        </div>
-        {!plans.length && !results && (
-          <>
-            <label className="field">
-              <span>操作</span>
-              <select
-                value={operation}
-                onChange={(event) => setOperation(event.target.value)}
-              >
-                <option value="upsert">接入 / 更新配置</option>
-                <option value="disable">停用所选 Agent 的服务</option>
-                <option value="enable">启用所选 Agent 的服务</option>
-                <option value="remove">移除所选 Agent 的配置</option>
-              </select>
-            </label>
-            {operation === "upsert" && (
-              <div className="mode-choices">
-                <label className={mode === "direct" ? "chosen" : ""}>
-                  <input
-                    type="radio"
-                    name="mode"
-                    checked={mode === "direct"}
-                    onChange={() => setMode("direct")}
-                  />
-                  <strong>直连</strong>
-                  <small>各 Agent 直接启动或连接服务</small>
-                </label>
-                <label className={mode === "shared" ? "chosen" : ""}>
-                  <input
-                    type="radio"
-                    name="mode"
-                    checked={mode === "shared"}
-                    onChange={() => setMode("shared")}
-                  />
-                  <strong>通过 mcplink 共享</strong>
-                  <small>共用托管账号与上游连接</small>
-                </label>
-              </div>
-            )}
-            <h3 className="section-label">目标 Agent 与配置位置</h3>
-            {sources.map((source) => (
-              <label className="target" key={source.id}>
-                <input
-                  type="checkbox"
-                  checked={targets.includes(source.id)}
-                  disabled={!isAvailable(source)}
-                  onChange={(event) =>
-                    setTargets((previous) =>
-                      event.target.checked
-                        ? [...previous, source.id]
-                        : previous.filter((id) => id !== source.id),
-                    )
-                  }
-                />
-                <span className={`agent-avatar ${source.agent}`}>
-                  {agentLabel(source.agent)[0]}
-                </span>
-                <div>
-                  <strong>
-                    {agentLabel(source.agent)} · {source.label}
-                  </strong>
-                  <small>
-                    {source.path}
-                    {!clients.some(
-                      (client) =>
-                        client.id === source.agent && client.installed,
-                    )
-                      ? " · 未安装，不可配置"
-                      : source.readOnly
-                        ? " · 只读，请在原客户端维护"
-                        : ""}
-                  </small>
-                </div>
-                {bindings.some(
-                  (binding) =>
-                    binding.sourceId === source.id &&
-                    connections.some(
-                      (connection) => connection.id === binding.connectionId,
-                    ),
-                ) && <span className="muted">已有接入</span>}
-              </label>
-            ))}
-          </>
-        )}
-        {plans.map((plan) => (
-          <div key={plan.planId}>
-            <h3>{plan.connection.title}</h3>
-            {plan.changes.map((change) => (
-              <div className="change-preview" key={change.id}>
-                <div>
-                  <span className={`agent-avatar ${change.agent}`}>
-                    {agentLabel(change.agent)[0]}
-                  </span>
-                  <strong>
-                    {agentLabel(change.agent)} · {change.sourceLabel}
-                  </strong>
-                  <span className="pill">
-                    {change.action === "remove"
-                      ? "移除配置"
-                      : change.action === "disable"
-                        ? "停用"
-                        : change.action === "enable"
-                          ? "启用"
-                          : change.mode === "shared"
-                            ? "共享账号"
-                            : "直连"}
-                  </span>
-                </div>
-                <p>{change.reload}</p>
-                <details>
-                  <summary>查看脱敏配置变化</summary>
-                  <pre>
-                    {JSON.stringify(
-                      { before: change.before, after: change.after },
-                      null,
-                      2,
-                    )}
-                  </pre>
-                </details>
-                <details>
-                  <summary>配置位置与接入名称</summary>
-                  <code>{change.path}</code>
-                  <code>{change.name}</code>
-                </details>
-              </div>
-            ))}
-          </div>
-        ))}
-        {results?.map((result, index) => (
-          <div className="result-row" key={index}>
-            <Status value={result.status} />
-            <p>
-              {sources.find((source) => source.id === result.sourceId)?.agent} ·{" "}
-              {result.message}
-            </p>
-          </div>
-        ))}
-        {error && (
-          <div className="warning-banner" role="alert">
-            {error}
-          </div>
-        )}
-        <footer className="modal-footer">
-          {plans.length > 0 && !results && (
-            <button
-              className="button"
-              disabled={pending}
-              onClick={() => setPlans([])}
-            >
-              返回调整
-            </button>
-          )}
-          <button className="button" onClick={onClose}>
-            {results ? "完成" : "取消"}
-          </button>
-          {!results && (
-            <button
-              className="button primary"
-              disabled={pending || !targets.length}
-              onClick={() => void (plans.length ? apply() : preview())}
-            >
-              {pending && <Loader2 size={15} className="spin" />}
-              {plans.length ? "应用配置" : "预览变更"}
-            </button>
-          )}
-        </footer>
-      </div>
-    </Modal>
-  );
-}
-
-function Editor({
-  connection,
-  onClose,
-  onDone,
-}: {
-  connection?: Connection;
-  onClose: () => void;
-  onDone: () => Promise<void>;
-}) {
-  const [name, setName] = useState(connection?.name || "");
-  const [title, setTitle] = useState(connection?.title || "");
-  const [type, setType] = useState("http");
-  const [url, setUrl] = useState("");
-  const [command, setCommand] = useState("");
-  const [args, setArgs] = useState("");
-  const [account, setAccount] = useState(connection?.accountLabel || "");
-  const [token, setToken] = useState("");
-  const [environment, setEnvironment] = useState("{}");
-  const [customHeaders, setCustomHeaders] = useState("{}");
-  const [cwd, setCwd] = useState("");
-  const [definition, setDefinition] = useState<Definition>();
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState("");
-  useEffect(() => {
-    if (connection) {
-      setPending(true);
-      rpc<{ definition: Definition }>("connections.detail", {
-        id: connection.id,
-      })
-        .then((result) => {
-          setDefinition(result.definition);
-          setType(result.definition.url ? "http" : "stdio");
-          setUrl(result.definition.url || "");
-          setCommand(result.definition.command || "");
-          setArgs(result.definition.args.join("\n"));
-          setEnvironment(JSON.stringify(result.definition.env, null, 2));
-          setCustomHeaders(JSON.stringify(result.definition.headers, null, 2));
-          setCwd(result.definition.cwd || "");
-        })
-        .catch((error) => setError(error.message))
-        .finally(() => setPending(false));
-    }
-  }, [connection]);
-  const save = async (event: React.FormEvent) => {
-    event.preventDefault();
-    setPending(true);
-    setError("");
-    try {
-      const next: Definition = {
-        args: [],
-        env: {},
-        headers: {},
-        enabled: true,
-        oauth: false,
-        ...definition,
-        command: type === "stdio" ? command : undefined,
-        url: type === "http" ? url : undefined,
-      };
-      if (type === "stdio") {
-        next.args = args.split("\n").filter(Boolean);
-        next.headers = {};
-        next.oauth = false;
-        next.clientId = undefined;
-        next.clientSecret = undefined;
-        next.oauthScopes = [];
-        next.oauthCallbackPort = undefined;
-        next.cwd = cwd || undefined;
-        next.env = JSON.parse(environment);
-      } else {
-        next.args = [];
-        next.env = {};
-        next.cwd = undefined;
-        next.headers = JSON.parse(customHeaders);
-      }
-      for (const map of [next.env, next.headers]) {
-        if (
-          !map ||
-          Array.isArray(map) ||
-          typeof map !== "object" ||
-          Object.values(map).some((v) => typeof v !== "string")
-        )
-          throw new Error("环境变量与请求头需要键值均为字符串的 JSON 对象");
-      }
-      if (token && type === "http") {
-        next.headers = Object.fromEntries(
-          Object.entries(next.headers).filter(
-            ([key]) => key.toLowerCase() !== "authorization",
-          ),
-        );
-        next.headers.Authorization = token;
-        next.oauth = false;
-      }
-      await rpc("connections.save", {
-        id: connection?.id,
-        name,
-        title: title || name,
-        accountLabel: account || "用户标签",
-        definition: next,
-      });
-      await onDone();
-    } catch (error) {
-      setError((error as Error).message);
-    } finally {
-      setPending(false);
-    }
-  };
-  return (
-    <Modal
-      title={connection ? "编辑服务连接" : "添加 MCP 服务"}
-      onClose={onClose}
-    >
-      <form className="modal-body" onSubmit={(event) => void save(event)}>
-        <div className="form-grid">
-          <label className="field">
-            <span>显示名称</span>
-            <input
-              value={title}
-              onChange={(event) => setTitle(event.target.value)}
-              placeholder="例如 腾讯文档 · 工作账号"
-            />
-          </label>
-          <label className="field">
-            <span>接入名称</span>
-            <input
-              required
-              pattern="[A-Za-z0-9_-]{1,80}"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              placeholder="tencent_docs"
-            />
-          </label>
-        </div>
-        <label className="field">
-          <span>服务类型</span>
-          <select
-            value={type}
-            onChange={(event) => setType(event.target.value)}
-          >
-            <option value="http">HTTP MCP</option>
-            <option value="stdio">本地进程 · STDIO</option>
-          </select>
-        </label>
-        {type === "http" ? (
-          <>
-            <label className="field">
-              <span>MCP 地址</span>
-              <input
-                required
-                value={url}
-                onChange={(event) => setUrl(event.target.value)}
-                placeholder="https://example.com/mcp"
-              />
-            </label>
-            <label className="field">
-              <span>Authorization 值</span>
-              <input
-                type="password"
-                autoComplete="off"
-                value={token}
-                onChange={(event) => setToken(event.target.value)}
-                placeholder={
-                  connection
-                    ? "留空保留现有认证"
-                    : "免登录服务可留空，按服务要求填写完整值"
-                }
-              />
-            </label>
-            <label className="field">
-              <span>账号标签</span>
-              <input
-                value={account}
-                onChange={(event) => setAccount(event.target.value)}
-                placeholder="工作账号（用于本机识别）"
-              />
-            </label>
-          </>
-        ) : (
-          <>
-            <label className="field">
-              <span>启动命令</span>
-              <input
-                required
-                value={command}
-                onChange={(event) => setCommand(event.target.value)}
-                placeholder="npx 或可执行文件完整路径"
-              />
-            </label>
-            <label className="field">
-              <span>启动参数，每行一个</span>
-              <textarea
-                value={args}
-                onChange={(event) => setArgs(event.target.value)}
-                placeholder={
-                  "-y\n@modelcontextprotocol/server-filesystem\n/path/to/folder"
-                }
-                rows={4}
-              />
-            </label>
-          </>
-        )}
-        <details className="oauth-option">
-          <summary>更多连接设置</summary>
-          {type === "stdio" ? (
-            <>
-              <label className="field">
-                <span>工作目录</span>
-                <input
-                  value={cwd}
-                  onChange={(e) => setCwd(e.target.value)}
-                  placeholder="可留空"
-                />
-              </label>
-              <label className="field">
-                <span>环境变量 · JSON</span>
-                <textarea
-                  rows={4}
-                  value={environment}
-                  onChange={(e) => setEnvironment(e.target.value)}
-                  spellCheck={false}
-                />
-              </label>
-            </>
-          ) : (
-            <label className="field">
-              <span>自定义请求头 · JSON</span>
-              <textarea
-                rows={4}
-                value={customHeaders}
-                onChange={(e) => setCustomHeaders(e.target.value)}
-                spellCheck={false}
-              />
-            </label>
-          )}
-          <p className="field-help">
-            •••••••• 表示保留已存值；变量引用可使用 $&#123;env:NAME&#125;。
-          </p>
-        </details>
-        {error && (
-          <div className="warning-banner" role="alert">
-            {error}
-          </div>
-        )}
-        <footer className="modal-footer">
-          <button type="button" className="button" onClick={onClose}>
-            取消
-          </button>
-          <button className="button primary" disabled={pending}>
-            {pending && <Loader2 className="spin" size={15} />}保存连接
-          </button>
-        </footer>
-      </form>
-    </Modal>
-  );
-}
-
-function CredentialDialog({
-  connection,
-  onClose,
-  onDone,
-}: {
-  connection: Connection;
-  onClose: () => void;
-  onDone: () => Promise<void>;
-}) {
-  const [token, setToken] = useState("");
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState("");
-  const [oauth, setOauth] = useState(false);
-  const [clientId, setClientId] = useState("");
-  const [clientSecret, setClientSecret] = useState("");
-  const [scopes, setScopes] = useState("");
-  const [callbackPort, setCallbackPort] = useState("");
-  const [oauthLoaded, setOauthLoaded] = useState(false);
-  const [oauthSaved, setOauthSaved] = useState(false);
-  useEffect(() => {
-    let active = true;
-    void rpc<{ definition: Definition }>("connections.detail", {
-      id: connection.id,
-    })
-      .then(({ definition }) => {
-        if (!active) return;
-        setClientId(definition.clientId || "");
-        setClientSecret(definition.clientSecret || "");
-        setScopes((definition.oauthScopes || []).join(" "));
-        setCallbackPort(definition.oauthCallbackPort?.toString() || "");
-        setOauthLoaded(true);
-      })
-      .catch((error) => {
-        if (active) setError(error.message);
-      });
-    return () => {
-      active = false;
-    };
-  }, [connection.id]);
-  const saveOauth = async () => {
-    const result = await rpc<{ definition: Definition }>("oauth.configure", {
-      id: connection.id,
-      settings: {
-        clientId: clientId.trim() || null,
-        clientSecret: clientSecret || null,
-        scopes: scopes.trim() ? scopes.trim().split(/\s+/) : [],
-        callbackPort: callbackPort ? Number(callbackPort) : null,
-      },
-    });
-    setClientSecret(result.definition.clientSecret || "");
-    setOauthSaved(true);
-  };
-  const update = async (event: React.FormEvent) => {
-    event.preventDefault();
-    setPending(true);
-    setError("");
-    try {
-      await rpc("credentials.update", {
-        id: connection.id,
-        header: "Authorization",
-        value: token,
-      });
-      await onDone();
-    } catch (error) {
-      setError((error as Error).message);
-    } finally {
-      setPending(false);
-    }
-  };
-  return (
-    <Modal title={`${connection.title} · 认证`} onClose={onClose}>
-      <form className="modal-body" onSubmit={(event) => void update(event)}>
-        <p className="muted">
-          认证保存在系统凭据库，使用这项共享连接的 Agent 会共用更新后的值。
-        </p>
-        {connection.endpoint.includes("docs.qq.com") && (
-          <button
-            className="button full"
-            type="button"
-            onClick={() =>
-              void rpc("browser.open", {
-                url: "https://docs.qq.com/open/auth/mcp.html",
-              }).catch((error) => setError(error.message))
-            }
-          >
-            打开腾讯文档授权页面
-            <ArrowRight size={14} />
-          </button>
-        )}
-        <label className="field">
-          <span>Authorization 完整值</span>
-          <input
-            required
-            type="password"
-            autoComplete="off"
-            value={token}
-            onChange={(event) => setToken(event.target.value)}
-            placeholder="粘贴服务提供的令牌或完整 Bearer 值"
-          />
-        </label>
-        <p className="field-help">
-          按上游要求原样保存，更新后可检查连接并查看实际工具。
-        </p>
-        <details className="oauth-option">
-          <summary>服务使用 OAuth 浏览器授权</summary>
-          <p className="muted">
-            适用于提供标准 MCP OAuth
-            元数据的服务；可使用动态注册或你自己的预注册应用。
-          </p>
-          <label className="field">
-            <span>Client ID · 预注册应用</span>
-            <input
-              value={clientId}
-              onChange={(event) => {
-                setClientId(event.target.value);
-                setOauthSaved(false);
-              }}
-              placeholder="支持动态注册时可留空"
-              autoComplete="off"
-            />
-          </label>
-          <label className="field">
-            <span>客户端机密 · 按注册应用要求填写</span>
-            <input
-              type="password"
-              value={clientSecret}
-              onChange={(event) => {
-                setClientSecret(event.target.value);
-                setOauthSaved(false);
-              }}
-              autoComplete="off"
-              placeholder="保存在系统凭据库；清空可删除已存值"
-            />
-          </label>
-          <label className="field">
-            <span>授权 scope · 用空格分隔</span>
-            <input
-              value={scopes}
-              onChange={(event) => {
-                setScopes(event.target.value);
-                setOauthSaved(false);
-              }}
-              placeholder="留空使用服务建议的 scope"
-            />
-          </label>
-          <label className="field">
-            <span>本地回调端口 · 可选</span>
-            <input
-              type="number"
-              min={1}
-              max={65535}
-              value={callbackPort}
-              onChange={(event) => {
-                setCallbackPort(event.target.value);
-                setOauthSaved(false);
-              }}
-              placeholder="留空自动分配，路径为 /callback"
-            />
-          </label>
-          <p className="field-help">
-            •••••••• 表示保留已存机密。更换 OAuth
-            应用或权限后需要重新授权；授权准备失败会保留原有认证。
-          </p>
-          <button
-            className="button"
-            type="button"
-            disabled={pending || !oauthLoaded}
-            onClick={async () => {
-              setPending(true);
-              setError("");
-              try {
-                await saveOauth();
-                await onDone();
-              } catch (error) {
-                setError((error as Error).message);
-              } finally {
-                setPending(false);
-              }
-            }}
-          >
-            保存 OAuth 设置
-          </button>
-          {oauthSaved && <p className="muted">OAuth 客户端设置已保存。</p>}
-          <button
-            className="button"
-            type="button"
-            disabled={pending || !oauthLoaded}
-            onClick={async () => {
-              setPending(true);
-              setError("");
-              try {
-                await saveOauth();
-                const result = await rpc<{ url: string }>("oauth.start", {
-                  id: connection.id,
-                });
-                await rpc("browser.open", { url: result.url });
-                setOauth(true);
-              } catch (error) {
-                setError((error as Error).message);
-              } finally {
-                setPending(false);
-              }
-            }}
-          >
-            <KeyRound size={15} />
-            在浏览器授权
-          </button>
-          {oauth && (
-            <p className="muted">
-              已打开浏览器，完成授权后返回并刷新账号状态。
-            </p>
-          )}
-        </details>
-        {error && (
-          <div className="warning-banner" role="alert">
-            {error}
-          </div>
-        )}
-        <footer className="modal-footer">
-          <button type="button" className="button" onClick={onClose}>
-            关闭
-          </button>
-          <button className="button primary" disabled={pending || !token}>
-            {pending && <Loader2 className="spin" size={15} />}更新认证
-          </button>
-        </footer>
-      </form>
-    </Modal>
-  );
+  return <ModalNotice.Provider value={toast}>{content}</ModalNotice.Provider>;
 }
 
 createRoot(document.getElementById("root")!).render(

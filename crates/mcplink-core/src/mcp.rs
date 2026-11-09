@@ -630,7 +630,7 @@ pub async fn configure_oauth(engine: Arc<Engine>, params: &Value) -> Result<Valu
         engine.pool.invalidate(id).await;
     }
     Ok(
-        json!({"status":if changed {"configured"}else{"unchanged"},"connection":connection.public_value(),"definition":definition.public_value()}),
+        json!({"status":if changed {"configured"}else{"unchanged"},"connection":connection.public_value(),"definition":connection.editable_definition(&definition)}),
     )
 }
 

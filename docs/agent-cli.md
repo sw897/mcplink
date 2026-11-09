@@ -64,7 +64,8 @@ Cargo 默认将程序放入 `~/.cargo/bin`，该目录需在 PATH 中。也可�
 | `credentials oauth-config ID --stdin` | 源码开发能力：配置预注册 OAuth 应用、scope 与回调端口，不启动登录。 |
 | `changes preview --connection ID --target SOURCE_ID [--mode direct\|shared] [--action ACTION]` | 生成 10 分钟有效的脱敏计划，不写原生配置。两个标志都可重复。 |
 | `changes apply PLAN_ID` | 应用指定计划，检查修订与文件哈希，逐目标报告结果。 |
-| `changes history` / `changes restore OPERATION_ID` | 查看最近 25 条历史，恢复指定条目并保留无关后续修改。 |
+| `changes reconcile` | 核对已写入但尚未完成记账的记录，返回仍待核对的数量，不重写配置文件。 |
+| `changes history [--before CURSOR]` / `changes restore OPERATION_ID` | 每页最多 25 条，用末项 cursor 读取更早记录；按操作 ID 恢复。 |
 | `gateway status` / `gateway pause` / `gateway resume` / `gateway stop` | 查看或切换共享状态，或等待当前后台清理退出。 |
 | `mcp describe ID` / `mcp request ID --stdin` | 查看上游能力，或派发一条协议请求，不自动重试。 |
 | `connections tools ID --tool TOOL` | 源码开发能力：发现指定工具，返回 Schema、描述和 `schemaHash`。 |
@@ -80,6 +81,8 @@ Claude Code 支持可写 user，以及显式添加的 local/project 作用域；
 此路径使用 Claude 的原生配置入口和插件目录结构；配置位置与插件格式参照 [Claude MCP 文档](https://code.claude.com/docs/en/mcp) 和 [插件清单文档](https://code.claude.com/docs/en/plugins-reference)。
 
 ## 标准输入
+
+编辑已有连接时，取 `connections show ID` 返回的 `definition`，连同其中的 `editVersion` 提交。带路径或参数的地址使用保留标记，启动参数按原编号显示为 `••••••••[1]` 等引用。可以移动引用、删除参数或填写新值。后台按读取时的连接与版本还原，版本过期须重新读取。完整的新定义可以直接通过 stdin 传入。
 
 标准输入必须是一条 UTF-8 JSON 对象，最多 8 MiB，传完后关闭管道。凭据及可能含凭据的完整定义经 stdin 传入，不使用 argv、Shell 字面量、临时凭据文件或日志。
 

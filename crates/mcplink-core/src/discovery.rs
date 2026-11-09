@@ -6,17 +6,8 @@ use anyhow::{Result, bail};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
-pub fn installed(agent: &Agent) -> Result<bool> {
-    let home = config::user_home()?;
-    let isolated = std::env::var_os("MCPLINK_HOME").is_some();
-    let local = if std::env::var_os("MCPLINK_HOME").is_none() {
-        std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join("AppData/Local"))
-    } else {
-        home.join("AppData/Local")
-    };
-    let (folder, executable, mac_app, cli) = match agent {
+fn names(agent: &Agent) -> (&'static str, &'static str, &'static str, &'static str) {
+    match agent {
         Agent::Codex => ("Codex", "Codex.exe", "Codex.app", "codex"),
         Agent::Hermes => ("Hermes", "hermes.exe", "Hermes.app", "hermes"),
         Agent::Claude => ("Claude Code", "claude.exe", "", "claude"),
@@ -36,12 +27,64 @@ pub fn installed(agent: &Agent) -> Result<bool> {
         Agent::Openclaw => ("OpenClaw", "OpenClaw.exe", "OpenClaw.app", "openclaw"),
         Agent::Kimicode => ("Kimi Code", "Kimi Code.exe", "Kimi Code.app", "kimi"),
         Agent::Removed => unreachable!(),
+    }
+}
+
+fn executable(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
     };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        metadata.is_file()
+    }
+}
+
+pub fn valid_launcher(agent: &Agent, path: &Path) -> bool {
+    if *agent == Agent::Removed || !path.is_absolute() || !executable(path) {
+        return false;
+    }
+    let (_, _, _, cli) = names(agent);
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    if cfg!(windows) {
+        ["exe", "cmd", "bat"]
+            .iter()
+            .any(|ext| name.eq_ignore_ascii_case(&format!("{cli}.{ext}")))
+    } else {
+        name == cli
+    }
+}
+
+fn installed(agent: &Agent, store: &crate::store::Store) -> Result<bool> {
+    if store
+        .launcher(agent)?
+        .as_deref()
+        .is_some_and(|p| valid_launcher(agent, Path::new(p)))
+    {
+        return Ok(true);
+    }
+    let home = config::user_home()?;
+    let isolated = std::env::var_os("MCPLINK_HOME").is_some();
+    let local = if std::env::var_os("MCPLINK_HOME").is_none() {
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join("AppData/Local"))
+    } else {
+        home.join("AppData/Local")
+    };
+    let (folder, executable_name, mac_app, cli) = names(agent);
     let mut installed = if cfg!(windows) {
         local
             .join("Programs")
             .join(folder)
-            .join(executable)
+            .join(executable_name)
             .is_file()
     } else if cfg!(target_os = "macos") && !mac_app.is_empty() {
         (!isolated && mac_app_installed(&Path::new("/Applications").join(mac_app)))
@@ -58,6 +101,16 @@ pub fn installed(agent: &Agent) -> Result<bool> {
     #[cfg(target_os = "macos")]
     if !isolated {
         launchers.extend(["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from));
+    }
+    #[cfg(unix)]
+    {
+        let nvm = std::env::var_os("NVM_DIR")
+            .map(PathBuf::from)
+            .filter(|p| !isolated || p.starts_with(&home))
+            .unwrap_or_else(|| home.join(".nvm"));
+        if let Ok(versions) = std::fs::read_dir(nvm.join("versions/node")) {
+            launchers.extend(versions.flatten().map(|v| v.path().join("bin")));
+        }
     }
     if cfg!(windows) {
         let roaming = if isolated {
@@ -80,7 +133,7 @@ pub fn installed(agent: &Agent) -> Result<bool> {
                 .iter()
                 .any(|extension| path.join(format!("{cli}.{extension}")).is_file())
         } else {
-            path.join(cli).is_file()
+            executable(&path.join(cli))
         }
     });
     #[cfg(windows)]
@@ -195,14 +248,14 @@ fn codex_package_installed() -> bool {
     }
 }
 
-pub fn require_installed(agent: &Agent) -> Result<()> {
-    if !installed(agent)? {
+pub fn require_installed(agent: &Agent, store: &crate::store::Store) -> Result<()> {
+    if !installed(agent, store)? {
         bail!("{} 未安装，无法配置；安装后请刷新", agent.label());
     }
     Ok(())
 }
 
-pub fn inventory(sources: &[Source]) -> Result<Value> {
+pub fn inventory(sources: &[Source], store: &crate::store::Store) -> Result<Value> {
     let home = config::user_home()?;
     let mut clients = Vec::new();
     for agent in Agent::supported() {
@@ -217,7 +270,7 @@ pub fn inventory(sources: &[Source]) -> Result<Value> {
             Agent::Opencode => crate::opencode::directory()?,
             _ => agent_config::directory(&agent)?,
         };
-        let installed = installed(&agent)?;
+        let installed = installed(&agent, store)?;
         let detected = installed
             || profile.is_dir()
             || sources

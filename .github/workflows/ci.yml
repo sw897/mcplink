@@ -63,6 +63,16 @@ jobs:
           assert binary.is_file(), binary
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
               output.write(f"MCPLINK_E2E_BINARY={binary}\n")
+      - name: Configuration integrity and recovery
+        timeout-minutes: 5
+        run: python -u tests/e2e/config_integrity.py --record artifacts/e2e/ci-integrity
+      - name: Desktop renderer acceptance
+        if: runner.os == 'macOS'
+        timeout-minutes: 6
+        run: |
+          npm install --prefix "$RUNNER_TEMP/ui-driver" --no-save --package-lock=false agent-browser@0.41.2
+          export PATH="$RUNNER_TEMP/ui-driver/node_modules/.bin:$PATH"
+          python3 tests/e2e/desktop_ui.py --record artifacts/e2e/ci-renderer --session "mcplink-ci-${{ github.run_id }}-${{ github.run_attempt }}" --chrome "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
       - name: Isolated core acceptance
         timeout-minutes: 5
         run: python -u tests/e2e/run.py --record artifacts/e2e/ci-core
@@ -130,6 +140,8 @@ jobs:
           name: acceptance-${{ matrix.os }}
           if-no-files-found: warn
           path: |
+            artifacts/e2e/ci-integrity/report.json
+            artifacts/e2e/ci-renderer/report.json
             artifacts/e2e/ci-cli/report.json
             artifacts/e2e/ci-core/report.json
             artifacts/e2e/ci-claude/report.json
@@ -147,3 +159,20 @@ jobs:
             artifacts/e2e/ci-manifest/release-manifest.json
             target/release/bundle/dmg/*.dmg
             target/release/bundle/nsis/*setup.exe
+
+
+  public-source:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version-file: .node-version
+      - run: npm audit --package-lock-only --audit-level=high
+      - run: brew install gitleaks cargo-audit
+      - run: gitleaks git --log-opts=HEAD --redact --no-banner
+      - run: cargo audit

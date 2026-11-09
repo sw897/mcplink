@@ -63,7 +63,7 @@ class OpenCodeSources(ToolCalls):
         config.write_text(text)
         imported = self.cli("connections", "import", "--source", source["id"], "--name", "native_fixture")["id"]
         definition = self.cli("connections", "show", imported)["definition"]
-        assert definition["command"] == sys.executable and definition["args"] == [str(FIXTURE), "--stdio"]
+        assert definition["command"] == sys.executable and definition["args"] == ["••••••••[1]", "••••••••[2]"]
         assert definition["env"]["FIXTURE_PATH"] == "$" + "{env:MCPLINK_DATA_DIR}"
         assert self.cli("connections", "probe", imported)["connection"]["status"] == "ready"
         self.passed("current JSONC imports command arrays and environment references through the real MCP SDK")

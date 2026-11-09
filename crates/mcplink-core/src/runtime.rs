@@ -63,7 +63,7 @@ async fn health(State(state): State<ServerState>, headers: HeaderMap) -> impl In
     (
         StatusCode::OK,
         Json(
-            json!({"application":"mcplink","instance":state.info.instance,"version":env!("CARGO_PKG_VERSION"),"managementApi":11}),
+            json!({"application":"mcplink","instance":state.info.instance,"version":env!("CARGO_PKG_VERSION"),"managementApi":12}),
         ),
     )
 }
@@ -458,6 +458,20 @@ impl Client {
         }
         if matches!(method, "tools.describe" | "tools.call") && self.management_api < 2 {
             bail!("旧后台不支持当前工具调用命令；请退出桌面并停止旧后台，再使用同一构建重试");
+        }
+        if self.management_api < 12
+            && matches!(
+                method,
+                "connections.detail"
+                    | "connections.save"
+                    | "changes.preview"
+                    | "changes.apply"
+                    | "changes.restore"
+                    | "changes.history"
+                    | "oauth.configure"
+            )
+        {
+            bail!("旧后台不支持安全编辑与配置恢复，请退出并重启后台");
         }
         let response = self
             .http

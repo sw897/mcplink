@@ -31,6 +31,8 @@ The desktop, CLI, and bundled management Skill use the same managed data and con
 | Native direct access | mcplink writes the client's native configuration. The agent starts or connects to the upstream MCP server itself. | You want the client to run the service and manage its native authentication independently.       |
 | Shared gateway       | The agent uses a local Bridge to access mcplink's managed connection, credentials, and tool filters.              | Multiple agents need the same service account, or you want to update authorization in one place. |
 
+Direct access copies literal tokens, launch arguments and the full URL into each selected native file. Check the destination before applying, especially for files shared through Git.
+
 Shared entries store only the local launcher and connection references in native configuration. Upstream credentials stay in the system credential store. Each service keeps its own entry name; the shared gateway preserves upstream tool names and schemas. Clients decide how those names appear in their own interfaces.
 
 Closing the window can leave the app in the menu bar or tray. The gateway keeps its paused state across restarts. Full quit waits for shared-service cleanup; quitting only the interface keeps the proxy running. Later agent requests can also start the backend on demand. See the [macOS](docs/macos-background.md) and [Windows](docs/windows-background.md) background guides.

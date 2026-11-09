@@ -37,3 +37,5 @@ DeepSeek 将 desktop 和 web 作为独立可写目标，同时列出已初始化
 隔离回归 `tests/e2e/agent_discovery.py` 使用只读安装入口 fixture 模拟安装和卸载，使用独立 TOML、JSON5、YAML 解析器读取生成的原生配置，然后实际启动其中的 command/args/env，通过 MCP SDK 调用合成上游工具。覆盖未安装禁用、安装刷新、卸载后预览/应用/恢复保护、八类直连与共享入口、两个 DeepSeek profile、HTTP 导入、启停、移除恢复、注释和动态 YAML 保留、并发冲突及退休来源。它不代表已安装所有第三方客户端，亦不代表原生模型回合验收。
 
 格式依据：[ZCode MCP](https://zcode.z.ai/en/docs/mcp-services)、[OpenClaw MCP](https://docs.openclaw.ai/tools/mcp)、[Kimi Code MCP](https://www.kimi.com/code/docs/en/kimi-code-cli/customization/mcp.html)、[DeepSeek MCP client](https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/mcp/mcp-client)、[DeepSeek MCP manager](https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/mcp/mcp-manager)。配置适配和 profile 写入设计参考 [CC Switch](https://github.com/farion1231/cc-switch/tree/cac921f5d7f662085800cd99684f367bd0d90e74/src-tauri/src)，保留 mcplink 自身的配置事务和 MCP 共享网关。
+
+桌面会检查 Unix 用户的 nvm 版本目录。若安装位置未被识别，在 Agent 页点击“选择已安装的 CLI”，选择该客户端的启动文件。后台仅核验文件名、类型以及 Unix 执行权限；预览和写入时均重新核验。

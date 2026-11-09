@@ -163,42 +163,22 @@ impl Definition {
                 (key.clone(), display)
             })
             .collect();
-        let args: Vec<_> = self
-            .args
-            .iter()
-            .enumerate()
-            .map(|(index, value)| {
-                let previous = index
-                    .checked_sub(1)
-                    .and_then(|i| self.args.get(i))
-                    .map(|v| v.to_lowercase())
-                    .unwrap_or_default();
-                if ["token", "secret", "password", "api-key"]
-                    .iter()
-                    .any(|key| {
-                        previous.contains(key) || value.to_lowercase().contains(&format!("{key}="))
-                    })
-                    || value.len() > 24
-                        && value
-                            .chars()
-                            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-                {
-                    "••••••••".to_owned()
-                } else {
-                    value.clone()
-                }
-            })
+        // A positional value can be a credential regardless of its spelling or length.
+        // References use the original slot and are scoped to the version returned by detail.
+        let args: Vec<_> = (0..self.args.len())
+            .map(|i| format!("••••••••[{}]", i + 1))
             .collect();
-        let url = self.url.as_ref().map(|raw| {
-            let mut url = url::Url::parse(raw).ok();
-            if let Some(url) = url.as_mut() {
-                if url.query().is_some() {
-                    url.set_query(Some("••••••••"));
-                }
-                url.set_fragment(None);
+        let url = self.url.as_ref().map(|raw| match url::Url::parse(raw) {
+            Ok(url)
+                if url.path() == "/"
+                    && url.query().is_none()
+                    && url.fragment().is_none()
+                    && !raw.contains("${") =>
+            {
+                raw.clone()
             }
-            url.map(|u| u.to_string())
-                .unwrap_or_else(|| "••••••••".into())
+            Ok(url) => format!("{}/••••••••", url.origin().ascii_serialization()),
+            Err(_) => "••••••••".into(),
         });
         json!({"command":self.command,"args":args,"env":env,"cwd":self.cwd,"url":url,"headers":headers,"enabled":self.enabled,"oauth":self.oauth,"clientId":self.client_id,
             "clientSecret":self.client_secret.as_ref().map(|_|"••••••••"),"oauthScopes":self.oauth_scopes,"oauthCallbackPort":self.oauth_callback_port,
@@ -226,6 +206,16 @@ pub struct Connection {
 }
 
 impl Connection {
+    pub fn edit_version(&self) -> String {
+        format!("{}:{}", self.id, self.revision)
+    }
+
+    pub fn editable_definition(&self, definition: &Definition) -> Value {
+        let mut value = definition.public_value();
+        value["editVersion"] = json!(self.edit_version());
+        value
+    }
+
     pub fn public_value(&self) -> Value {
         let mut value = serde_json::to_value(self).unwrap_or_default();
         if let Some(map) = value.as_object_mut() {

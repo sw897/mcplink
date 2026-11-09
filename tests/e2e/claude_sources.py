@@ -54,7 +54,7 @@ def main():
         passed('discover Claude camelCase user JSON and enabled user plugin; skip disabled/project plugins')
         managed = harness.rpc('connections.import', {'sourceId': source['id'], 'name': 'plugin_notes'})['id']
         detail = harness.rpc('connections.detail', {'id': managed})
-        assert Path(detail['definition']['args'][0]) == plugin / 'server.py'
+        assert detail['definition']['args'][0] == '••••••••[1]'
         assert detail['definition']['env']['FIXTURE_SECRET'] == '••••••••'
         assert 'synthetic-native-value' not in json.dumps(detail)
         passed('import plugin definition, resolve plugin root and redact configured secret')
@@ -74,6 +74,7 @@ def main():
         plan = harness.rpc('changes.preview', {'connectionId': managed, 'targetSourceIds': ['hermes:user'], 'mode': 'direct'})
         applied = harness.rpc('changes.apply', {'planId': plan['planId']})
         assert applied['results'][0]['status'] == 'applied'
+        assert str(plugin / 'server.py') in (harness.home / ".hermes/config.yaml").read_text()
         harness.rpc('changes.restore', {'operationId': applied['results'][0]['operationId']})
         passed('reuse imported literal/plugin-root definition on writable Hermes source and restore target entry')
         plugin_config.write_text('invalid enabled JSON with synthetic-native-value')

@@ -25,6 +25,14 @@ pub fn private_dir(path: &Path) -> Result<()> {
 }
 
 pub fn private_write(path: &Path, data: &[u8]) -> Result<()> {
+    atomic_write(path, data, false)
+}
+
+pub fn write_config(path: &Path, data: &[u8]) -> Result<()> {
+    atomic_write(path, data, true)
+}
+
+fn atomic_write(path: &Path, data: &[u8], preserve: bool) -> Result<()> {
     use std::io::Write;
     let parent = path.parent().context("无效的文件位置")?;
     private_dir(parent)?;
@@ -37,10 +45,85 @@ pub fn private_write(path: &Path, data: &[u8]) -> Result<()> {
         options.mode(0o600);
     }
     let mut file = options.open(&temporary).context("无法写入本地文件")?;
-    file.write_all(data)?;
-    file.sync_all()?;
-    fs::rename(&temporary, path).context("无法原子更新本地文件")?;
+    let result = (|| -> Result<()> {
+        file.write_all(data)?;
+        let existing = if preserve {
+            match fs::symlink_metadata(path) {
+                Ok(meta) if meta.is_file() => true,
+                Ok(_) => bail!("目标已变为符号链接或特殊文件，请重新选择配置"),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                Err(e) => return Err(e.into()),
+            }
+        } else {
+            false
+        };
+        #[cfg(unix)]
+        if existing {
+            preserve_permissions(path, &file)?;
+        }
+        file.sync_all()?;
+        drop(file);
+        #[cfg(windows)]
+        if existing {
+            use std::os::windows::ffi::OsStrExt;
+            use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
+            let wide = |p: &Path| {
+                p.as_os_str()
+                    .encode_wide()
+                    .chain(Some(0))
+                    .collect::<Vec<_>>()
+            };
+            // ReplaceFile preserves the existing file's ACL, attributes and named streams.
+            let success = unsafe {
+                ReplaceFileW(
+                    wide(path).as_ptr(),
+                    wide(&temporary).as_ptr(),
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                )
+            };
+            if success == 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            return Ok(());
+        }
+        fs::rename(&temporary, path).context("无法原子更新本地文件")?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result
+}
+
+#[cfg(target_os = "macos")]
+fn preserve_permissions(path: &Path, destination: &fs::File) -> Result<()> {
+    use std::os::fd::AsRawFd;
+    unsafe extern "C" {
+        fn fcopyfile(src: i32, dst: i32, state: *mut std::ffi::c_void, flags: u32) -> i32;
+    }
+    let source = fs::File::open(path)?;
+    // COPYFILE_METADATA from copyfile.h (ACL | STAT | XATTR). Both fds stay live.
+    if unsafe {
+        fcopyfile(
+            source.as_raw_fd(),
+            destination.as_raw_fd(),
+            std::ptr::null_mut(),
+            7,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error()).context("无法保留原配置文件权限");
+    }
+    destination.set_modified(std::time::SystemTime::now())?;
     Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn preserve_permissions(path: &Path, destination: &fs::File) -> Result<()> {
+    Ok(destination.set_permissions(fs::metadata(path)?.permissions())?)
 }
 
 impl Vault {

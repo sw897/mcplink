@@ -235,8 +235,13 @@ enum ChangeCommand {
     Apply { plan_id: String },
     /// 恢复指定操作的单个条目，保留无关后续修改
     Restore { operation_id: String },
-    /// 最近 25 项操作
-    History,
+    /// 核对待完成的写入记录
+    Reconcile,
+    /// 分页读取操作历史；before 使用上一页末项的 cursor
+    History {
+        #[arg(long)]
+        before: Option<i64>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -537,7 +542,10 @@ async fn execute(command: Command, data: PathBuf) -> Result<Value, Failure> {
                 None,
                 false,
             ),
-            ChangeCommand::History => ("snapshot", json!({}), Some("history"), false),
+            ChangeCommand::Reconcile => ("changes.reconcile", json!({}), None, false),
+            ChangeCommand::History { before } => {
+                ("changes.history", json!({"before":before}), None, false)
+            }
         },
         Command::Gateway { command } => match command {
             GatewayCommand::Status => ("gateway.status", json!({}), None, false),
