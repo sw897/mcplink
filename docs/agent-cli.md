@@ -58,7 +58,7 @@ Cargo 默认将程序放入 `~/.cargo/bin`，该目录需在 PATH 中。也可�
 | `connections adopt --source SOURCE_ID --name NAME` | 明确采用已绑定直连条目的外部修改。 |
 | `connections save --stdin` | 新建或完整替换托管定义，不写原生配置。 |
 | `connections probe ID` / `connections tools ID` | 连接上游、检查认证并返回工具 Schema；非 `ready` 退出 `1`。 |
-| `connections delete ID` | 删除无绑定的托管连接；有绑定时拒绝。 |
+| `connections delete ID [--keep-native]` | 默认只删除无绑定连接。使用 `--keep-native` 时，所有已登记的绑定都须为直连，且原生条目仍存在、内容与登记时一致。成功后移除托管连接及其凭据，保留原生文件。 |
 | `credentials update ID --stdin` / `credentials disconnect ID` | 更新原样 HTTP 凭据，或断开托管认证。 |
 | `credentials login ID` | 返回 OAuth URL 和过期时间，不打开浏览器。 |
 | `credentials oauth-config ID --stdin` | 源码开发能力：配置预注册 OAuth 应用、scope 与回调端口，不启动登录。 |
@@ -200,6 +200,10 @@ connection_id = response["ok"]["id"]
 - `rpc --stdin`：`{"method":"snapshot","params":{}}`。一般不需要使用兼容入口。
 
 ## 接入和恢复
+
+`--keep-native` 要求后台管理 API 14，保留各客户端当前的配置内容。若需保留尚未同步的托管更改，可先预览并应用到相应客户端。遇到共享绑定、配置写入待核对或来源无法核实时，先处理对应绑定。
+
+若托管记录已删除但系统凭据库暂不可用，后台会在下次启动时重试清理，也可在恢复访问后重试原删除命令。清理完成后，删除回执仅保留连接 ID 和已解除的绑定数，重试可取回相同结果。
 
 `mcplink connections detach ID --source SOURCE_ID --name ENTRY_NAME` 解除托管绑定并保留原配置文件。修改服务地址的协议、主机或端口后，请重新设置认证，或核对地址后使用 `mcplink connections reconnect ID` 显式恢复访问。仅编辑名称或账号标签会保留连接状态。
 

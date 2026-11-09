@@ -11,6 +11,11 @@ pub struct Store {
     db: Mutex<Sqlite>,
 }
 
+pub(crate) struct ConnectionDeletion {
+    pub definition_ref: Option<String>,
+    pub released_bindings: i64,
+}
+
 impl Store {
     pub fn open(data: &Path) -> Result<Self> {
         private_dir(data)?;
@@ -28,6 +33,8 @@ impl Store {
             CREATE INDEX IF NOT EXISTS operations_by_entry ON operations(source_id,name);
             CREATE TABLE IF NOT EXISTS entry_ownership(source_id TEXT NOT NULL,name TEXT NOT NULL,generation INTEGER NOT NULL,history_floor INTEGER NOT NULL,PRIMARY KEY(source_id,name));
             CREATE TABLE IF NOT EXISTS operation_details(id TEXT PRIMARY KEY REFERENCES operations(id),kind TEXT NOT NULL,restore_effect TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS connection_deletions(connection_id TEXT PRIMARY KEY, definition_ref TEXT, released_bindings INTEGER NOT NULL);
+            CREATE INDEX IF NOT EXISTS connection_deletions_pending ON connection_deletions(connection_id) WHERE definition_ref IS NOT NULL;
             PRAGMA user_version=1;")?;
         Ok(Self { db: Mutex::new(db) })
     }
@@ -133,8 +140,36 @@ impl Store {
                 mark_ownership(&tx, &source, &name)?;
             }
         }
+        // Keychain access is independent of SQLite. Keep the references until
+        // erasure succeeds, including if the daemon exits just after commit.
+        let recorded = tx.execute("INSERT INTO connection_deletions(connection_id,definition_ref,released_bindings)
+            SELECT id,json_extract(document,'$.definitionRef'),(SELECT COUNT(*) FROM bindings WHERE connection_id=?1)
+            FROM connections WHERE id=?1 AND json_type(document,'$.definitionRef')='text'", [id])?;
+        anyhow::ensure!(recorded == 1, "服务连接不存在或凭据引用无效，请核对连接");
         tx.execute("DELETE FROM connections WHERE id=?1", [id])?;
         tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn connection_deletion(&self, id: &str) -> Result<Option<ConnectionDeletion>> {
+        Ok(self.db.lock().unwrap().query_row(
+            "SELECT definition_ref,released_bindings FROM connection_deletions WHERE connection_id=?1", [id],
+            |r| Ok(ConnectionDeletion { definition_ref: r.get(0)?, released_bindings: r.get(1)? })
+        ).optional()?)
+    }
+
+    pub(crate) fn pending_credential_deletions(&self) -> Result<Vec<(String, String)>> {
+        let db = self.db.lock().unwrap();
+        let mut statement = db.prepare("SELECT connection_id,definition_ref FROM connection_deletions WHERE definition_ref IS NOT NULL")?;
+        let rows = statement.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub(crate) fn finish_credential_deletion(&self, id: &str) -> Result<()> {
+        self.db.lock().unwrap().execute(
+            "UPDATE connection_deletions SET definition_ref=NULL WHERE connection_id=?1",
+            [id],
+        )?;
         Ok(())
     }
 

@@ -66,7 +66,7 @@ jobs:
       - name: Configuration integrity and recovery
         timeout-minutes: 5
         run: python -u tests/e2e/config_integrity.py --record artifacts/e2e/ci-integrity
-      - name: Existing Bridge adoption
+      - name: Existing Bridge adoption and keep-native deletion
         timeout-minutes: 5
         run: python -u tests/e2e/bridge_adoption.py --record artifacts/e2e/ci-bridge-adoption
       - name: Desktop renderer acceptance

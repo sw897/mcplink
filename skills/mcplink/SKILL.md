@@ -1,6 +1,6 @@
 ---
 name: mcplink
-description: 通过 mcplink CLI 管理 MCP 连接、凭据及共享接入，按当前 schema 适配 Codex、Hermes、Claude Code 和 OpenCode 来源，预览、应用及恢复可写配置；按明确托管连接与本次授权发现、校验和调用 MCP 工具。
+description: 通过 mcplink CLI 盘点和管理 MCP 来源、连接、认证与共享接入，预览、应用及恢复配置变更，并按授权校验和调用工具。
 ---
 
 # mcplink 管理
@@ -23,7 +23,7 @@ API 9 的支持名单固定为 Codex、Hermes、Claude Code、OpenCode、ZCode�
 - 若当前 `schema` 包含 `cli generate`，可按明确的连接、工具选择和新目录生成轻量入口；先 `cli inspect MANIFEST` 和离线 `--help` 核对。复杂或敏感参数用 `--stdin`；自动化可直接以参数数组调用 `cli run --manifest MANIFEST -- TOOL --stdin`。生成物不含凭据，仍依赖本机 mcplink 和当前托管权限；换数据目录须明确选择当地连接后 `cli rebind`，契约变化时重新生成，不按名称自动换账号。
 - `--data-dir` / `MCPLINK_DATA_DIR` 选择管理数据；`CODEX_HOME` / `HERMES_HOME` 选择原生配置范围。沿用用户指定环境，未经要求不切换到另一套数据。
 - `connections list` 包含 `detected:true` 的未托管条目。此类条目先按 `sourceId` 和 `name` 导入，再使用返回的托管 ID。
-- Claude Code 自动盘点用户 `.claude.json` 与已启用用户插件默认 `.mcp.json`。这些来源带 `readOnly:true`，可以导入、检查和复用连接；配置由原客户端或插件维护。不要把它们选作写入目标，或直接改写插件缓存。
+- Claude Code 自动盘点用户 `.claude.json` 与已启用用户插件默认 `.mcp.json`。用户来源可通过配置事务写入；插件来源带 `readOnly:true`，可以导入、检查和复用连接，原文件由插件维护。以每个来源返回的权限为准，不直接改写插件缓存。
 
 ## 盘点和接入
 
@@ -71,4 +71,4 @@ OAuth 用 `credentials login CONNECTION_ID` 返回 URL，CLI 不打开浏览器�
 
 需要核对协议能力时使用 `mcp describe CONNECTION_ID`。`mcp request CONNECTION_ID --stdin` 接受 `{"method":"tools/list","params":{}}` 等 MCP 请求；工具调用可能产生业务副作用，应在用户授权范围内执行。失败或通信中断后先核对执行结果，不自动重发。
 
-只删除无绑定的托管连接：先按授权移除目标 Agent 条目，再 `connections delete CONNECTION_ID`。更详细的操作使用 `mcplink COMMAND --help`；底层 `rpc --stdin` 保留兼容，使用它时还须检查嵌套 `results/status`。
+默认只删除无绑定的托管连接。若当前 schema 支持 `connections delete CONNECTION_ID --keep-native`，可按授权解除未变化的直连绑定并退出托管，原生条目保留；共享绑定会被拒绝，避免留下无效 Bridge。需要移除原生条目时仍通过配置事务处理。更详细的操作使用 `mcplink COMMAND --help`；底层 `rpc --stdin` 保留兼容，使用它时还须检查嵌套 `results/status`。

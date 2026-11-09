@@ -239,8 +239,10 @@ def main():
         requests = []
 
         class OldBackend(BaseHTTPRequestHandler):
+            management_api = 8
+
             def do_GET(self):
-                body = json.dumps({"application":"mcplink","instance":runtime["instance"],"managementApi":8}).encode()
+                body = json.dumps({"application":"mcplink","instance":runtime["instance"],"managementApi":self.management_api}).encode()
                 self.send_response(200)
                 self.end_headers()
                 self.wfile.write(body)
@@ -264,12 +266,18 @@ def main():
             assert "旧后台" in harness.rpc("changes.apply", {"planId":"stale"}, error=True)
             assert "旧后台" in harness.rpc("changes.restore", {"operationId":"stale"}, error=True)
             assert requests == [], "new native operations reached an incompatible backend"
+            OldBackend.management_api = 13
+            assert "旧后台" in harness.rpc("connections.delete", {"id":office,"keepNative":True}, error=True)
+            assert requests == [], "keep-native was sent to a daemon that does not recognize it"
+            harness.rpc("connections.delete", {"id":office,"keepNative":False}, error=True)
+            assert requests == ["/rpc"], "ordinary deletion should still reach an API 13 daemon"
         finally:
             runtime_path.write_bytes(original_runtime)
             old_backend.shutdown()
             old_backend.server_close()
             thread.join(timeout=5)
         passed("API 8 backends reject client configuration operations before bypassing installation-state checks")
+        passed("API 13 blocks keep-native before dispatch and accepts ordinary deletion requests")
 
         assert retired.read_text(encoding="utf-8").startswith('{"servers"')
         assert old_kimi.read_text(encoding="utf-8").startswith('{"mcpServers"')

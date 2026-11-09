@@ -63,7 +63,7 @@ async fn health(State(state): State<ServerState>, headers: HeaderMap) -> impl In
     (
         StatusCode::OK,
         Json(
-            json!({"application":"mcplink","instance":state.info.instance,"version":env!("CARGO_PKG_VERSION"),"managementApi":13}),
+            json!({"application":"mcplink","instance":state.info.instance,"version":env!("CARGO_PKG_VERSION"),"managementApi":14}),
         ),
     )
 }
@@ -378,6 +378,14 @@ impl Client {
     }
 
     pub async fn call(&self, method: &str, params: Value) -> Result<Value> {
+        if self.management_api < 14
+            && method == "connections.delete"
+            && params
+                .get("keepNative")
+                .is_some_and(|value| value.as_bool() != Some(false))
+        {
+            bail!("旧后台不支持保留原生配置退出托管，请退出并重启后台");
+        }
         if self.management_api < 11 && method == "gateway.stop" {
             bail!("旧后台不支持退出清理，请使用同一构建的桌面与后台");
         }

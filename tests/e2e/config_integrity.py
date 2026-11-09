@@ -107,6 +107,11 @@ def verify(h):
     plan = preview(local, "disable")
     result = h.cli("changes", "apply", plan["planId"], exit_status=1)["result"]["results"][0]
     assert result["status"] == "pending" and not entry("local")["enabled"]
+    pending_file = native.read_bytes()
+    refused = h.cli("connections", "delete", local, "--keep-native", exit_status=1)
+    assert "待核对" in refused["error"]["message"] and native.read_bytes() == pending_file
+    assert h.cli("connections", "show", local)["connection"]["id"] == local
+    h.passed("keep-native preserves the connection and file while an earlier config write awaits recovery")
     h.cli("gateway", "stop")
     assert h.cli("changes", "history")[0]["status"] == "pending"
     assert h.cli("changes","reconcile")["remaining"] == 1

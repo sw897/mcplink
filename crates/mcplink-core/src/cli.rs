@@ -190,9 +190,12 @@ enum ConnectionCommand {
         #[arg(long, required = true)]
         stdin: bool,
     },
-    /// 仅删除没有 Agent 绑定的托管连接
+    /// 删除托管连接及其托管凭据
     Delete {
         id: String,
+        /// 保留原生文件，并解除与登记内容一致的直连绑定
+        #[arg(long)]
+        keep_native: bool,
     },
     /// 主动检查上游；非 ready 状态退出 1
     Probe {
@@ -513,9 +516,12 @@ async fn execute(command: Command, data: PathBuf) -> Result<Value, Failure> {
                 None,
                 false,
             ),
-            ConnectionCommand::Delete { id } => {
-                ("connections.delete", json!({"id":id}), None, false)
-            }
+            ConnectionCommand::Delete { id, keep_native } => (
+                "connections.delete",
+                json!({"id":id,"keepNative":keep_native}),
+                None,
+                false,
+            ),
             ConnectionCommand::Probe { id } => ("connections.probe", json!({"id":id}), None, true),
             ConnectionCommand::Tools { id, tool: None } => {
                 ("connections.tools", json!({"id":id}), None, true)

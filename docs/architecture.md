@@ -19,7 +19,7 @@ Bridge 每次派发前检查后台并按需重新连接。派发后通信失败�
 
 共享暂停状态存入 SQLite `settings`，写入成功后才确认暂停或恢复，后台重启保持原状态。Windows 的后台、RPC 助手和上游 STDIO 服务均隐藏控制台；上游服务使用带关闭回收标志的 Job Object，暂停或后台异常退出会清理其子进程树。macOS 上游使用独立进程组，正常退出及 SIGTERM 会清理进程组；SIGKILL 不执行清理回调。
 
-Windows 托盘和 macOS 菜单栏共用后台生命周期：关窗隐藏，普通重复启动唤起，登录启动隐藏；完整退出先停止巡检和新桌面请求，再等待共享后台清理。也可仅退出界面并保留独立后台。`gateway.stop` 不自动启动缺席的后台，等待所属实例释放运行锁，不改变暂停偏好；后续 Agent 调用仍可重新启动后台。持久化暂停与轻量 `gateway.status` 要求 management API 10，退出清理要求 API 11，带版本的脱敏编辑和写入核对要求 API 12。原地址凭据隔离、显式托管与解绑、按归属恢复要求 API 13。桌面和 CLI 应使用同一构建。平台细节见 [Windows](windows-background.md) 与 [macOS](macos-background.md)。
+Windows 托盘和 macOS 菜单栏共用后台生命周期：关窗隐藏，普通重复启动唤起，登录启动隐藏；完整退出先停止巡检和新桌面请求，再等待共享后台清理。也可仅退出界面并保留独立后台。`gateway.stop` 不自动启动缺席的后台，等待所属实例释放运行锁，不改变暂停偏好；后续 Agent 调用仍可重新启动后台。持久化暂停与轻量 `gateway.status` 要求 management API 10，退出清理要求 API 11，带版本的脱敏编辑和写入核对要求 API 12。原地址凭据隔离、显式托管与解绑、按归属恢复要求 API 13。保留原生配置的删除操作要求 API 14。桌面和 CLI 应使用同一构建。平台细节见 [Windows](windows-background.md) 与 [macOS](macos-background.md)。
 
 ## 配置与数据
 

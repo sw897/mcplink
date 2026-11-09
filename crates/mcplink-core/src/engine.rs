@@ -2,7 +2,7 @@ use crate::{
     config,
     mcp::McpPool,
     model::*,
-    store::Store,
+    store::{ConnectionDeletion, Store},
     vault::{Vault, private_dir, private_write},
 };
 use anyhow::{Context, Result, bail};
@@ -44,6 +44,14 @@ impl Engine {
             shutdown: tokio::sync::watch::channel(false).0,
         });
         engine.reconcile()?;
+        for (id, definition_ref) in engine.store.pending_credential_deletions()? {
+            if engine
+                .finish_credential_deletion(&id, &definition_ref)
+                .is_err()
+            {
+                eprintln!("mcplink: 连接 {id} 的凭据清理待重试");
+            }
+        }
         Ok(engine)
     }
 
@@ -1113,6 +1121,68 @@ impl Engine {
         Ok(())
     }
 
+    fn begin_connection_deletion(&self, id: &str, keep_native: bool) -> Result<ConnectionDeletion> {
+        if self
+            .store
+            .pending_operations()?
+            .iter()
+            .any(|op| op["connectionId"] == id)
+        {
+            bail!("此连接有待核对的配置写入，请先处理变更记录");
+        }
+        let bindings: Vec<_> = self
+            .store
+            .bindings()?
+            .into_iter()
+            .filter(|b| b.connection_id == id)
+            .collect();
+        if !bindings.is_empty() && !keep_native {
+            bail!("请先移除各 Agent 的配置绑定，再删除连接");
+        }
+        if bindings.iter().any(|b| b.mode != "direct") {
+            bail!("共享入口仍需托管连接，不能保留原生配置退出托管");
+        }
+        for binding in &bindings {
+            let source = self.source(&binding.source_id)?;
+            let entry = config::scan(&source)?
+                .into_iter()
+                .find(|e| e.name == binding.name)
+                .context("原生直连条目已不存在，请先核对来源或解除绑定")?;
+            if entry.fingerprint != binding.fingerprint {
+                bail!("原生直连条目已变化，请先核对来源再退出托管");
+            }
+        }
+        self.store.delete_connection(id)?;
+        self.store
+            .connection_deletion(id)?
+            .context("服务连接不存在，请刷新清单")
+    }
+
+    fn finish_credential_deletion(&self, id: &str, definition_ref: &str) -> Result<()> {
+        self.vault.delete(&format!("oauth/{id}"))?;
+        self.vault.delete(definition_ref)?;
+        self.store.finish_credential_deletion(id)
+    }
+
+    async fn delete_connection(&self, id: &str, keep_native: bool) -> Result<Value> {
+        let deletion = match self.store.connection_deletion(id)? {
+            Some(deletion) => deletion,
+            None => self.begin_connection_deletion(id, keep_native)?,
+        };
+        if let Some(definition_ref) = &deletion.definition_ref {
+            self.pool.invalidate(id).await;
+            let refresh = self.pool.refresh_lock(id);
+            let _refresh = refresh.lock().await;
+            self.finish_credential_deletion(id, definition_ref)
+                .context("托管记录已删除，凭据清理待完成。恢复凭据库访问后可用原命令重试")?;
+        }
+        Ok(if keep_native {
+            json!({"deleted":true,"nativePreserved":true,"releasedBindings":deletion.released_bindings})
+        } else {
+            json!({"deleted":true})
+        })
+    }
+
     pub async fn rpc(self: &Arc<Self>, method: &str, p: Value) -> Result<Value> {
         if *self.shutdown.borrow() && !matches!(method, "gateway.status" | "gateway.stop") {
             bail!("共享后台正在退出，请在退出完成后重新连接");
@@ -1286,24 +1356,13 @@ impl Engine {
             }
             "connections.delete" => {
                 let _guard = self.mutation.lock().await;
-                let id = required(&p, "id")?;
-                if self
-                    .store
-                    .pending_operations()?
-                    .iter()
-                    .any(|op| op["connectionId"] == id)
-                {
-                    bail!("此连接有待核对的配置写入，请先处理变更记录");
-                }
-                if self.store.bindings()?.iter().any(|b| b.connection_id == id) {
-                    bail!("请先移除各 Agent 的配置绑定，再删除连接");
-                }
-                let connection = self.store.connection(id)?;
-                self.store.delete_connection(id)?;
-                self.vault.delete(&connection.definition_ref)?;
-                self.vault.delete(&format!("oauth/{id}"))?;
-                self.pool.invalidate(id).await;
-                Ok(json!({"deleted":true}))
+                let keep_native = p
+                    .get("keepNative")
+                    .map(|v| v.as_bool().context("keepNative 必须是布尔值"))
+                    .transpose()?
+                    .unwrap_or(false);
+                self.delete_connection(required(&p, "id")?, keep_native)
+                    .await
             }
             "changes.preview" => {
                 let _guard = self.mutation.lock().await;
