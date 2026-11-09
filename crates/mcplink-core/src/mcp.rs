@@ -55,11 +55,12 @@ fn http_endpoint(raw: &str, project: Option<&std::path::Path>) -> Result<String>
     }
     Ok(endpoint)
 }
-type SessionSlot = Arc<AsyncMutex<Option<(u64, Arc<Session>)>>>;
+type SessionSlot = Arc<AsyncMutex<Option<(u64, Session)>>>;
 #[derive(Default)]
 pub struct McpPool {
     sessions: Mutex<HashMap<String, SessionSlot>>,
     refresh: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
+    shutdown_guard: AsyncMutex<()>,
 }
 
 impl McpPool {
@@ -100,6 +101,36 @@ impl McpPool {
         }
     }
 
+    pub async fn shutdown(&self) -> Result<()> {
+        let _cleanup = self.shutdown_guard.lock().await;
+        let slots: Vec<_> = self
+            .sessions
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(_, slot)| slot)
+            .collect();
+        let mut tasks = tokio::task::JoinSet::new();
+        for slot in slots {
+            tasks.spawn(async move {
+                if let Some((_, session)) = slot.lock().await.take() {
+                    tokio::time::timeout(Duration::from_secs(20), session.cancel())
+                        .await
+                        .context("上游服务退出清理超时")?
+                        .context("上游服务退出失败")?;
+                }
+                Ok::<_, anyhow::Error>(())
+            });
+        }
+        let mut failure = None;
+        while let Some(result) = tasks.join_next().await {
+            if let Err(error) = result.context("上游退出任务失败").and_then(|value| value) {
+                failure.get_or_insert(error);
+            }
+        }
+        failure.map_or(Ok(()), Err)
+    }
+
     pub async fn peer(&self, engine: Arc<Engine>, id: &str) -> Result<Peer<RoleClient>> {
         let connection = engine.store.connection(id)?;
         if !connection.active {
@@ -112,7 +143,11 @@ impl McpPool {
             .entry(id.into())
             .or_default()
             .clone();
-        let mut slot = slot.lock().await;
+        let mut shutdown = engine.shutdown.subscribe();
+        let mut slot = tokio::select! {
+            _ = shutdown.wait_for(|stopping| *stopping) => bail!("共享后台正在退出"),
+            slot = slot.lock() => slot,
+        };
         if let Some((revision, session)) = slot.as_ref()
             && *revision == connection.revision
             && !session.is_closed()
@@ -207,6 +242,8 @@ impl McpPool {
                         executable,
                         definition.origin_project.as_deref(),
                     )?);
+                    #[cfg(target_os = "macos")]
+                    command.env("PATH", crate::process_group::search_path()?);
                     for argument in &definition.args {
                         command.arg(config::resolve(
                             argument,
@@ -237,6 +274,33 @@ impl McpPool {
                         command.current_dir(project);
                     }
                     command.stderr(Stdio::null()).kill_on_drop(true);
+                    #[cfg(windows)]
+                    let command = {
+                        use process_wrap::tokio::{
+                            CommandWrap, CreationFlags, JobObject, KillOnDrop,
+                        };
+                        // Keep the complete upstream process tree hidden and owned by the daemon.
+                        // Closing the job on a daemon crash also prevents orphaned service processes.
+                        let mut wrapped = CommandWrap::from(command);
+                        wrapped.wrap(CreationFlags(
+                            windows::Win32::System::Threading::CREATE_NO_WINDOW,
+                        ));
+                        wrapped
+                            .wrap(KillOnDrop)
+                            .wrap(JobObject)
+                            .wrap(crate::process_group::KillGroupOnDrop);
+                        wrapped
+                    };
+                    #[cfg(target_os = "macos")]
+                    let command = {
+                        use process_wrap::tokio::{CommandWrap, KillOnDrop, ProcessGroup};
+                        let mut wrapped = CommandWrap::from(command);
+                        wrapped
+                            .wrap(KillOnDrop)
+                            .wrap(ProcessGroup::leader())
+                            .wrap(crate::process_group::KillGroupOnDrop);
+                        wrapped
+                    };
                     let transport = TokioChildProcess::new(command)
                         .context("无法启动 MCP 服务，请检查命令和运行环境")?;
                     Ok(client_config()
@@ -245,17 +309,18 @@ impl McpPool {
                         .map_err(connection_error)?)
                 }
             },
-        )
-        .await
-        .context("MCP 连接超时，请检查服务状态")??;
+        );
+        let started = tokio::select! {
+            _ = shutdown.wait_for(|stopping| *stopping) => bail!("共享后台正在退出"),
+            result = started => result.context("MCP 连接超时，请检查服务状态")??,
+        };
         let current = engine.store.connection(id)?;
         if !current.active || current.revision != connection.revision {
             started.cancellation_token().cancel();
             bail!("连接已更新，请重新连接");
         }
-        let session = Arc::new(started);
-        let peer = session.peer().clone();
-        *slot = Some((connection.revision, session));
+        let peer = started.peer().clone();
+        *slot = Some((connection.revision, started));
         Ok(peer)
     }
 
@@ -325,7 +390,14 @@ impl McpPool {
         let request =
             serde_json::from_value::<ClientRequest>(request).context("MCP 请求参数格式不正确")?;
         let limit = definition.timeout.unwrap_or(120).clamp(5, 600);
-        match tokio::time::timeout(Duration::from_secs(limit), peer.send_request(request)).await {
+        let mut shutdown = engine.shutdown.subscribe();
+        let outcome = tokio::select! {
+            _ = shutdown.wait_for(|stopping| *stopping) => {
+                bail!("后台正在退出，调用已中断；执行结果需核对，不要自动重试");
+            },
+            outcome = tokio::time::timeout(Duration::from_secs(limit), peer.send_request(request)) => outcome,
+        };
+        match outcome {
             Ok(Ok(result)) => {
                 let mut value = serde_json::to_value(result)?;
                 if list && let Some(tools) = value.get_mut("tools").and_then(Value::as_array_mut) {

@@ -2,6 +2,8 @@
 
 `mcplink` CLI 与桌面使用同一个管理核心、后台、系统凭据库和配置事务。命令不启动桌面或浏览器；后台在首次管理调用时按需启动。`schema` 和 `skill` 离线可用。
 
+当前 MCP 接入支持 `codex|hermes|claude|opencode|zcode|deepseek|openclaw|kimicode` 八类客户端，未安装时显示但不可配置，安装后刷新即可接入。配置写入与安装状态校验需要 management API 9，原生路径与逐来源限制见[八类 Agent 接入](agent-discovery.md)。管理 Skill 的复制安装目标另见下文。
+
 ## 安装与发现
 
 从源码安装独立 CLI（需要项目 README 中的 Rust 构建环境）：
@@ -15,7 +17,7 @@ mcplink skill install --agent hermes
 
 Cargo 默认将程序放入 `~/.cargo/bin`，该目录需在 PATH 中。也可直接使用构建产物 `target/release/mcplink`，或 macOS 应用内的 `/Applications/mcplink.app/Contents/MacOS/mcplink`。共享配置会固定使用发起预览的程序绝对路径，请使用长期保留的位置。
 
-管理 Skill 的源文件为 [`skills/mcplink/SKILL.md`](../skills/mcplink/SKILL.md)，随二进制嵌入，安装时不需要源码目录或网络。安装目标为 Codex、Hermes 或 Claude 的 Skill 目录；指定 `CODEX_HOME`、`HERMES_HOME`、`CLAUDE_CONFIG_DIR` 时使用对应目录，未指定时使用客户端默认目录。源码 API 5 还支持 OpenCode 配置目录下的 `skills/mcplink`，目录选择见 [Agent 适配](agent-adapters.md)。安装独立副本；相同内容重复执行返回 `unchanged`，不同内容或目标符号链接会被拒绝，不覆盖已有包。后续 Skill 版本可通过用户选择的版本管理流程维护。`mcplink skill show` 返回当前二进制内的 Skill 内容。
+管理 Skill 的源文件为 [`skills/mcplink/SKILL.md`](../skills/mcplink/SKILL.md)，随二进制嵌入，安装时不需要源码目录或网络。安装目标为 Codex、Hermes 或 Claude 的 Skill 目录；指定 `CODEX_HOME`、`HERMES_HOME`、`CLAUDE_CONFIG_DIR` 时使用对应目录，未指定时使用客户端默认目录。源码还支持 OpenCode 配置目录下的 `skills/mcplink`，目录选择见 [Agent 适配](agent-adapters.md)。安装独立副本；相同内容重复执行返回 `unchanged`，不同内容或目标符号链接会被拒绝，不覆盖已有包。后续 Skill 版本可通过用户选择的版本管理流程维护。`mcplink skill show` 返回当前二进制内的 Skill 内容。
 
 安装后在新会话中使用 `$mcplink`，或让支持自动发现的 Agent 按任务选择它。例如：“用 mcplink 把已有文档服务以共享方式接给 Hermes，先核对变更预览，再按本次授权应用。”
 
@@ -50,7 +52,7 @@ Cargo 默认将程序放入 `~/.cargo/bin`，该目录需在 PATH 中。也可�
 | 命令 | 用途 |
 | --- | --- |
 | `status` | 连接、绑定、来源、最近历史和 Gateway 的完整快照。 |
-| `sources list` / `sources add --agent AGENT [--path PATH] [--scope SCOPE] [--project DIR] [--layout v1\|v2]` | 查看来源或显式添加配置；作用域与版本参数为源码开发能力。 |
+| `sources list` / `sources add --agent AGENT [--path PATH] [--scope SCOPE] [--project DIR]` | 查看来源或显式添加配置；OpenCode 固定使用当前格式，无版本选择参数。 |
 | `connections list` / `connections show ID` | 查看连接摘要或脱敏定义。未导入条目带 `detected:true`。 |
 | `connections import --source SOURCE_ID --name NAME` | 将已有原生条目纳入托管，返回托管 ID，不改写原生文件。 |
 | `connections adopt --source SOURCE_ID --name NAME` | 明确采用已绑定直连条目的外部修改。 |
@@ -63,7 +65,7 @@ Cargo 默认将程序放入 `~/.cargo/bin`，该目录需在 PATH 中。也可�
 | `changes preview --connection ID --target SOURCE_ID [--mode direct\|shared] [--action ACTION]` | 生成 10 分钟有效的脱敏计划，不写原生配置。两个标志都可重复。 |
 | `changes apply PLAN_ID` | 应用指定计划，检查修订与文件哈希，逐目标报告结果。 |
 | `changes history` / `changes restore OPERATION_ID` | 查看最近 25 条历史，恢复指定条目并保留无关后续修改。 |
-| `gateway status` / `gateway pause` / `gateway resume` | 查看或切换所有共享连接的后台状态。 |
+| `gateway status` / `gateway pause` / `gateway resume` / `gateway stop` | 查看或切换共享状态，或等待当前后台清理退出。 |
 | `mcp describe ID` / `mcp request ID --stdin` | 查看上游能力，或派发一条协议请求，不自动重试。 |
 | `connections tools ID --tool TOOL` | 源码开发能力：发现指定工具，返回 Schema、描述和 `schemaHash`。 |
 | `call ID TOOL --stdin [--schema-hash HASH]` | 源码开发能力：校验参数后调用精确工具，不自动重试。 |
@@ -71,9 +73,9 @@ Cargo 默认将程序放入 `~/.cargo/bin`，该目录需在 PATH 中。也可�
 | `cli inspect MANIFEST` / `cli rebind MANIFEST --connection ID` | 离线检查清单，或核对契约后显式重新绑定当前数据目录中的连接。 |
 | `skill show` / `skill install --agent AGENT` | 导出或安装 mcplink 自身管理 Skill。 |
 
-`AGENT` 为 `codex`、`hermes`、`claude`；源码 management API 5 另支持 `opencode`。`ACTION` 为 `upsert`、`disable`、`enable`、`remove`。目标使用来源 ID（如 `hermes:user`），连接使用导入或保存返回的托管 ID。
+`AGENT` 为 `codex`、`hermes`、`claude`；源码 management API 6 另支持当前格式的 `opencode`。`ACTION` 为 `upsert`、`disable`、`enable`、`remove`。目标使用来源 ID（如 `hermes:user`），连接使用导入或保存返回的托管 ID。
 
-v0.1.0 中 Claude Code 来源只读。源码开发能力支持可写 user，以及显式添加的 local/project 作用域；插件、托管和未明确作用域的其他 JSON 仍只读。OpenCode 支持显式 V1/V2 JSON/JSONC 来源。参数、覆盖关系、保留格式与转换限制见 [Agent 配置适配](agent-adapters.md)。只读来源不会因以其他 Agent 或路径重复登记而变为可写。
+v0.1.0 中 Claude Code 来源只读。源码开发能力支持可写 user，以及显式添加的 local/project 作用域；插件、托管和未明确作用域的其他 JSON 仍只读。OpenCode 仅支持当前 `mcp.servers` JSON/JSONC 来源，空 MCP 配置无需选择版本。参数、覆盖关系、保留格式与转换限制见 [Agent 配置适配](agent-adapters.md)。只读来源不会因以其他 Agent 或路径重复登记而变为可写。
 
 此路径使用 Claude 的原生配置入口和插件目录结构；配置位置与插件格式参照 [Claude MCP 文档](https://code.claude.com/docs/en/mcp) 和 [插件清单文档](https://code.claude.com/docs/en/plugins-reference)。
 
@@ -143,6 +145,10 @@ mcplink cli rebind ./notes-cli/notes.mcplink.json --connection LOCAL_CONNECTION_
 重新绑定核对所有选定工具的 Schema 摘要及参数契约，原子更新清单，并检测并发修改。会在清单旁保留空的 `.清单文件名.lock`，用于跨数据目录的并发互斥；移动入口时无需复制它，操作期间不要删除。原连接丢失时不会按显示名选择其他账号。上游输入 Schema 的任何变化均要求重新核对、重新生成；工具筛选、连接停用和 Gateway 暂停即时生效。托管凭据更新、OAuth 刷新和后台重启不要求重新生成。
 
 终端和生成入口使用同样的任务授权边界，不继承原生 Agent 的确认步骤；工具结果不确定时先核对，入口不自动重发。
+
+`gateway status` 使用轻量后台查询，不扫描原生配置。暂停和恢复在 SQLite 持久化成功后才返回，后台或电脑重启不会自动解除暂停；这些操作需要 management API 10。Windows 与 macOS 可在桌面“后台运行”或托盘/菜单栏设置登录自启，自启时隐藏主窗口；关闭主窗口不退出代理。
+
+`gateway stop` 需要 management API 11，等待上游进程树清理和后台运行锁释放；后台原本未运行时直接成功，不启动后台或创建数据目录。它不改变持久化的暂停偏好，后续 Agent 调用仍可按需启动后台。桌面仍在运行时也会通过巡检恢复后台；需要停止并退出应用时使用桌面菜单。持续阻止共享调用请使用 `gateway pause`。退出进行中的调用会报告结果待核对，不自动重试。
 
 ## OAuth 客户端配置（源码开发能力）
 

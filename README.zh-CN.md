@@ -6,7 +6,7 @@
 
 **[English](README.md) · 简体中文**
 
-mcplink 是面向 **Codex、Hermes** 的本地桌面 **MCP（Model Context Protocol）管理器与 Gateway**，支持只读盘点和导入 **Claude Code** 用户及插件配置。在同一处查看 MCP 服务、维护托管凭据，并通过桌面或 JSON CLI 把连接接给常用的 AI Agent。
+mcplink 是本地桌面 **MCP（Model Context Protocol）管理器与 Gateway**。当前源码支持 **Codex、Hermes、Claude Code、OpenCode、ZCode、DeepSeek Harness、OpenClaw、Kimi Code** 八类客户端的接入管理与 MCP 共享代理；未安装的客户端显示“未安装”且不可配置，安装后刷新即可接入。在同一处查看 MCP 服务、维护托管凭据，并通过桌面或 JSON CLI 管理连接，具体格式及来源限制见[八类 Agent 接入](docs/agent-discovery.md)。
 
 **v0.1.0 为预览版，提供 macOS Apple Silicon 与 Windows x64 下载。** macOS 包使用 ad-hoc 签名，尚无 Developer ID 签名和公证；Windows 安装包未签名。安装前请核对下方平台范围。
 
@@ -14,6 +14,7 @@ mcplink 是面向 **Codex、Hermes** 的本地桌面 **MCP（Model Context Proto
 
 - **盘点已有服务**：读取原生 MCP 配置，按需将连接纳入托管。
 - **直连或共享**：按服务选择原生直连或共享本地 Gateway；关闭桌面窗口后，共享连接仍可调用。
+- **后台运行**：Windows 托盘与 macOS 菜单栏支持关窗留驻、登录自启和窗口唤起；共享暂停跨重启保留，完整退出等待服务清理。详见 [Windows](docs/windows-background.md) 与 [macOS](docs/macos-background.md) 的行为和验收范围。
 - **先预览再修改**：核对目标文件和变更，检查并发修改，备份并逐条恢复操作。
 - **复用托管凭据**：用系统凭据库保存 Secret，在一处更新共享连接的授权。
 - **桌面与 CLI 共用核心**：两种入口使用相同的 Rust 管理核心、后台和配置事务。
@@ -65,7 +66,7 @@ Get-FileHash .\mcplink_0.1.0_x64-setup.exe -Algorithm SHA256
 | Hermes | 用户配置，以及手动添加的 YAML 文件 | 支持 |
 | Claude Code | 用户配置、已启用用户插件，以及手动添加的 JSON 文件 | 只读 |
 
-上表描述 v0.1.0。源码开发能力新增 Claude Code user/local/project 可写作用域，以及 OpenCode V1/V2 JSON/JSONC 适配，尚未包含在下载包中，详见[适配范围与验证](docs/agent-adapters.md)。客户端审批、策略和登录缓存继续由原客户端维护。
+上表描述 v0.1.0。源码开发能力新增 Claude Code user/local/project 可写作用域，以及当前 OpenCode 2.x JSON/JSONC 适配，尚未包含在下载包中，详见[适配范围与验证](docs/agent-adapters.md)。OpenCode 不再支持旧版配置结构。客户端审批、策略和登录缓存继续由原客户端维护。
 
 ### CLI 与管理 Skill
 

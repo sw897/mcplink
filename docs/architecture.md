@@ -4,11 +4,11 @@ mcplink 管理个人电脑的 MCP 接入。服务、账号、Agent 三个视图�
 
 ## 组件与调用
 
-- **桌面**：Tauri 2 + React/TypeScript，扫描、连接编辑、账号维护、Agent 对比、变更预览和恢复。
-- **管理核心**：Rust `mcplink-core`，包含 Codex TOML 与 Hermes YAML 适配、SQLite 元数据、系统凭据库和配置操作日志。
-- **版本化配置来源**：源码支持 Claude Code user/local/project 的独立 JSON 位置和 OpenCode V1/V2 JSONC 服务表。JSON 编辑复用同一预览、哈希检查、备份和逐条恢复事务，保留无关设置、注释及空白。Claude 插件与托管来源保持只读，客户端审批、信任、登录缓存和插件升级由原客户端维护。具体边界见 [Agent 配置适配](agent-adapters.md)。
+- **桌面**：Tauri 2 + React/TypeScript，扫描、连接编辑、账号维护、按 Agent 查看接入、变更预览和恢复。服务页使用纵向卡片汇总已接入的客户端；Agent 页按已安装/未安装分组切换，右侧显示当前客户端的服务与配置位置，避免八列矩阵带来的横向滚动。未安装客户端仅可查看，配置操作禁用。打开接入窗口不纳管服务，生成预览时才导入所选连接。
+- **管理核心**：Rust `mcplink-core`，包含八类客户端的 TOML、YAML、JSON/JSONC/JSON5 适配、SQLite 元数据、系统凭据库和配置操作日志。完整支持名单及原生格式见[八类 Agent 接入](agent-discovery.md)。
+- **Agent 配置来源**：源码支持 Claude Code user/local/project 的独立 JSON 位置，以及当前 OpenCode `mcp.servers` JSONC 服务表。OpenCode 不再提供旧版配置选择。JSON 编辑复用同一预览、哈希检查、备份和逐条恢复事务，保留无关设置、注释及空白。Claude 插件与托管来源保持只读，客户端审批、信任、登录缓存和插件升级由原客户端维护。具体边界见 [Agent 配置适配](agent-adapters.md)。
 - **Agent CLI**：`mcplink schema/status/sources/connections/credentials/changes/gateway/mcp`，JSON 输出和 stdin 输入；复用后台 RPC，带语义失败退出码，预览／应用仍走同一配置事务。`skill show/install` 从二进制导出或安装管理 Skill，无需后台。详见 [Agent CLI](agent-cli.md)。
-- **后台**：独立 `mcplink daemon`，每个数据目录单实例。关闭窗口不关闭后台；首版通过按需启动管理生命周期，不安装系统服务。
+- **后台**：独立 `mcplink daemon`，每个数据目录单实例。Windows 关闭窗口后收起到托盘，左键显示窗口，右键可暂停共享、设置登录自启或退出托盘。登录自启使用当前用户启动项和 `--background`，窗口从创建起隐藏；重复启动复用现有桌面实例。托盘每 10 秒检查后台并按需恢复；退出托盘后代理继续运行，由后续调用按需恢复，不安装 Windows 系统服务。
 - **共享入口**：每个 Agent 为每项共享服务启动独立 STDIO Bridge。Bridge 经带本地认证的 loopback HTTP 调用后台。后台用 rmcp 连接上游 STDIO 或 Streamable HTTP。
 
 本地工具和原生多客户端服务可直接写入 Agent 配置。需要共用认证的服务使用 Bridge，原生配置只保留程序路径、连接 ID 和数据目录。每项服务保留独立接入名，不聚合成一个重命名全部工具的入口。
@@ -16,6 +16,10 @@ mcplink 管理个人电脑的 MCP 接入。服务、账号、Agent 三个视图�
 后台每项连接复用一个上游会话；多个客户端的请求由协议 ID 分流。SDK 管理握手、分页游标和 MCP 结果。转发 tools、resources、prompts 的普通请求；不宣告没有实现的 tasks、sampling、elicitation 或订阅能力。Hermes 的工具白名单、glob 和资源/提示开关由共享路径保留；不能等价转换的直连配置拒绝写入，并给出改用共享接入的提示。
 
 Bridge 每次派发前检查后台并按需重新连接。派发后通信失败或超时返回结果待核对，不自动重发工具调用。下游取消不代表上游回滚，首版不保证跨 HTTP 管理链路传播取消通知。
+
+共享暂停状态存入 SQLite `settings`，写入成功后才确认暂停或恢复，后台重启保持原状态。Windows 的后台、RPC 助手和上游 STDIO 服务均隐藏控制台；上游服务使用带关闭回收标志的 Job Object，暂停或后台异常退出会清理其子进程树。macOS 上游使用独立进程组，正常退出及 SIGTERM 会清理进程组；SIGKILL 不执行清理回调。
+
+Windows 托盘和 macOS 菜单栏共用后台生命周期：关窗隐藏，普通重复启动唤起，登录启动隐藏；完整退出先停止巡检和新桌面请求，再等待共享后台清理。也可仅退出界面并保留独立后台。`gateway.stop` 不自动启动缺席的后台，等待所属实例释放运行锁，不改变暂停偏好；后续 Agent 调用仍可重新启动后台。持久化暂停与轻量 `gateway.status` 要求 management API 10，退出清理要求 API 11，桌面和 CLI 应使用同一构建。平台细节见 [Windows](windows-background.md) 与 [macOS](macos-background.md)。
 
 ## 配置与数据
 

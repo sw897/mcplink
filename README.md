@@ -6,7 +6,7 @@
 
 **English · [简体中文](README.zh-CN.md)**
 
-mcplink is a local desktop **MCP (Model Context Protocol) manager and gateway** for **Codex** and **Hermes**, with read-only discovery and import from **Claude Code**. Inspect MCP servers, manage credentials, and share connections across AI agents from a Tauri desktop app or a JSON CLI.
+mcplink is a local desktop **MCP (Model Context Protocol) manager and gateway**. Inspect MCP servers, manage credentials, and share connections across AI agents from a Tauri desktop app or a JSON CLI. Current source builds support **Codex, Hermes, Claude Code, OpenCode, ZCode, DeepSeek Harness, OpenClaw, and Kimi Code**. Uninstalled clients remain visible with configuration disabled; install the client and refresh to enable it. See [eight-Agent integration](docs/agent-discovery.md) for native formats, shared proxy access, and per-source permissions.
 
 本地 MCP 接入管理器：统一查看服务与账号，预览配置变更，并在多个 AI Agent 之间复用连接和托管凭据。
 
@@ -20,6 +20,7 @@ mcplink is a local desktop **MCP (Model Context Protocol) manager and gateway** 
 - **Reuse managed credentials:** store secrets in the system credential store and update shared authorization in one place.
 - **Use desktop or CLI:** the UI and JSON CLI share the same Rust management core, gateway, and transaction logic.
 - **Let agents manage connections:** install the bundled mcplink management Skill for supported agents.
+- **Run in the background:** Windows tray and macOS menu bar support close-to-hide, login startup, and reopening the window. Shared pause persists across restarts; full quit waits for service cleanup. See the [Windows](docs/windows-background.md) and [macOS](docs/macos-background.md) behavior and acceptance scope.
 
 mcplink supports STDIO and Streamable HTTP MCP connections. Authentication and protocol details are documented in [compatibility](docs/compatibility.md) and [architecture](docs/architecture.md).
 
@@ -67,7 +68,7 @@ Configuration discovery and a successful file write do not prove that a running 
 | Hermes | User configuration and explicitly added YAML files | Yes |
 | Claude Code | User configuration and enabled user plugins; explicitly added JSON files | Read-only |
 
-This table describes v0.1.0. Source development adds writable Claude Code user/local/project scopes and version-aware OpenCode V1/V2 JSON/JSONC adapters. These changes are not included in the release downloads; see [adapter scope and validation](docs/agent-adapters.md). Client approvals, policies, and login caches remain under the client’s control.
+This table describes v0.1.0. Source development adds writable Claude Code user/local/project scopes and adapters for the current OpenCode 2.x JSON/JSONC format. Earlier OpenCode layouts are no longer supported. These changes are not included in the release downloads; see [adapter scope and validation](docs/agent-adapters.md). Client approvals, policies, and login caches remain under the client's control.
 
 ### CLI and management Skill
 

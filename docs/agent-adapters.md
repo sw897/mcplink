@@ -1,8 +1,8 @@
 # Agent 配置适配（源码开发能力）
 
-以下能力未包含在 v0.1.0 发布包中。先检查当前二进制的 `schema`，后台须使用同一构建；新来源参数和写入语义需要 management API 5。原生配置应用、客户端加载、业务工具调用分别验收。
+以下能力以当前源码构建为准，未全部包含在公开 v0.1.0 发布包中。先检查当前二进制的 `schema`，前后台须使用同一构建。八类 Agent 的配置管理、MCP 共享代理及安装状态校验需要 management API 9，格式及权限见[八类 Agent 接入管理](agent-discovery.md)。未安装时不可配置；原生配置应用、客户端加载、业务工具调用分别验收。
 
-本阶段新增的 OpenCode 来源不能由 v0.1.0 后台读取。并行试用或退回旧版时使用各自独立的数据目录；新旧前后台不共享后台进程。
+OpenCode 仅维护官方现行的 2.x 配置结构，不再兼容旧版服务表或版本选择参数。旧后台会在相关配置操作发送前被拒绝；更新时需使用同一构建的前后台。
 
 ## Claude Code
 
@@ -30,32 +30,31 @@ STDIO 中的 `${NAME}` / `${NAME:-default}` 转成托管 `${env:NAME}` 并在直
 
 ## OpenCode
 
-| 版本结构 | 服务表 | 启停 | 本地进程 |
+| 配置 | 服务表 | 启停 | 本地进程 |
 | --- | --- | --- | --- |
-| V1 | `mcp.<name>` | `enabled` | `type: local`、`command: [程序, 参数…]`、`environment` |
-| V2 | `mcp.servers.<name>` | `disabled`，与启用状态相反 | 同上 |
+| 当前 OpenCode 2.x | `mcp.servers.<name>` | `disabled`，与启用状态相反 | `type: local`、`command: [程序, 参数…]`、`environment` |
 
 远程服务使用 `type: remote`、`url` 和 `headers`。默认发现已存在的全局 `opencode.json` / `opencode.jsonc`；目录由 `OPENCODE_CONFIG_DIR`、`XDG_CONFIG_HOME` 或用户目录确定。项目来源需显式添加，不递归推断项目树。
 
 ```sh
-mcplink sources add --agent opencode --scope user --layout v2
-mcplink sources add --agent opencode --scope project --project /absolute/project --layout v2
-mcplink sources add --agent opencode --path /absolute/opencode.jsonc --layout v1
+mcplink sources add --agent opencode --scope user
+mcplink sources add --agent opencode --scope project --project /absolute/project
+mcplink sources add --agent opencode --path /absolute/opencode.jsonc
 mcplink skill install --agent opencode
 ```
 
-已有服务表可按结构识别版本；空文件或结构不明确时须选择 `--layout v1|v2`。结构与选择不符、混合 V1/V2、重复 JSON 属性或 JSON5 扩展会拒绝写入。不迁移整个文件，不合并其他客户端配置。
+无需选择版本。空文件、没有 `mcp`、空 `mcp` 或只有全局超时的配置都读取为空服务表。仅接受 `mcp.servers`；旧版直接挂在 `mcp` 下的服务、`enabled`、重复 JSON 属性及 JSON5 扩展会被拒绝，不自动迁移文件。CLI 和桌面不再提供 `layout` 选择，RPC 同样拒绝该历史参数。
 
 JSONC 支持注释与尾逗号，编辑保留未涉及的字段、注释、空白及变量引用。`{env:NAME}` 导入后转为托管环境引用，使用后台实际继承的环境，缺值明确失败。`{file:…}`、原生专用 OAuth 参数、原生毫秒超时和非 legacy 协议目前不能完整托管，导入时给出错误；原文件保留。可另建规范化连接，明确配置托管凭据和超时，再用共享入口供客户端使用。不会读取原生 OAuth 登录缓存。
 
 OpenCode 字面 `${…}` 与托管层的变量语法冲突，目前拒绝导入，避免静默展开原本的文本。未知服务字段、启用的 `codemode` 等没有等价执行语义时也明确拒绝；文件中无关设置仍保留。
 
-共享条目按所选版本编码 Bridge 的命令数组及 `environment`，只保存托管 ID 和本地配置引用。凭据更新或后台重启后已有条目继续使用同一连接。直连不能保留工具筛选等约束时要求共享，不扩大允许工具集合。V2 可将新托管定义的秒级超时转换为对应毫秒字段；原生超时导入的限制仍适用。
+共享条目使用当前格式编码 Bridge 的命令数组及 `environment`，只保存托管 ID 和本地配置引用。凭据更新或后台重启后已有条目继续使用同一连接。直连不能保留工具筛选等约束时要求共享，不扩大允许工具集合。新托管定义的秒级超时转换为对应毫秒字段；原生超时导入的限制仍适用。
 
 ## 验证范围
 
-隔离 CLI 场景覆盖预览、应用、单条恢复、同文件不同作用域、并发编辑、损坏/重复 JSON、JSONC、两版本启停、环境引用、共享凭据更新及后台重启。失败方式见[验收清单](../tests/e2e/agent-adapters-failure-modes.md)。
+隔离 CLI 场景覆盖预览、应用、单条恢复、同文件不同作用域、并发编辑、损坏/重复 JSON、JSONC、当前格式的启停、空配置、旧格式拒绝、环境引用、共享凭据更新及后台重启。失败方式见[验收清单](../tests/e2e/agent-adapters-failure-modes.md)。
 
-本机原生加载与 MCP 连接使用 Claude Code 2.1.319、OpenCode 1.19.5 和 2.2.1；未据此声明模型侧业务工具调用已验收。OpenCode 2.2.1 初始化 MCP 状态是异步的，一次性 CLI 首次查询可能返回空列表；验收使用持续运行的隔离服务，等待实际连接状态。两平台 CI 与真实账号范围见[兼容说明](compatibility.md)。
+OpenCode 当前原生验收入口使用 `MCPLINK_E2E_OPENCODE` 指定的客户端，本机为 2.2.6。脚本隔离配置与数据目录，持续运行原生服务并等待 MCP 实际连接，避免首次异步查询空列表造成误判。Claude Code 原生验收使用 2.1.319。原生连接检查不代表模型侧业务工具调用；历史平台记录和真实账号范围见[兼容说明](compatibility.md)。
 
 官方契约核对于 2026-11-08：[Claude Code MCP](https://code.claude.com/docs/en/mcp)、[OpenCode MCP](https://opencode.ai/docs/mcp-servers/)、[OpenCode 配置](https://opencode.ai/docs/config/)。实现和验收固定客户端版本，后续版本变化须重新验证。

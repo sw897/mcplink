@@ -67,7 +67,6 @@ pub fn default_sources() -> Result<Vec<Source>> {
             plugin_root: None,
             discovery_error: None,
             scope: None,
-            layout: None,
         },
         Source {
             id: "hermes:user".into(),
@@ -79,7 +78,6 @@ pub fn default_sources() -> Result<Vec<Source>> {
             plugin_root: None,
             discovery_error: None,
             scope: None,
-            layout: None,
         },
         Source {
             id: "claude:user".into(),
@@ -94,11 +92,11 @@ pub fn default_sources() -> Result<Vec<Source>> {
             plugin_root: None,
             discovery_error: None,
             scope: Some("user".into()),
-            layout: None,
         },
     ];
     sources.extend(claude_plugins());
     sources.extend(crate::opencode::default_sources()?);
+    sources.extend(crate::agent_config::default_sources()?);
     Ok(sources)
 }
 
@@ -182,6 +180,12 @@ pub fn source_from_params(params: &Value, sources: &[Source]) -> Result<Source> 
             .map_err(|_| anyhow::anyhow!("Agent 类型无效"))?;
     if agent == Agent::Opencode {
         return crate::opencode::source_from_params(params, sources);
+    }
+    if agent == Agent::Removed {
+        bail!("此客户端不在支持名单中");
+    }
+    if agent.native_adapter() {
+        return crate::agent_config::source_from_params(agent, params, sources);
     }
     let scope = params.get("scope").and_then(Value::as_str);
     if scope.is_some()
@@ -317,7 +321,6 @@ pub fn source_from_params(params: &Value, sources: &[Source]) -> Result<Source> 
         plugin_root: None,
         discovery_error: None,
         scope: scope.map(str::to_owned),
-        layout: None,
     };
     read(&source)?;
     Ok(source)
@@ -391,7 +394,6 @@ fn claude_plugins() -> Vec<Source> {
                         plugin_root: Some(root),
                         discovery_error: None,
                         scope: Some("plugin".into()),
-                        layout: None,
                     });
                 }
             }
@@ -409,7 +411,6 @@ fn claude_plugins() -> Vec<Source> {
             plugin_root: None,
             discovery_error: Some("Claude Code 插件登记或设置无法读取，请在原客户端核对".into()),
             scope: Some("plugin".into()),
-            layout: None,
         }]
     })
 }
@@ -467,7 +468,8 @@ pub fn parse(source: &Source, text: &str) -> Result<Value> {
                 };
                 json!({"mcp_servers": servers})
             }
-            Agent::Opencode => crate::opencode::parse(source, text)?,
+            Agent::Opencode => crate::opencode::parse(text)?,
+            _ => crate::agent_config::parse(source, text)?,
         }
     };
     if !value.is_object() {
@@ -510,7 +512,10 @@ pub fn normalize(raw: &Value, agent: Agent) -> Result<Definition> {
 
 fn normalize_context(raw: &Value, agent: Agent, project: Option<&Path>) -> Result<Definition> {
     if agent == Agent::Opencode {
-        return crate::opencode::normalize(raw, None, project);
+        return crate::opencode::normalize(raw, project);
+    }
+    if agent.native_adapter() {
+        return crate::agent_config::normalize(raw, &agent, project);
     }
     if !raw.is_object() {
         bail!("MCP 服务配置必须是映射");
@@ -658,7 +663,6 @@ fn normalize_context(raw: &Value, agent: Agent, project: Option<&Path>) -> Resul
         oauth_scopes: Vec::new(),
         oauth_callback_port: None,
         origin_project: project.map(Path::to_path_buf),
-        origin_layout: None,
     };
     if definition.original_agent == Some(Agent::Claude) {
         crate::json_config::claude_variables(&mut definition, true)?;
@@ -753,25 +757,30 @@ pub fn fingerprint(value: Option<&Value>) -> String {
 
 pub fn normalize_source(raw: &Value, source: &Source) -> Result<Definition> {
     if source.agent == Agent::Opencode {
-        crate::opencode::normalize(raw, source.layout, source.project.as_deref())
+        crate::opencode::normalize(raw, source.project.as_deref())
     } else {
         normalize_context(raw, source.agent.clone(), source.project.as_deref())
     }
 }
 
-pub fn check_source_import(source: &Source) -> Result<()> {
+pub fn check_source_import(source: &Source, raw: &Value) -> Result<()> {
     if source.agent == Agent::Opencode {
         crate::opencode::check_import(source)
+    } else if source.agent.native_adapter() {
+        crate::agent_config::check_import(source, raw)
     } else {
         Ok(())
     }
 }
 
 pub fn native(def: &Definition, source: &Source) -> Result<Value> {
+    if source.agent.native_adapter() {
+        return crate::agent_config::native(def, source);
+    }
     let target = &source.agent;
     validate(def)?;
     if *target == Agent::Opencode {
-        return crate::opencode::native(def, source);
+        return crate::opencode::native(def);
     }
     if def.client_secret.is_some()
         || !def.oauth_scopes.is_empty()
@@ -959,10 +968,13 @@ pub fn entry(source: &Source, name: &str) -> Result<Option<Value>> {
 }
 
 pub fn set_native_enabled(value: &mut Value, source: &Source, enabled: bool) -> Result<()> {
+    if source.agent.native_adapter() {
+        return crate::agent_config::set_enabled(value, &source.agent, enabled);
+    }
     if source.agent == Agent::Claude {
         bail!("Claude Code 启停按项目偏好维护，请在原客户端 /mcp 中切换；此处可预览移除配置");
     }
-    if source.agent == Agent::Opencode && source.layout == Some(crate::model::OpenCodeLayout::V2) {
+    if source.agent == Agent::Opencode {
         value
             .as_object_mut()
             .context("服务配置需要映射")?
@@ -1065,7 +1077,8 @@ pub fn render(source: &Source, text: &str, name: &str, value: Option<&Value>) ->
             path.push("mcpServers".into());
             crate::json_config::render(text, false, &path, name, value)
         }
-        Agent::Opencode => crate::opencode::render(source, text, name, value),
+        Agent::Opencode => crate::opencode::render(text, name, value),
+        _ => crate::agent_config::render(source, text, name, value),
     }
 }
 

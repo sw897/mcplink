@@ -25,6 +25,12 @@ pub enum Agent {
     Hermes,
     Claude,
     Opencode,
+    Zcode,
+    Deepseek,
+    Openclaw,
+    Kimicode,
+    #[serde(other)]
+    Removed,
 }
 
 impl Agent {
@@ -34,7 +40,32 @@ impl Agent {
             Self::Hermes => "Hermes",
             Self::Claude => "Claude Code",
             Self::Opencode => "OpenCode",
+            Self::Zcode => "ZCode",
+            Self::Deepseek => "DeepSeek Harness",
+            Self::Openclaw => "OpenClaw",
+            Self::Kimicode => "Kimi Code",
+            Self::Removed => "已移除客户端",
         }
+    }
+
+    pub fn native_adapter(&self) -> bool {
+        matches!(
+            self,
+            Self::Zcode | Self::Deepseek | Self::Openclaw | Self::Kimicode
+        )
+    }
+
+    pub fn supported() -> [Self; 8] {
+        [
+            Self::Codex,
+            Self::Hermes,
+            Self::Claude,
+            Self::Opencode,
+            Self::Zcode,
+            Self::Deepseek,
+            Self::Openclaw,
+            Self::Kimicode,
+        ]
     }
 }
 
@@ -54,15 +85,6 @@ pub struct Source {
     pub discovery_error: Option<String>,
     #[serde(default)]
     pub scope: Option<String>,
-    #[serde(default)]
-    pub layout: Option<OpenCodeLayout>,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum OpenCodeLayout {
-    V1,
-    V2,
 }
 
 #[derive(Clone, Serialize, Deserialize, Default)]
@@ -90,7 +112,6 @@ pub struct Definition {
     pub original: Value,
     pub original_agent: Option<Agent>,
     pub origin_project: Option<PathBuf>,
-    pub origin_layout: Option<OpenCodeLayout>,
 }
 
 impl Definition {

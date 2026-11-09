@@ -24,11 +24,13 @@ pub struct Engine {
     pub pool: McpPool,
     pub mutation: Mutex<()>,
     pub paused: AtomicBool,
+    pub shutdown: tokio::sync::watch::Sender<bool>,
 }
 
 impl Engine {
     pub fn open(data: PathBuf) -> Result<Arc<Self>> {
         let store = Arc::new(Store::open(&data)?);
+        let paused = store.gateway_paused()?;
         let vault = Vault::new(&data)?;
         let engine = Arc::new(Self {
             data,
@@ -36,7 +38,8 @@ impl Engine {
             vault,
             pool: McpPool::default(),
             mutation: Mutex::new(()),
-            paused: AtomicBool::new(false),
+            paused: AtomicBool::new(paused),
+            shutdown: tokio::sync::watch::channel(false).0,
         });
         engine.reconcile()?;
         Ok(engine)
@@ -114,10 +117,12 @@ impl Engine {
         let mut scopes = Vec::new();
         let mut detected = Vec::new();
         let mut rows: Vec<Value> = connections.iter().map(Connection::public_value).collect();
-        for source in self.sources()? {
+        let sources = self.sources()?;
+        let agents = crate::discovery::inventory(&sources)?;
+        for source in sources {
             let result = config::scan(&source);
             let error = result.as_ref().err().map(ToString::to_string);
-            scopes.push(json!({"id":source.id,"agent":source.agent,"label":source.label,"path":source.path,"project":source.project,"scope":source.scope,"layout":source.layout,"exists":source.path.exists(),"error":error,"readOnly":source.read_only}));
+            scopes.push(json!({"id":source.id,"agent":source.agent,"label":source.label,"path":source.path,"project":source.project,"scope":source.scope,"exists":source.path.exists(),"error":error,"readOnly":source.read_only}));
             if let Ok(entries) = result {
                 for entry in entries {
                     let binding = bindings
@@ -191,7 +196,7 @@ impl Engine {
             })
             .collect::<Vec<_>>();
         Ok(
-            json!({"connections":rows,"bindings":detected,"sources":scopes,"history":history,"gateway":{"paused":self.paused.load(Ordering::SeqCst),"sessions":self.pool.count()},"platform":std::env::consts::OS,"version":env!("CARGO_PKG_VERSION")}),
+            json!({"agents":agents,"connections":rows,"bindings":detected,"sources":scopes,"history":history,"gateway":{"paused":self.paused.load(Ordering::SeqCst),"sessions":self.pool.count()},"platform":std::env::consts::OS,"version":env!("CARGO_PKG_VERSION")}),
         )
     }
 
@@ -215,7 +220,7 @@ impl Engine {
         if let Some(error) = entry.error {
             bail!("该服务配置无效：{error}");
         }
-        config::check_source_import(&source)?;
+        config::check_source_import(&source, &entry.definition.original)?;
         let id = uuid::Uuid::new_v4().to_string();
         let mut connection = Connection {
             id: id.clone(),
@@ -319,7 +324,6 @@ impl Engine {
             definition.original = old_definition.original;
             definition.original_agent = old_definition.original_agent;
             definition.origin_project = old_definition.origin_project;
-            definition.origin_layout = old_definition.origin_layout;
         }
         let mut connection = existing.unwrap_or_else(|| Connection {
             id: uuid::Uuid::new_v4().to_string(),
@@ -420,6 +424,7 @@ impl Engine {
                         source.agent.label()
                     );
                 }
+                crate::discovery::require_installed(&source.agent)?;
                 if fs::symlink_metadata(&source.path)
                     .is_ok_and(|meta| meta.file_type().is_symlink())
                 {
@@ -565,6 +570,7 @@ impl Engine {
             bail!("连接已更新，请重新预览");
         }
         let source = self.source(&change.source_id)?;
+        crate::discovery::require_installed(&source.agent)?;
         let (text, _) = config::read(&source)?;
         if digest(text.as_bytes()) != change.expected_hash {
             bail!("目标文件已变化，请重新预览");
@@ -755,6 +761,9 @@ impl Engine {
     }
 
     pub async fn rpc(self: &Arc<Self>, method: &str, p: Value) -> Result<Value> {
+        if *self.shutdown.borrow() && !matches!(method, "gateway.status" | "gateway.stop") {
+            bail!("共享后台正在退出，请在退出完成后重新连接");
+        }
         match method {
             "snapshot" => self.snapshot(),
             "workspace.identity" => {
@@ -776,6 +785,11 @@ impl Engine {
             }
             "sources.add" => {
                 let _guard = self.mutation.lock().await;
+                let agent: Agent =
+                    serde_json::from_value(p["agent"].clone()).context("客户端类型无效")?;
+                if agent != Agent::Removed {
+                    crate::discovery::require_installed(&agent)?;
+                }
                 let sources = self.sources()?;
                 let source = config::source_from_params(&p, &sources)?;
                 if sources.iter().any(|existing| {
@@ -805,7 +819,6 @@ impl Engine {
                     bail!("共享入口不能作为上游配置，请编辑服务连接");
                 }
                 let source = self.source(source_id)?;
-                config::check_source_import(&source)?;
                 let entry = config::scan(&source)?
                     .into_iter()
                     .find(|e| e.name == name)
@@ -813,6 +826,7 @@ impl Engine {
                 if let Some(error) = entry.error {
                     bail!("来源配置无效：{error}");
                 }
+                config::check_source_import(&source, &entry.definition.original)?;
                 let mut connection = self.store.connection(&binding.connection_id)?;
                 connection.status = "configured".into();
                 connection.checked_at = None;
@@ -952,14 +966,29 @@ impl Engine {
                 result
             }
             "oauth.configure" => crate::mcp::configure_oauth(self.clone(), &p).await,
+            "gateway.status" => Ok(
+                json!({"paused":self.paused.load(Ordering::SeqCst),"sessions":self.pool.count()}),
+            ),
             "gateway.pause" => {
+                let _guard = self.mutation.lock().await;
+                self.store.set_gateway_paused(true)?;
                 self.paused.store(true, Ordering::SeqCst);
                 self.pool.clear().await;
                 Ok(json!({"paused":true}))
             }
             "gateway.resume" => {
+                let _guard = self.mutation.lock().await;
+                self.store.set_gateway_paused(false)?;
                 self.paused.store(false, Ordering::SeqCst);
                 Ok(json!({"paused":false}))
+            }
+            "gateway.stop" => {
+                self.shutdown.send_replace(true);
+                let _guard = self.mutation.lock().await;
+                // Stopping is temporary; preserve the user's persisted pause preference.
+                self.paused.store(true, Ordering::SeqCst);
+                self.pool.shutdown().await?;
+                Ok(json!({"stopped":true}))
             }
             "tools.describe" | "tools.call" => {
                 if self.paused.load(Ordering::SeqCst) {

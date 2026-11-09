@@ -27,8 +27,10 @@ FIXTURE = ROOT / "tests/fixtures/mcp_server.py"
 
 
 class McpClient:
-    def __init__(self, connection, environment, label):
-        self.process = subprocess.Popen([str(BINARY), "bridge", "--connection", connection], env=environment, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+    def __init__(self, connection, environment, label, native_entry=None):
+        argv = [native_entry["command"], *native_entry.get("args", [])] if native_entry else [str(BINARY), "bridge", "--connection", connection]
+        child_env = {**environment, **native_entry.get("env", {})} if native_entry else environment
+        self.process = subprocess.Popen(argv, env=child_env, cwd=native_entry.get("cwd") if native_entry else None, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
         self.responses = queue.Queue()
         def read_responses():
             for line in self.process.stdout:
@@ -69,14 +71,21 @@ class McpClient:
 
 
 class Harness:
-    def __init__(self, record, native_agents=False, fixture_args=()):
+    def __init__(self, record, native_agents=False, fixture_args=(), installed_agents=True):
         self.record = record
         self.native_agents = native_agents
         self.home = record / "home"
         self.data = record / "data"
         self.results = []
         self.clients = []
+        self.launchers = {agent:self.home/".local/bin"/(command + (".exe" if os.name == "nt" else ""))
+            for agent,command in {"codex":"codex","hermes":"hermes","claude":"claude","opencode":"opencode","zcode":"zcode","deepseek":"dsh","openclaw":"openclaw","kimicode":"kimi"}.items()}
         self.environment = {**os.environ, "MCPLINK_HOME": str(self.home), "MCPLINK_DATA_DIR": str(self.data), "MCPLINK_VAULT": "fixture", "CODEX_HOME": str(self.home / ".codex"), "HERMES_HOME": str(self.home / ".hermes"), "CLAUDE_CONFIG_DIR": str(self.home / ".claude"), "XDG_CONFIG_HOME":str(self.home/".config"), "XDG_DATA_HOME":str(self.home/".local/share"), "XDG_CACHE_HOME":str(self.home/".cache"), "XDG_STATE_HOME":str(self.home/".local/state"), "OPENCODE_CONFIG_DIR":str(self.home/".config/opencode"), "OPENCODE_TEST_HOME":str(self.home)}
+        self.environment["PATH"] = str(self.home/".local/bin") + os.pathsep + self.environment.get("PATH", "")
+        if installed_agents:
+            self.install_clients()
+        for key in ["DSH_HOME", "ZCODE_HOME", "KIMI_CODE_HOME", "OPENCLAW_STATE_DIR", "OPENCLAW_CONFIG_PATH"]:
+            self.environment.pop(key, None)
         for path in (self.home / ".codex", self.home / ".hermes"):
             path.mkdir(parents=True)
         (self.home / ".mcplink-test-fixture").touch()
@@ -97,6 +106,13 @@ class Harness:
         (self.home / ".codex/config.toml").write_text(toml)
         yaml = '# Hermes user comment\nmodel:\n  default: fixture-model\nmcp_servers:\n  office_docs:\n    url: ' + self.url + '\n    headers:\n      Authorization: synthetic-fixture-authorization\n  disabled_tool:\n    command: ' + json.dumps(sys.executable) + '\n    args: ' + json.dumps(local["args"]) + '\n    enabled: false\n'
         (self.home / ".hermes/config.yaml").write_text(yaml)
+
+    def install_clients(self):
+        # Presence-only launcher fixtures are never executed as vendor clients.
+        for path in self.launchers.values():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
+            path.chmod(0o755)
 
     def rpc(self, method, params=None, error=False):
         result = subprocess.run([str(BINARY), "rpc", "--stdin"], input=json.dumps({"method": method, "params": params or {}}), env=self.environment, capture_output=True, text=True, timeout=90)
@@ -125,7 +141,7 @@ class Harness:
     def run(self):
         snapshot = self.rpc("snapshot")
         assert len(snapshot["connections"]) == 3
-        assert len(snapshot["sources"]) == 3
+        assert {s["agent"] for s in snapshot["sources"]} == {"codex","hermes","claude","opencode","zcode","deepseek","openclaw","kimicode"}
         assert next(binding for binding in snapshot["bindings"] if binding["name"] == "disabled_tool")["enabled"] is False
         assert next(c for c in snapshot["connections"] if c["name"]=="disabled_tool")["authKind"]=="none"
         self.passed("scan native sources and disabled service")
@@ -237,7 +253,9 @@ class Harness:
 
         if self.native_agents:
             for program, args in (("codex", ["mcp", "list", "--json"]), ("hermes", ["mcp", "test", "office_docs"])):
-                result = subprocess.run([program, *args], env=self.environment, capture_output=True, text=True, timeout=90)
+                native_program = shutil.which(program, path=os.environ.get("PATH", ""))
+                assert native_program, f"Native {program} is not installed on the test host"
+                result = subprocess.run([native_program, *args], env=self.environment, capture_output=True, text=True, timeout=90)
                 (self.record / f"{program}-native.log").write_text(result.stdout + result.stderr)
                 assert result.returncode == 0, (program, result.stdout[-400:], result.stderr[-400:])
                 self.passed(f"native {program} MCP entry", {"exit_status": result.returncode})

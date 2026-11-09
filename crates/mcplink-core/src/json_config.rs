@@ -21,8 +21,20 @@ fn options(comments: bool) -> ParseOptions {
     }
 }
 
-fn document(text: &str, comments: bool) -> Result<CstRootNode> {
-    let root = CstRootNode::parse(text, &options(comments))
+fn json5_options() -> ParseOptions {
+    ParseOptions {
+        allow_loose_object_property_names: true,
+        allow_single_quoted_strings: true,
+        allow_hexadecimal_numbers: true,
+        allow_unary_plus_numbers: true,
+        allow_bare_decimal_point_numbers: true,
+        allow_extended_string_escapes: true,
+        ..options(true)
+    }
+}
+
+fn document_options(text: &str, options: &ParseOptions) -> Result<CstRootNode> {
+    let root = CstRootNode::parse(text, options)
         .map_err(|_| anyhow::anyhow!("JSON 配置无法解析，请在来源文件中修复"))?;
     let mut pending: Vec<_> = root.value().into_iter().collect();
     while let Some(node) = pending.pop() {
@@ -44,11 +56,19 @@ fn document(text: &str, comments: bool) -> Result<CstRootNode> {
 }
 
 pub fn parse(text: &str, comments: bool) -> Result<Value> {
-    let root = document(text, comments)?;
+    parse_options(text, &options(comments))
+}
+
+pub fn parse_json5(text: &str) -> Result<Value> {
+    parse_options(text, &json5_options())
+}
+
+fn parse_options(text: &str, options: &ParseOptions) -> Result<Value> {
+    let root = document_options(text, options)?;
     if root.value().is_none() {
         return Ok(json!({}));
     }
-    let value = jsonc_parser::parse_to_serde_value::<Value>(text, &options(comments))
+    let value = jsonc_parser::parse_to_serde_value::<Value>(text, options)
         .map_err(|_| anyhow::anyhow!("JSON 配置无法解析，请在来源文件中修复"))?;
     if !value.is_object() {
         bail!("JSON 配置根节点必须是映射");
@@ -126,8 +146,27 @@ pub fn render(
     name: &str,
     value: Option<&Value>,
 ) -> Result<String> {
-    parse(text, comments)?;
-    let root = document(text, comments)?;
+    render_options(text, &options(comments), path, name, value)
+}
+
+pub fn render_json5(
+    text: &str,
+    path: &[String],
+    name: &str,
+    value: Option<&Value>,
+) -> Result<String> {
+    render_options(text, &json5_options(), path, name, value)
+}
+
+fn render_options(
+    text: &str,
+    options: &ParseOptions,
+    path: &[String],
+    name: &str,
+    value: Option<&Value>,
+) -> Result<String> {
+    parse_options(text, options)?;
+    let root = document_options(text, options)?;
     let mut object = root
         .object_value_or_create()
         .context("JSON 根节点需要映射")?;

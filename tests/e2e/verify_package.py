@@ -63,6 +63,7 @@ def main():
         installed = mount / "mcplink.app"
         info = plistlib.loads((installed / "Contents/Info.plist").read_bytes())
         assert info["CFBundleIdentifier"] == "io.mcplink.desktop", "Unexpected bundle identifier"
+        assert info.get("LSUIElement") is True, "Menu-bar startup must begin without a Dock window"
         assert info["CFBundleShortVersionString"] == version, "Bundle version differs from source"
         files = lambda root: {str(p.relative_to(root)): sha(p) for p in root.rglob("*") if p.is_file()}
         source_files, dmg_files = files(app), files(installed)

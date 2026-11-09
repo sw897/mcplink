@@ -1,4 +1,17 @@
 {
+  "app": {
+    "windows": [
+      {
+        "title": "mcplink",
+        "width": 1180,
+        "height": 780,
+        "minWidth": 940,
+        "minHeight": 620,
+        "backgroundColor": "#f8f9f7",
+        "visible": false
+      }
+    ]
+  },
   "bundle": {
     "targets": ["nsis"]
   }

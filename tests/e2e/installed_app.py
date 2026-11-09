@@ -128,6 +128,7 @@ def main():
                       binary_sha256=hashlib.sha256(e2e.BINARY.read_bytes()).hexdigest(),
                       native_user_config_modified=False,
                       limits=["No new macOS account, real Keychain, quarantine or Windows acceptance",
+                              "Menu bar, login startup, Dock reopening and desktop quit require separate native UI acceptance",
                               "Previous-build compatibility is not an upgrade from a released older version"])
         if args.keep:
             # Used only by the desktop QA copy; contains synthetic paths/credentials.

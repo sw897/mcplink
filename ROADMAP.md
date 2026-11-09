@@ -91,13 +91,13 @@ macOS 包使用 ad-hoc 签名，尚无 Developer ID 和公证；Windows 包未�
 | 对象 | 当前基线 | 首批适配范围 |
 | --- | --- | --- |
 | Claude Code | 源码已支持 user/local/project 读写及逐条恢复；插件/托管只读 | 两平台验收已通过；保留原生审批与启停边界，其他原生专用字段按实际需求补齐 |
-| OpenCode | 源码已支持 V1/V2、JSON/JSONC、直连/共享、启停及恢复 | 两平台配置验收已通过，原生加载限 macOS；变量语法冲突、文件变量、原生毫秒超时、专用 OAuth 和非 legacy 生命周期尚不能完整托管，明确拒绝导入 |
+| OpenCode | 仅维护当前 2.x JSON/JSONC 格式、直连/共享、启停及恢复 | 旧版结构和版本选择已移除；当前场景和指定原生客户端需按平台验收。变量语法冲突、文件变量、原生毫秒超时、专用 OAuth 和非 legacy 生命周期尚不能完整托管，明确拒绝导入 |
 | 其他 Agent | 按实际需求选择 | 先收集版本、配置样例、作用域及加载方式，再分别登记可读、可写、直连、共享和认证边界 |
 
 实施步骤：
 
 1. **明确来源和优先级。** Claude Code 区分用户、项目 local、项目 `.mcp.json`、插件及托管策略；展示同名服务的来源、覆盖及待批准状态。依照[官方作用域说明](https://code.claude.com/docs/en/mcp)，不把不同作用域的字段合并为一项配置，也不把“已写入”当作“已获客户端批准”。
-2. **按版本适配 OpenCode。** 当前 [V2 MCP 文档](https://opencode.ai/docs/mcp-servers/)使用 `mcp.servers` 与 `disabled`；实现前对照目标版本，识别旧格式并明确支持或拒绝迁移，不静默改写。按[配置文档](https://opencode.ai/docs/config)保留 JSONC 注释、未知字段、变量引用及其他设置。
+2. **只维护当前 OpenCode 格式。** 按[官方 MCP 文档](https://opencode.ai/docs/mcp-servers/)使用 `mcp.servers` 与 `disabled`，空配置直接读取，旧版结构明确拒绝。按[配置文档](https://opencode.ai/docs/config)保留 JSONC 注释、未知字段、变量引用及其他设置。
 3. **接入现有事务。** 为新增来源复用预览、并发修改检测、备份、原子写入和逐条恢复，覆盖直连/共享、启停、移除、路径迁移及不能等价转换的字段。原生客户端的 OAuth 登录缓存继续由原客户端维护。
 4. **贯通桌面、CLI 和 Skill。** 同步 Agent 类型、来源标识、可写能力、命令 Schema 与说明，避免只有界面或只有 CLI 支持新增 Agent。
 

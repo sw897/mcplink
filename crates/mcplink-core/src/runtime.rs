@@ -51,6 +51,11 @@ fn valid_host(headers: &HeaderMap, port: u16) -> bool {
         && !headers.contains_key("origin")
 }
 
+fn lock_contended(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::WouldBlock
+        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+}
+
 async fn health(State(state): State<ServerState>, headers: HeaderMap) -> impl IntoResponse {
     if !valid_host(&headers, state.info.port) {
         return (StatusCode::FORBIDDEN, Json(json!({"error":"来源无效"})));
@@ -58,7 +63,7 @@ async fn health(State(state): State<ServerState>, headers: HeaderMap) -> impl In
     (
         StatusCode::OK,
         Json(
-            json!({"application":"mcplink","instance":state.info.instance,"version":env!("CARGO_PKG_VERSION"),"managementApi":5}),
+            json!({"application":"mcplink","instance":state.info.instance,"version":env!("CARGO_PKG_VERSION"),"managementApi":11}),
         ),
     )
 }
@@ -129,23 +134,62 @@ pub async fn daemon(data: PathBuf, port: Option<u16>) -> Result<()> {
         }
     };
     private_write(&data.join("runtime.json"), &serde_json::to_vec(&info)?)?;
-    let state = ServerState { engine, key, info };
+    let mut shutdown = engine.shutdown.subscribe();
+    let cleanup = engine.clone();
+    let own_instance = info.instance.clone();
+    let state = ServerState {
+        engine: engine.clone(),
+        key,
+        info,
+    };
     let router = Router::new()
         .route("/health", get(health))
         .route("/rpc", post(rpc))
         .layer(DefaultBodyLimit::max(8 * 1024 * 1024 + 64 * 1024))
         .with_state(state);
-    axum::serve(listener, router)
-        .with_graceful_shutdown(async {
-            if tokio::signal::ctrl_c().await.is_err() {
-                // A Windows background process can have no console to receive Ctrl-C.
-                std::future::pending::<()>().await;
+    let outcome = axum::serve(listener, router)
+        .with_graceful_shutdown(async move {
+            tokio::select! {
+                _ = shutdown.wait_for(|stopping| *stopping) => {},
+                _ = termination_signal() => {},
             }
+            cleanup.shutdown.send_replace(true);
+            cleanup
+                .paused
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = cleanup.pool.shutdown().await;
         })
         .await
-        .context("本地后台已中断")?;
+        .context("本地后台已中断");
+    engine.shutdown.send_replace(true);
+    let cleaned = engine.pool.shutdown().await;
+    if fs::read(data.join("runtime.json"))
+        .ok()
+        .and_then(|value| serde_json::from_slice::<RuntimeInfo>(&value).ok())
+        .is_some_and(|current| current.instance == own_instance)
+    {
+        fs::remove_file(data.join("runtime.json"))?;
+    }
     drop(lock);
+    outcome?;
+    cleaned?;
     Ok(())
+}
+
+async fn termination_signal() {
+    #[cfg(unix)]
+    {
+        if let Ok(mut signal) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            tokio::select! { _ = signal.recv() => {}, _ = tokio::signal::ctrl_c() => {} }
+            return;
+        }
+    }
+    if tokio::signal::ctrl_c().await.is_err() {
+        // A Windows background process can have no console to receive Ctrl-C.
+        std::future::pending::<()>().await;
+    }
 }
 
 #[derive(Clone)]
@@ -237,6 +281,41 @@ fn spawn_background(executable: &Path, data: &Path) -> Result<()> {
 }
 
 impl Client {
+    pub async fn stop_existing(data: &Path) -> Result<Value> {
+        let path = data.join("runtime.lock");
+        if !path.exists() {
+            return Ok(json!({"stopped":true,"wasRunning":false}));
+        }
+        let lock = fs::OpenOptions::new().read(true).write(true).open(path)?;
+        match fs2::FileExt::try_lock_exclusive(&lock) {
+            Ok(()) => return Ok(json!({"stopped":true,"wasRunning":false})),
+            Err(error) if lock_contended(&error) => {}
+            Err(error) => return Err(error.into()),
+        }
+        // Never call connect here: quitting an absent daemon must not start one.
+        let client = Self::read(data).await?;
+        if client.management_api < 11 {
+            bail!("旧后台不支持退出清理，请使用同一构建的桌面与后台");
+        }
+        let request = client.call("gateway.stop", json!({})).await;
+        let cleanup_forced = request.is_err();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match fs2::FileExt::try_lock_exclusive(&lock) {
+                    Ok(()) => return Ok(json!({"stopped":true,"wasRunning":true,"cleanupForced":cleanup_forced})),
+                    Err(error) if lock_contended(&error) => {},
+                    Err(error) => return Err(anyhow::Error::from(error)),
+                }
+                if fs::read(data.join("runtime.json")).ok()
+                    .and_then(|bytes| serde_json::from_slice::<RuntimeInfo>(&bytes).ok())
+                    .is_some_and(|info| info.instance != client.info.instance) {
+                    return Ok(json!({"stopped":true,"wasRunning":true,"restartedByRequest":true}));
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }).await.context("后台退出清理超时，请检查现有调用后重试")?
+    }
+
     async fn read(data: &Path) -> Result<Self> {
         let info: RuntimeInfo =
             serde_json::from_slice(&fs::read(data.join("runtime.json")).context("后台尚未启动")?)
@@ -277,14 +356,16 @@ impl Client {
         spawn_background(&executable, &data)?;
         #[cfg(not(windows))]
         {
-            let child = tokio::process::Command::new(executable)
+            let mut command = tokio::process::Command::new(executable);
+            command
                 .args(["daemon", "--data-dir"])
                 .arg(&data)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .context("无法启动后台程序")?;
+                .stderr(Stdio::null());
+            #[cfg(unix)]
+            command.process_group(0);
+            let child = command.spawn().context("无法启动后台程序")?;
             drop(child);
         }
         for _ in 0..80 {
@@ -297,19 +378,68 @@ impl Client {
     }
 
     pub async fn call(&self, method: &str, params: Value) -> Result<Value> {
-        if self.management_api < 5
+        if self.management_api < 11 && method == "gateway.stop" {
+            bail!("旧后台不支持退出清理，请使用同一构建的桌面与后台");
+        }
+        if self.management_api < 10
+            && matches!(
+                method,
+                "gateway.status" | "gateway.pause" | "gateway.resume"
+            )
+        {
+            bail!("旧后台不支持持久化暂停；请退出桌面并停止旧后台，再使用同一构建重试");
+        }
+        if self.management_api < 9
+            && matches!(
+                method,
+                "sources.add" | "changes.preview" | "changes.apply" | "changes.restore"
+            )
+        {
+            bail!("旧后台不支持安装状态校验；请退出桌面并停止旧后台，再使用同一构建重试");
+        }
+        if self.management_api < 8
             && ((method == "sources.add"
-                && (params["agent"] == "opencode"
-                    || ["scope", "project", "layout"]
-                        .iter()
-                        .any(|key| params.get(*key).is_some_and(|v| !v.is_null()))))
+                && params["agent"].as_str().is_some_and(|agent| {
+                    matches!(agent, "zcode" | "deepseek" | "openclaw" | "kimicode")
+                }))
+                || (matches!(method, "connections.import" | "connections.adopt_source")
+                    && params["sourceId"]
+                        .as_str()
+                        .is_some_and(|id| id.starts_with("native:")))
                 || (method == "changes.preview"
                     && params["targetSourceIds"].as_array().is_some_and(|targets| {
-                        targets.iter().any(|id| {
-                            id.as_str().is_some_and(|id| {
-                                id.starts_with("claude:") || id.starts_with("opencode:")
-                            })
-                        })
+                        targets
+                            .iter()
+                            .any(|id| id.as_str().is_some_and(|id| id.starts_with("native:")))
+                    })))
+        {
+            bail!(
+                "旧后台不支持当前八类 Agent 的配置管理；请退出桌面并停止旧后台，再使用同一构建重试"
+            );
+        }
+        let is_opencode_source =
+            |value: &Value| value.as_str().is_some_and(|id| id.starts_with("opencode:"));
+        if self.management_api < 6
+            && ((method == "sources.add" && params["agent"] == "opencode")
+                || (matches!(method, "connections.import" | "connections.adopt_source")
+                    && is_opencode_source(&params["sourceId"]))
+                || (method == "changes.preview"
+                    && params["targetSourceIds"]
+                        .as_array()
+                        .is_some_and(|targets| targets.iter().any(is_opencode_source))))
+        {
+            bail!("旧后台不支持当前 OpenCode 配置格式；请退出桌面并停止旧后台，再使用同一构建重试");
+        }
+        if self.management_api < 5
+            && ((method == "sources.add"
+                && ["scope", "project"]
+                    .iter()
+                    .any(|key| params.get(*key).is_some_and(|v| !v.is_null())))
+                || (method == "changes.preview"
+                    && params["targetSourceIds"].as_array().is_some_and(|targets| {
+                        targets
+                            .iter()
+                            .any(|id| id.as_str().is_some_and(|id| id.starts_with("claude:")))
                     })))
         {
             bail!("旧后台不支持当前 Agent 配置作用域；请退出桌面并停止旧后台，再使用同一构建重试");

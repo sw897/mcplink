@@ -3,7 +3,7 @@ use crate::{
     vault::private_dir,
 };
 use anyhow::{Context, Result};
-use rusqlite::{Connection as Sqlite, params};
+use rusqlite::{Connection as Sqlite, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Mutex};
 
@@ -20,9 +20,34 @@ impl Store {
             CREATE TABLE IF NOT EXISTS connections(id TEXT PRIMARY KEY, document TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS bindings(connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE, source_id TEXT NOT NULL, name TEXT NOT NULL, document TEXT NOT NULL, PRIMARY KEY(source_id,name));
             CREATE TABLE IF NOT EXISTS sources(id TEXT PRIMARY KEY, document TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS settings(name TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, source_id TEXT NOT NULL, connection_id TEXT NOT NULL, name TEXT NOT NULL, status TEXT NOT NULL, credential_ref TEXT NOT NULL, backup TEXT, created_at INTEGER NOT NULL, error TEXT);
             PRAGMA user_version=1;")?;
         Ok(Self { db: Mutex::new(db) })
+    }
+
+    pub fn gateway_paused(&self) -> Result<bool> {
+        let value: Option<String> = self
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT value FROM settings WHERE name='gateway.paused'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        value
+            .map(|value| value.parse().context("无法读取共享暂停状态"))
+            .unwrap_or(Ok(false))
+    }
+
+    pub fn set_gateway_paused(&self, paused: bool) -> Result<()> {
+        self.db.lock().unwrap().execute(
+            "INSERT INTO settings(name,value) VALUES('gateway.paused',?1) ON CONFLICT(name) DO UPDATE SET value=excluded.value",
+            [paused.to_string()],
+        )?;
+        Ok(())
     }
 
     pub fn connections(&self) -> Result<Vec<Connection>> {
@@ -76,7 +101,15 @@ impl Store {
         let db = self.db.lock().unwrap();
         let mut statement = db.prepare("SELECT document FROM sources ORDER BY rowid")?;
         let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
-        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+        let mut sources = Vec::new();
+        for row in rows {
+            let source: Source = serde_json::from_str(&row?)?;
+            // Retired adapters are inactive; retain their data rather than rewriting native files.
+            if source.agent != crate::model::Agent::Removed {
+                sources.push(source);
+            }
+        }
+        Ok(sources)
     }
 
     pub fn save_source(&self, source: &Source) -> Result<()> {

@@ -1,6 +1,6 @@
 use crate::{
     config, json_config,
-    model::{Agent, Definition, OpenCodeLayout, Source, digest},
+    model::{Agent, Definition, Source, digest},
 };
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -47,56 +47,46 @@ pub(crate) fn is_managed(path: &Path) -> bool {
     }
 }
 
-fn detect(raw: &Value) -> Result<Option<OpenCodeLayout>> {
+fn validate_config(raw: &Value) -> Result<()> {
     let Some(mcp) = raw.get("mcp") else {
-        return Ok(None);
+        return Ok(());
     };
     let mcp = mcp.as_object().context("OpenCode mcp 需要映射")?;
-    if mcp.is_empty() {
-        return Ok(None);
+    if mcp
+        .keys()
+        .any(|key| !matches!(key.as_str(), "servers" | "timeout"))
+    {
+        bail!("仅支持当前 OpenCode mcp.servers 配置，不支持旧版服务表");
     }
-    let modern = mcp.get("servers").is_some_and(|value| {
-        !matches!(
-            value.get("type").and_then(Value::as_str),
+    if let Some(servers) = mcp.get("servers") {
+        let servers = servers
+            .as_object()
+            .context("OpenCode mcp.servers 需要映射")?;
+        if matches!(
+            servers.get("type").and_then(Value::as_str),
             Some("local" | "remote")
-        )
-    });
-    if modern {
-        if mcp
-            .keys()
-            .any(|key| !matches!(key.as_str(), "servers" | "timeout"))
+        ) || servers.get("enabled").is_some_and(Value::is_boolean)
         {
-            bail!("OpenCode 混合 V1/V2 MCP 配置，请先在原客户端核对版本");
+            bail!("仅支持当前 OpenCode mcp.servers 服务表，不支持旧版服务条目");
         }
-        if !mcp["servers"].is_object() {
-            bail!("OpenCode mcp.servers 需要映射");
+    }
+    if let Some(timeouts) = mcp.get("timeout") {
+        let timeouts = timeouts
+            .as_object()
+            .context("OpenCode mcp.timeout 需要映射")?;
+        if timeouts
+            .keys()
+            .any(|key| !matches!(key.as_str(), "startup" | "catalog" | "execution"))
+            || timeouts.values().any(|value| {
+                value
+                    .as_u64()
+                    .is_none_or(|millis| millis == 0 || millis > 9_007_199_254_740_991)
+            })
+        {
+            bail!("OpenCode mcp.timeout 需要当前格式的正整数毫秒设置");
         }
-        return Ok(Some(OpenCodeLayout::V2));
     }
-    if mcp.len() == 1
-        && mcp.get("timeout").is_some_and(|v| {
-            !matches!(
-                v.get("type").and_then(Value::as_str),
-                Some("local" | "remote")
-            )
-        })
-    {
-        return Ok(None);
-    }
-    Ok(Some(OpenCodeLayout::V1))
-}
-
-fn layout(source: &Source, raw: &Value) -> Result<OpenCodeLayout> {
-    let detected = detect(raw)?;
-    if let (Some(selected), Some(detected)) = (source.layout, detected)
-        && selected != detected
-    {
-        bail!("OpenCode 配置结构与所选 V1/V2 版本不符，不自动迁移原文件");
-    }
-    source
-        .layout
-        .or(detected)
-        .context("OpenCode 配置版本不明确，请通过 sources add --layout v1 或 v2 显式选择")
+    Ok(())
 }
 
 pub fn default_sources() -> Result<Vec<Source>> {
@@ -106,12 +96,6 @@ pub fn default_sources() -> Result<Vec<Source>> {
         if !path.is_file() {
             continue;
         }
-        let selected = std::fs::read_to_string(&path)
-            .ok()
-            .filter(|text| text.len() <= 4 * 1024 * 1024)
-            .and_then(|text| json_config::parse(&text, true).ok())
-            .and_then(|raw| detect(&raw).ok())
-            .flatten();
         let managed = is_managed(&path);
         sources.push(Source {
             id: source_id(&path),
@@ -123,8 +107,10 @@ pub fn default_sources() -> Result<Vec<Source>> {
             plugin_root: None,
             discovery_error: None,
             scope: Some(if managed { "managed" } else { "user" }.into()),
-            layout: selected,
         });
+    }
+    if sources.is_empty() {
+        sources.push(source_from_params(&json!({"agent":"opencode"}), &[])?);
     }
     Ok(sources)
 }
@@ -151,12 +137,9 @@ pub fn source_from_params(params: &Value, sources: &[Source]) -> Result<Source> 
     if (scope == "project") != project.is_some() {
         bail!("OpenCode project 来源需要显式项目目录；user 来源不接受项目目录");
     }
-    let selected: Option<OpenCodeLayout> = params
-        .get("layout")
-        .filter(|v| !v.is_null())
-        .map(|v| serde_json::from_value(v.clone()))
-        .transpose()
-        .map_err(|_| anyhow::anyhow!("OpenCode layout 须为 v1 或 v2"))?;
+    if params.get("layout").is_some_and(|value| !value.is_null()) {
+        bail!("OpenCode 仅支持当前配置格式，无需指定 layout 参数");
+    }
     let base = project.clone().map(Ok).unwrap_or_else(directory)?;
     let supplied = params
         .get("path")
@@ -194,7 +177,7 @@ pub fn source_from_params(params: &Value, sources: &[Source]) -> Result<Source> 
         return Ok(existing.clone());
     }
     let managed = is_managed(&path);
-    let mut source = Source {
+    let source = Source {
         id: source_id(&path),
         agent: Agent::Opencode,
         label: params
@@ -208,7 +191,6 @@ pub fn source_from_params(params: &Value, sources: &[Source]) -> Result<Source> 
         plugin_root: None,
         discovery_error: None,
         scope: Some(if managed { "managed" } else { scope }.into()),
-        layout: selected.or_else(|| existing.and_then(|s| s.layout)),
     };
     let text = match std::fs::read_to_string(&source.path) {
         Ok(text) => text,
@@ -218,18 +200,18 @@ pub fn source_from_params(params: &Value, sources: &[Source]) -> Result<Source> 
     if text.len() > 4 * 1024 * 1024 {
         bail!("配置超过 4 MiB");
     }
-    source.layout = Some(layout(&source, &json_config::parse(&text, true)?)?);
+    validate_config(&json_config::parse(&text, true)?)?;
     Ok(source)
 }
 
-pub fn parse(source: &Source, text: &str) -> Result<Value> {
+pub fn parse(text: &str) -> Result<Value> {
     let raw = json_config::parse(text, true)?;
-    let table = match layout(source, &raw)? {
-        OpenCodeLayout::V1 => raw.get("mcp"),
-        OpenCodeLayout::V2 => raw.get("mcp").and_then(|mcp| mcp.get("servers")),
-    }
-    .cloned()
-    .unwrap_or_else(|| json!({}));
+    validate_config(&raw)?;
+    let table = raw
+        .get("mcp")
+        .and_then(|mcp| mcp.get("servers"))
+        .cloned()
+        .unwrap_or_else(|| json!({}));
     if !table.is_object() {
         bail!("OpenCode MCP 服务表需要映射");
     }
@@ -248,13 +230,9 @@ pub(crate) fn check_import(source: &Source) -> Result<()> {
     Ok(())
 }
 
-pub fn render(source: &Source, text: &str, name: &str, value: Option<&Value>) -> Result<String> {
-    let selected = layout(source, &json_config::parse(text, true)?)?;
-    let path = match selected {
-        OpenCodeLayout::V1 => vec!["mcp".into()],
-        OpenCodeLayout::V2 => vec!["mcp".into(), "servers".into()],
-    };
-    json_config::render(text, true, &path, name, value)
+pub fn render(text: &str, name: &str, value: Option<&Value>) -> Result<String> {
+    validate_config(&json_config::parse(text, true)?)?;
+    json_config::render(text, true, &["mcp".into(), "servers".into()], name, value)
 }
 
 fn managed_string(value: &str) -> Result<String> {
@@ -332,12 +310,11 @@ fn strings(
         .collect()
 }
 
-pub fn normalize(
-    raw: &Value,
-    selected: Option<OpenCodeLayout>,
-    project: Option<&Path>,
-) -> Result<Definition> {
+pub fn normalize(raw: &Value, project: Option<&Path>) -> Result<Definition> {
     let map = raw.as_object().context("OpenCode 服务需要映射")?;
+    if map.contains_key("enabled") {
+        bail!("当前 OpenCode 配置使用 disabled，不支持旧版 enabled 字段");
+    }
     if map.keys().any(|key| {
         !matches!(
             key.as_str(),
@@ -348,7 +325,6 @@ pub fn normalize(
                 | "url"
                 | "headers"
                 | "oauth"
-                | "enabled"
                 | "disabled"
                 | "timeout"
                 | "protocol"
@@ -359,33 +335,11 @@ pub fn normalize(
     {
         bail!("此 OpenCode 原生字段尚不能等价托管，请保留原生配置或显式建立托管连接");
     }
-    let selected = selected.unwrap_or(if map.contains_key("enabled") {
-        OpenCodeLayout::V1
-    } else {
-        OpenCodeLayout::V2
-    });
-    let foreign = if selected == OpenCodeLayout::V1 {
-        "disabled"
-    } else {
-        "enabled"
-    };
-    if map.contains_key(foreign) {
-        bail!("OpenCode 服务启停字段与所选 V1/V2 版本不符");
-    }
-    let enabled_key = if selected == OpenCodeLayout::V1 {
-        "enabled"
-    } else {
-        "disabled"
-    };
-    let flag = map
-        .get(enabled_key)
+    let disabled = map
+        .get("disabled")
         .map(|value| value.as_bool().context("OpenCode 启停字段需要布尔值"))
         .transpose()?;
-    let enabled = if selected == OpenCodeLayout::V1 {
-        flag.unwrap_or(true)
-    } else {
-        !flag.unwrap_or(false)
-    };
+    let enabled = !disabled.unwrap_or(false);
     if map.contains_key("timeout") {
         bail!("OpenCode 原生毫秒超时尚不能完整托管，请保留原生配置或显式建立托管连接");
     }
@@ -398,7 +352,6 @@ pub fn normalize(
         enabled,
         original: raw.clone(),
         original_agent: Some(Agent::Opencode),
-        origin_layout: Some(selected),
         origin_project: project.map(Path::to_path_buf),
         ..Definition::default()
     };
@@ -434,11 +387,7 @@ pub fn normalize(
                 let oauth = oauth
                     .as_object()
                     .context("OpenCode oauth 需要对象或 false")?;
-                let key = if selected == OpenCodeLayout::V1 {
-                    "clientId"
-                } else {
-                    "client_id"
-                };
+                let key = "client_id";
                 if oauth.keys().any(|name| name != key) {
                     bail!(
                         "此 OpenCode 原生 OAuth 专用参数尚不能等价导入，请另行配置托管 OAuth 客户端并授权"
@@ -461,10 +410,7 @@ pub fn normalize(
     Ok(definition)
 }
 
-pub fn native(def: &Definition, source: &Source) -> Result<Value> {
-    let selected = source
-        .layout
-        .context("请先显式选择 OpenCode V1/V2 配置版本")?;
+pub fn native(def: &Definition) -> Result<Value> {
     if def.client_secret.is_some()
         || !def.oauth_scopes.is_empty()
         || def.oauth_callback_port.is_some()
@@ -478,9 +424,6 @@ pub fn native(def: &Definition, source: &Source) -> Result<Value> {
         || def.prompts_disabled
     {
         bail!("OpenCode 直连不能等价保留当前工具筛选，请使用共享接入");
-    }
-    if selected == OpenCodeLayout::V1 && (def.timeout.is_some() || def.startup_timeout.is_some()) {
-        bail!("OpenCode V1 的单一毫秒超时不能等价保留当前超时，请使用共享接入");
     }
     const FIELDS: &[&str] = &[
         "type",
@@ -506,8 +449,7 @@ pub fn native(def: &Definition, source: &Source) -> Result<Value> {
         "protocol",
         "pool",
     ];
-    if (def.original_agent.as_ref() != Some(&Agent::Opencode)
-        || def.origin_layout != Some(selected))
+    if def.original_agent.as_ref() != Some(&Agent::Opencode)
         && def
             .original
             .as_object()
@@ -515,23 +457,18 @@ pub fn native(def: &Definition, source: &Source) -> Result<Value> {
     {
         bail!("来源含目标 OpenCode 版本尚未适配的字段，请使用共享接入");
     }
-    let mut value =
-        if def.original_agent == Some(Agent::Opencode) && def.origin_layout == Some(selected) {
-            def.original.clone()
-        } else {
-            json!({})
-        };
+    let mut value = if def.original_agent == Some(Agent::Opencode) {
+        def.original.clone()
+    } else {
+        json!({})
+    };
     let map = value.as_object_mut().context("服务配置格式无效")?;
     for key in FIELDS {
         if !matches!(*key, "codemode" | "protocol" | "pool") {
             map.remove(*key);
         }
     }
-    if selected == OpenCodeLayout::V1 {
-        map.insert("enabled".into(), json!(def.enabled));
-    } else {
-        map.insert("disabled".into(), json!(!def.enabled));
-    }
+    map.insert("disabled".into(), json!(!def.enabled));
     if let Some(command) = &def.command {
         let mut command = vec![native_string(command)?];
         command.extend(
@@ -577,11 +514,7 @@ pub fn native(def: &Definition, source: &Source) -> Result<Value> {
         if def.oauth {
             let mut oauth = json!({});
             if let Some(client) = &def.client_id {
-                oauth[if selected == OpenCodeLayout::V1 {
-                    "clientId"
-                } else {
-                    "client_id"
-                }] = json!(native_string(client)?);
+                oauth["client_id"] = json!(native_string(client)?);
             }
             map.insert("oauth".into(), oauth);
         } else if def.original_agent != Some(Agent::Opencode)
@@ -590,25 +523,23 @@ pub fn native(def: &Definition, source: &Source) -> Result<Value> {
             map.insert("oauth".into(), json!(false));
         }
     }
-    if selected == OpenCodeLayout::V2 {
-        let mut timeouts = json!({});
-        if let Some(seconds) = def.startup_timeout {
-            timeouts["startup"] = json!(
-                seconds
-                    .checked_mul(1000)
-                    .context("超时超出 OpenCode 范围")?
-            );
-        }
-        if let Some(seconds) = def.timeout {
-            let millis = seconds
+    let mut timeouts = json!({});
+    if let Some(seconds) = def.startup_timeout {
+        timeouts["startup"] = json!(
+            seconds
                 .checked_mul(1000)
-                .context("超时超出 OpenCode 范围")?;
-            timeouts["catalog"] = json!(millis);
-            timeouts["execution"] = json!(millis);
-        }
-        if !timeouts.as_object().unwrap().is_empty() {
-            map.insert("timeout".into(), timeouts);
-        }
+                .context("超时超出 OpenCode 范围")?
+        );
+    }
+    if let Some(seconds) = def.timeout {
+        let millis = seconds
+            .checked_mul(1000)
+            .context("超时超出 OpenCode 范围")?;
+        timeouts["catalog"] = json!(millis);
+        timeouts["execution"] = json!(millis);
+    }
+    if !timeouts.as_object().unwrap().is_empty() {
+        map.insert("timeout".into(), timeouts);
     }
     Ok(value)
 }

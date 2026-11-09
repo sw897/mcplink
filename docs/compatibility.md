@@ -12,17 +12,21 @@
 | Codex | 用户 config.toml，以及手动添加的 TOML 来源；已检查 CLI 0.166.0、0.167.0 的相关入口。 |
 | Hermes | 用户 config.yaml，以及手动添加的 YAML 来源；已检查 0.23.0 的相关入口。 |
 | Claude Code | v0.1.0 只读盘点与导入。源码开发能力支持 user/local/project 预览、写入及恢复；插件与托管来源只读。已验证 2.1.319 的隔离原生加载及 MCP 连接。 |
-| OpenCode | 源码开发能力支持 V1/V2 全局和显式项目 JSON/JSONC 的读写、启停、共享及恢复；本机 1.19.5、2.2.1 已加载共享入口并连接。 |
+| OpenCode | 仅维护当前 2.x `mcp.servers` / `disabled` 格式，支持全局和显式项目 JSON/JSONC 的读写、启停、共享及恢复；不支持旧版服务表和版本选择参数。Windows 本机 2.2.6 已在隔离配置中加载共享入口并连接；不含模型业务调用。 |
+| ZCode | 用户及显式项目 `mcp.servers`，支持配置事务与共享代理；非空 `.agents/mcp.json` 回退来源保持只读，避免被新表遮蔽。 |
+| DeepSeek Harness | profile patch 的静态 MCP client 插件和 manager `config.servers` 支持管理与共享代理；基础组合只读。 |
+| OpenClaw | 当前 JSON5 `mcp.servers`，支持配置事务与共享代理；不使用旧 mcporter 格式。 |
+| Kimi Code | 当前 `KIMI_CODE_HOME` / `~/.kimi-code/mcp.json` 及显式项目来源，支持配置事务与共享代理；不读取旧 `~/.kimi`。 |
 
-v0.1.0 配置写入支持 Codex、Hermes。源码新增 Agent 适配及限制见[详细说明](agent-adapters.md)；不修改 Claude Code 审批、信任或项目启停偏好，不读取原生登录缓存。文件事务、原生加载和模型侧工具调用分别记录，后者不因配置写入或连接检查通过而自动视为通过。
+v0.1.0 历史发布包的配置写入支持 Codex、Hermes。当前源码支持八类客户端，适配及限制见[八类 Agent 接入](agent-discovery.md)和[配置适配](agent-adapters.md)；不修改 Claude Code 审批、信任或项目启停偏好，不读取原生登录缓存。文件事务、原生加载和模型侧工具调用分别记录，后者不因配置写入或连接检查通过而自动视为通过。
 
-源码开发分支已通过[macOS、Windows 各 115 项隔离验收](https://github.com/sw897/mcplink/actions/runs/42449440207)，macOS 另通过 DMG 与 5 项安装后场景；本机完整回归 116 项通过。Claude Code 2.1.319 在两平台核对原生项目键、local 作用域和 MCP 连接；OpenCode 1.19.5、2.2.1 的原生连接仅在本机 macOS 验证，Windows 原生 OpenCode 尚未验收。原生连接检查不包含模型侧业务工具执行。
+切换为仅支持当前 OpenCode 格式前，源码开发分支曾通过[macOS、Windows 各 115 项隔离验收](https://github.com/sw897/mcplink/actions/runs/42449440207)，macOS 另通过 DMG 与 5 项安装后场景；本机完整回归 116 项通过。历史原生记录包括两平台 Claude Code 2.1.319，以及 macOS OpenCode 1.19.5、2.2.1。这些记录不代表当前修改已完成全部平台验收；当前场景以 `tests/e2e/opencode_sources.py` 和对应构建的报告为准。原生连接检查不包含模型侧业务工具执行。
 
 默认扫描已支持的用户入口。项目/profile 通过手动添加真实配置文件纳入管理，不推断尚未选择的项目或运行中会话的覆盖关系。
 
 ## 配置与运行环境
 
-- TOML 表、YAML 映射和源码新增 JSON/JSONC 编辑保留未涉及条目及格式；JSONC 支持注释与尾逗号，拒绝重复键及 JSON5 扩展。TOML inline table 可盘点，暂不直接编辑。
+- TOML 表、YAML 映射和 JSON/JSONC/JSON5 编辑保留未涉及条目及格式；JSONC 支持注释与尾逗号，拒绝重复键及 JSON5 扩展，OpenClaw 单独使用 JSON5 解析。TOML inline table 可盘点，暂不直接编辑。
 - 符号链接来源可读，写入需选择真实文件。预览后的外部修改会使计划失效。
 - STDIO 命令必须能在桌面的运行环境中找到。推荐使用绝对路径，应用不会自动加载用户 Shell。
 - 不读取原生 Agent 的私有登录存储或 `.env`。扫描结果不能证明客户端已登录。

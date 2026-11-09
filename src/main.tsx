@@ -1,6 +1,7 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   ArrowLeftRight,
@@ -28,8 +29,34 @@ import {
 } from "lucide-react";
 import "./style.css";
 
-type Agent = "codex" | "hermes" | "claude" | "opencode";
-const agents: Agent[] = ["codex", "hermes", "claude", "opencode"];
+type Agent =
+  | "codex"
+  | "hermes"
+  | "claude"
+  | "opencode"
+  | "zcode"
+  | "deepseek"
+  | "openclaw"
+  | "kimicode";
+const agents: Agent[] = [
+  "codex",
+  "hermes",
+  "claude",
+  "opencode",
+  "zcode",
+  "deepseek",
+  "openclaw",
+  "kimicode",
+];
+type LocalAgent = {
+  id: Agent;
+  label: string;
+  detected: boolean;
+  installed: boolean;
+  configurable: boolean;
+  profilePath: string;
+  management: "writable" | "readOnly" | "discovery";
+};
 type Json = Record<string, unknown>;
 type Connection = {
   id: string;
@@ -56,7 +83,6 @@ type Source = {
   error?: string;
   readOnly?: boolean;
   scope?: string;
-  layout?: "v1" | "v2";
   project?: string;
 };
 type Binding = {
@@ -81,6 +107,7 @@ type Operation = {
   error?: string;
 };
 type Snapshot = {
+  agents: LocalAgent[];
   connections: Connection[];
   bindings: Binding[];
   sources: Source[];
@@ -88,6 +115,11 @@ type Snapshot = {
   gateway: { paused: boolean; sessions: number };
   platform: string;
   version: string;
+};
+type DesktopStatus = {
+  supported: boolean;
+  autostartEnabled?: boolean;
+  platform?: string;
 };
 type Change = {
   id: string;
@@ -136,8 +168,9 @@ type Dialog =
   | { kind: "sources" }
   | { kind: "addSource"; agent: Agent }
   | { kind: "history" }
+  | { kind: "background" }
   | { kind: "editor"; connection?: Connection }
-  | { kind: "connect"; connections: Connection[] }
+  | { kind: "connect"; connections: Connection[]; targetAgent?: Agent }
   | { kind: "detail"; connection: Connection }
   | { kind: "credential"; connection: Connection };
 
@@ -147,7 +180,11 @@ const agentLabel = (agent: Agent) =>
     hermes: "Hermes",
     claude: "Claude Code",
     opencode: "OpenCode",
-  })[agent];
+    zcode: "ZCode",
+    deepseek: "DeepSeek Harness",
+    openclaw: "OpenClaw",
+    kimicode: "Kimi Code",
+  })[agent] || agent;
 const time = (value?: number) =>
   value
     ? new Date(value * 1000).toLocaleString("zh-CN", {
@@ -238,6 +275,9 @@ function App() {
     "services",
   );
   const [data, setData] = useState<Snapshot>();
+  const [desktop, setDesktop] = useState<DesktopStatus>();
+  const [activeAgent, setActiveAgent] = useState<Agent>("codex");
+  const [agentOnlyConfigured, setAgentOnlyConfigured] = useState(false);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all");
   const [selected, setSelected] = useState<string[]>([]);
@@ -246,20 +286,74 @@ function App() {
   const [notice, setNotice] = useState<{ text: string; error?: boolean }>();
   const [failure, setFailure] = useState("");
   const [checked, setChecked] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
+  const loadSequence = useRef(0);
   const [tools, setTools] = useState<Record<string, Tool[]>>({});
 
   const load = useCallback(async () => {
+    const sequence = ++loadSequence.current;
+    setRefreshing(true);
     try {
       const next = await rpc<Snapshot>("snapshot");
+      if (sequence !== loadSequence.current) return;
+      if (
+        !Array.isArray(next.agents) ||
+        next.agents.length !== agents.length ||
+        next.agents.some(
+          (client) =>
+            !agents.includes(client.id) ||
+            client.configurable !== client.installed,
+        )
+      )
+        throw new Error(
+          "后台版本或支持名单与当前桌面不一致，请退出并重新启动 mcplink。",
+        );
       setData(next);
+      void invoke<DesktopStatus>("desktop_status")
+        .then(setDesktop)
+        .catch((error) => {
+          setNotice({ text: String(error), error: true });
+        });
+      setDialog((previous) =>
+        previous?.kind === "addSource" &&
+        !next.agents.some(
+          (client) => client.id === previous.agent && client.configurable,
+        )
+          ? undefined
+          : previous,
+      );
+      setSelected((previous) =>
+        previous.filter((id) =>
+          next.connections.some((connection) => connection.id === id),
+        ),
+      );
       setFailure("");
       setChecked(Date.now());
     } catch (error) {
+      if (sequence !== loadSequence.current) return;
       setFailure(error instanceof Error ? error.message : "无法读取本机配置");
+    } finally {
+      if (sequence === loadSequence.current) setRefreshing(false);
     }
   }, []);
   useEffect(() => {
     void load();
+  }, [load]);
+  useEffect(() => {
+    const subscriptions = [
+      listen("gateway-changed", () => void load()),
+      listen<DesktopStatus>("desktop-status-changed", (event) =>
+        setDesktop(event.payload),
+      ),
+      listen<string>("desktop-error", (event) =>
+        setNotice({ text: event.payload, error: true }),
+      ),
+    ];
+    return () => {
+      subscriptions.forEach(
+        (subscription) => void subscription.then((unlisten) => unlisten()),
+      );
+    };
   }, [load]);
   useEffect(() => {
     const refresh = () => {
@@ -301,14 +395,8 @@ function App() {
           name: connection.name,
         })
       : connection;
-  const connect = async (connections: Connection[]) => {
-    const managed: Connection[] = [];
-    for (const connection of connections) {
-      const result = await manage(connection);
-      if (!result) return;
-      managed.push(result);
-    }
-    setDialog({ kind: "connect", connections: managed });
+  const connect = (connections: Connection[], targetAgent?: Agent) => {
+    setDialog({ kind: "connect", connections, targetAgent });
   };
   const probe = async (connection: Connection) => {
     const managed = await manage(connection);
@@ -356,8 +444,32 @@ function App() {
     }) || [];
   const sourcesFor = (agent: Agent) =>
     data?.sources.filter((source) => source.agent === agent) || [];
+  const localAgents = data?.agents || [];
+  const isInstalled = (agent?: Agent) =>
+    localAgents.some((client) => client.id === agent && client.configurable);
+
+  const currentAgent =
+    localAgents.find((client) => client.id === activeAgent) || localAgents[0];
+  const currentSources = currentAgent ? sourcesFor(currentAgent.id) : [];
+  const currentBindings =
+    data?.bindings.filter(
+      (binding) => binding.agent === currentAgent?.id && !binding.missing,
+    ) || [];
+  const currentServices =
+    data?.connections.filter(
+      (connection) =>
+        !agentOnlyConfigured ||
+        ownBindings(connection).some(
+          (binding) => binding.agent === currentAgent?.id && !binding.missing,
+        ),
+    ) || [];
+  const chooseAgent = (agent: Agent) => {
+    setActiveAgent(agent);
+    setAgentOnlyConfigured(false);
+  };
 
   const bindingCell = (connection: Connection, agent: Agent) => {
+    if (!isInstalled(agent)) return <span className="muted">未安装</span>;
     const bindings = ownBindings(connection).filter(
       (binding) => binding.agent === agent,
     );
@@ -372,7 +484,7 @@ function App() {
           onClick={() =>
             missing
               ? setDialog({ kind: "addSource", agent })
-              : void connect([connection])
+              : void connect([connection], agent)
           }
         >
           <Plus size={13} />
@@ -451,6 +563,13 @@ function App() {
         <div className="sidebar-bottom">
           <button
             className="utility"
+            onClick={() => setDialog({ kind: "background" })}
+          >
+            <Server size={16} />
+            后台运行
+          </button>
+          <button
+            className="utility"
             onClick={() => setDialog({ kind: "sources" })}
           >
             <Settings2 size={16} />
@@ -488,18 +607,19 @@ function App() {
                 ? "查看已有连接，接给你常用的 Agent。"
                 : page === "accounts"
                   ? "查看认证由谁维护，以及哪些 Agent 正在使用。"
-                  : "比较接入情况，让常用工具在不同 Agent 中可用。"}
+                  : "选择客户端，查看配置位置与 MCP 服务接入。"}
             </p>
           </div>
           <div className="header-actions">
             <button
               className="button"
-              disabled={!!busy}
+              disabled={!!busy || refreshing}
+              aria-busy={refreshing}
               onClick={() => void load()}
               aria-label="刷新本机配置"
             >
-              <RefreshCw size={15} className={busy ? "spin" : ""} />
-              刷新
+              <RefreshCw size={15} className={refreshing ? "spin" : ""} />
+              {refreshing ? "刷新中…" : "刷新"}
             </button>
             <button
               className="button primary"
@@ -540,7 +660,11 @@ function App() {
                 个配置位置
               </span>
               <span className="divider">/</span>
-              <span>Codex、Hermes、Claude Code、OpenCode</span>
+              <button onClick={() => setPage("agents")}>
+                支持 {localAgents.length} 类 · 已安装{" "}
+                {localAgents.filter((agent) => agent.installed).length} 类
+                <ArrowRight size={12} />
+              </button>
               <button onClick={() => setDialog({ kind: "sources" })}>
                 查看范围
                 <ArrowRight size={12} />
@@ -550,6 +674,7 @@ function App() {
                 {new Date(checked).toLocaleTimeString("zh-CN", {
                   hour: "2-digit",
                   minute: "2-digit",
+                  second: "2-digit",
                 })}
               </small>
             </div>
@@ -617,115 +742,147 @@ function App() {
                     </button>
                   </div>
                 )}
-                <div className="service-table">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th className="select-cell">
+                <section className="service-list" aria-label="MCP 服务列表">
+                  {list.length > 0 && (
+                    <label className="service-list-heading">
+                      <input
+                        type="checkbox"
+                        aria-label="选择全部服务"
+                        checked={list.every((connection) =>
+                          selected.includes(connection.id),
+                        )}
+                        onChange={(event) =>
+                          setSelected(
+                            event.target.checked
+                              ? list.map((connection) => connection.id)
+                              : [],
+                          )
+                        }
+                      />
+                      <span>服务连接</span>
+                      <small>{list.length} 项</small>
+                    </label>
+                  )}
+                  {list.map((connection) => {
+                    const linkedAgents = localAgents.filter((client) =>
+                      ownBindings(connection).some(
+                        (binding) =>
+                          binding.agent === client.id && !binding.missing,
+                      ),
+                    );
+                    return (
+                      <article className="service-card" key={connection.id}>
+                        <div className="service-card-heading">
                           <input
                             type="checkbox"
-                            aria-label="选择全部服务"
-                            checked={
-                              list.length > 0 &&
-                              list.every((connection) =>
-                                selected.includes(connection.id),
-                              )
-                            }
+                            aria-label={`选择 ${connection.title}`}
+                            checked={selected.includes(connection.id)}
                             onChange={(event) =>
-                              setSelected(
+                              setSelected((previous) =>
                                 event.target.checked
-                                  ? list.map((connection) => connection.id)
-                                  : [],
+                                  ? [...previous, connection.id]
+                                  : previous.filter(
+                                      (id) => id !== connection.id,
+                                    ),
                               )
                             }
                           />
-                        </th>
-                        <th>服务连接</th>
-                        <th className="agent-column">
-                          <span className="agent-avatar codex">C</span>Codex
-                        </th>
-                        <th className="agent-column">
-                          <span className="agent-avatar hermes">H</span>Hermes
-                        </th>
-                        <th className="agent-column">
-                          <span className="agent-avatar claude">Cl</span>Claude
-                          Code
-                        </th>
-                        <th className="agent-column">
-                          <span className="agent-avatar opencode">O</span>
-                          OpenCode
-                        </th>
-                        <th>连接状态</th>
-                        <th />
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {list.map((connection) => (
-                        <tr key={connection.id}>
-                          <td>
-                            <input
-                              type="checkbox"
-                              aria-label={`选择 ${connection.title}`}
-                              checked={selected.includes(connection.id)}
-                              onChange={(event) =>
-                                setSelected((previous) =>
-                                  event.target.checked
-                                    ? [...previous, connection.id]
-                                    : previous.filter(
-                                        (id) => id !== connection.id,
-                                      ),
-                                )
-                              }
-                            />
-                          </td>
-                          <td>
-                            <button
-                              className="service-name"
-                              onClick={() =>
-                                setDialog({ kind: "detail", connection })
-                              }
+                          <button
+                            className="service-name"
+                            onClick={() =>
+                              setDialog({ kind: "detail", connection })
+                            }
+                          >
+                            <span
+                              className={`service-icon ${connection.transport}`}
                             >
-                              <span
-                                className={`service-icon ${connection.transport}`}
-                              >
-                                <Server size={18} />
-                              </span>
-                              <span>
-                                <strong>{connection.title}</strong>
-                                <small>{connection.endpoint}</small>
-                                {connection.authKind !== "none" && (
-                                  <em>{connection.accountLabel}</em>
-                                )}
-                              </span>
-                            </button>
-                          </td>
-                          <td>{bindingCell(connection, "codex")}</td>
-                          <td>{bindingCell(connection, "hermes")}</td>
-                          <td>{bindingCell(connection, "claude")}</td>
-                          <td>{bindingCell(connection, "opencode")}</td>
-                          <td>
+                              <Server size={18} />
+                            </span>
+                            <span>
+                              <strong>{connection.title}</strong>
+                              <small title={connection.endpoint}>
+                                {connection.endpoint}
+                              </small>
+                              {connection.authKind !== "none" && (
+                                <em>{connection.accountLabel}</em>
+                              )}
+                            </span>
+                          </button>
+                          <div className="service-health">
                             <Status value={connection.status} />
                             {connection.checkedAt && (
                               <small className="checked-at">
                                 {time(connection.checkedAt)}
                               </small>
                             )}
-                          </td>
-                          <td className="row-action">
-                            <button
-                              className="icon"
-                              aria-label={`${connection.title} 详情`}
-                              onClick={() =>
-                                setDialog({ kind: "detail", connection })
-                              }
-                            >
-                              <MoreHorizontal size={19} />
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                          </div>
+                          <button
+                            className="icon"
+                            aria-label={`${connection.title} 详情`}
+                            onClick={() =>
+                              setDialog({ kind: "detail", connection })
+                            }
+                          >
+                            <MoreHorizontal size={19} />
+                          </button>
+                        </div>
+                        <div className="service-card-footer">
+                          <div
+                            className="linked-agents"
+                            aria-label="已接入 Agent"
+                          >
+                            {linkedAgents.length ? (
+                              linkedAgents.map((client) => (
+                                <button
+                                  className="agent-tag"
+                                  key={client.id}
+                                  onClick={() => {
+                                    chooseAgent(client.id);
+                                    setPage("agents");
+                                  }}
+                                >
+                                  <span className={`agent-avatar ${client.id}`}>
+                                    {client.label[0]}
+                                  </span>
+                                  {client.label}
+                                  <small>
+                                    {!client.installed
+                                      ? "未安装"
+                                      : ownBindings(connection).some(
+                                            (binding) =>
+                                              binding.agent === client.id &&
+                                              binding.enabled,
+                                          )
+                                        ? ownBindings(connection).some(
+                                            (binding) =>
+                                              binding.agent === client.id &&
+                                              binding.mode === "shared",
+                                          )
+                                          ? "共享"
+                                          : "直连"
+                                        : "已停用"}
+                                  </small>
+                                </button>
+                              ))
+                            ) : (
+                              <span className="muted">尚未接入 Agent</span>
+                            )}
+                          </div>
+                          <button
+                            className="button small"
+                            disabled={
+                              !!busy ||
+                              !localAgents.some((client) => client.configurable)
+                            }
+                            onClick={() => connect([connection])}
+                          >
+                            <Plus size={14} />
+                            接给 Agent
+                          </button>
+                        </div>
+                      </article>
+                    );
+                  })}
                   {!list.length && (
                     <div className="empty">
                       <Server size={30} />
@@ -748,7 +905,7 @@ function App() {
                       )}
                     </div>
                   )}
-                </div>
+                </section>
                 <footer className="table-footer">
                   <span>{list.length} 项服务连接</span>
                   <span>
@@ -862,117 +1019,231 @@ function App() {
                 )}
               </div>
             )}
-            {page === "agents" && (
-              <>
-                <div className="agent-cards">
-                  {agents.map((agent) => {
-                    const bindings = data.bindings.filter(
-                      (binding) => binding.agent === agent && !binding.missing,
-                    );
-                    return (
-                      <article className="agent-card" key={agent}>
-                        <div>
-                          <span className={`agent-avatar large ${agent}`}>
-                            {agentLabel(agent)[0]}
-                          </span>
-                          <h2>{agentLabel(agent)}</h2>
-                          <span className="muted">
-                            {
-                              sourcesFor(agent).filter(
-                                (source) => source.exists,
-                              ).length
-                            }{" "}
-                            处配置
-                          </span>
-                        </div>
-                        <strong className="count">
-                          {bindings.length}
-                          <small>项已配置服务</small>
-                        </strong>
-                        <p>
+            {page === "agents" && currentAgent && (
+              <div className="agent-workspace">
+                <aside className="agent-directory" aria-label="选择 Agent">
+                  {[true, false].map((installed) => (
+                    <div
+                      className="agent-directory-group"
+                      key={String(installed)}
+                    >
+                      <h2>
+                        {installed ? "已安装" : "未安装"}
+                        <span>
                           {
-                            bindings.filter(
+                            localAgents.filter(
+                              (client) => client.installed === installed,
+                            ).length
+                          }
+                        </span>
+                      </h2>
+                      {localAgents
+                        .filter((client) => client.installed === installed)
+                        .map((client) => (
+                          <button
+                            className={`agent-choice ${currentAgent.id === client.id ? "active" : ""}`}
+                            key={client.id}
+                            aria-pressed={currentAgent.id === client.id}
+                            aria-label={`查看 ${client.label}${client.installed ? "" : "（未安装）"}`}
+                            onClick={() => chooseAgent(client.id)}
+                          >
+                            <span className={`agent-avatar ${client.id}`}>
+                              {client.label[0]}
+                            </span>
+                            <span className="agent-choice-name">
+                              {client.label}
+                            </span>
+                            {client.installed && (
+                              <span
+                                className="installed-dot"
+                                aria-label="已安装"
+                              />
+                            )}
+                          </button>
+                        ))}
+                    </div>
+                  ))}
+                </aside>
+                <section
+                  className="agent-panel"
+                  aria-label={`${currentAgent.label} MCP 接入`}
+                >
+                  <header className="agent-panel-heading">
+                    <div className="agent-panel-title">
+                      <span className={`agent-avatar large ${currentAgent.id}`}>
+                        {currentAgent.label[0]}
+                      </span>
+                      <div>
+                        <h2>{currentAgent.label}</h2>
+                        <span
+                          className={`presence-badge ${currentAgent.installed ? "installed" : ""}`}
+                        >
+                          {currentAgent.installed ? "已安装" : "未安装"}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="agent-panel-actions">
+                      <button
+                        className="button small"
+                        disabled={!currentAgent.configurable}
+                        onClick={() =>
+                          setDialog({
+                            kind: "addSource",
+                            agent: currentAgent.id,
+                          })
+                        }
+                      >
+                        <FolderPlus size={14} />
+                        添加来源
+                      </button>
+                      <button
+                        className="button small primary"
+                        disabled={
+                          !currentAgent.configurable ||
+                          !data.connections.length ||
+                          !currentSources.some((source) => !source.readOnly)
+                        }
+                        onClick={() =>
+                          connect(data.connections, currentAgent.id)
+                        }
+                      >
+                        <Plus size={14} />
+                        接入服务
+                      </button>
+                    </div>
+                  </header>
+                  {!currentAgent.installed ? (
+                    <div className="agent-unavailable">
+                      <Unplug size={19} />
+                      <div>
+                        <strong>未安装，暂不可配置</strong>
+                        <p>
+                          安装 {currentAgent.label} 后点击刷新，即可接入 MCP
+                          服务。
+                          {currentAgent.detected
+                            ? "检测到的配置残留仅供查看。"
+                            : ""}
+                        </p>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="agent-metrics">
+                      <span>
+                        <strong>
+                          {
+                            currentSources.filter((source) => source.exists)
+                              .length
+                          }
+                        </strong>
+                        处配置
+                      </span>
+                      <span>
+                        <strong>{currentBindings.length}</strong>项已接入
+                      </span>
+                      <span>
+                        <strong>
+                          {
+                            currentBindings.filter(
                               (binding) => binding.mode === "shared",
                             ).length
-                          }{" "}
-                          项通过 mcplink 共享账号
-                        </p>
-                        <button
-                          className="button"
-                          disabled={
-                            sourcesFor(agent).length > 0 &&
-                            !sourcesFor(agent).some(
-                              (source) => !source.readOnly,
-                            )
                           }
+                        </strong>
+                        项共享代理
+                      </span>
+                    </div>
+                  )}
+                  <div className="agent-service-heading">
+                    <h3>MCP 服务</h3>
+                    <div
+                      className="agent-service-filters"
+                      aria-label="按接入状态筛选"
+                    >
+                      <button
+                        className={!agentOnlyConfigured ? "active" : ""}
+                        onClick={() => setAgentOnlyConfigured(false)}
+                      >
+                        全部 {data.connections.length}
+                      </button>
+                      <button
+                        className={agentOnlyConfigured ? "active" : ""}
+                        onClick={() => setAgentOnlyConfigured(true)}
+                      >
+                        已接入{" "}
+                        {
+                          new Set(
+                            currentBindings.map(
+                              (binding) => binding.connectionId || binding.id,
+                            ),
+                          ).size
+                        }
+                      </button>
+                    </div>
+                  </div>
+                  <div className="agent-services">
+                    {currentServices.map((connection) => (
+                      <div className="agent-service-row" key={connection.id}>
+                        <button
+                          className="service-name"
                           onClick={() =>
-                            sourcesFor(agent).length === 0
-                              ? setDialog({ kind: "addSource", agent })
-                              : void connect(data.connections)
+                            setDialog({ kind: "detail", connection })
                           }
                         >
-                          <Plus size={15} />
-                          {sourcesFor(agent).length === 0
-                            ? "添加配置来源"
-                            : "选用已有服务"}
+                          <span
+                            className={`service-icon ${connection.transport}`}
+                          >
+                            <Server size={17} />
+                          </span>
+                          <span>
+                            <strong>{connection.title}</strong>
+                            <small title={connection.endpoint}>
+                              {connection.endpoint}
+                            </small>
+                          </span>
                         </button>
-                      </article>
-                    );
-                  })}
-                </div>
-                <section className="comparison">
-                  <h2>接入对比</h2>
-                  <p className="muted">
-                    选择服务可查看详情、检查实际工具并补齐接入。
-                  </p>
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>服务</th>
-                        <th>Codex</th>
-                        <th>Hermes</th>
-                        <th>Claude Code</th>
-                        <th>OpenCode</th>
-                        <th>已核验工具</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {data.connections.map((connection) => (
-                        <tr key={connection.id}>
-                          <td>
-                            <button
-                              className="text-button"
-                              onClick={() =>
-                                setDialog({ kind: "detail", connection })
-                              }
-                            >
-                              {connection.title}
-                            </button>
-                          </td>
-                          <td>{bindingCell(connection, "codex")}</td>
-                          <td>{bindingCell(connection, "hermes")}</td>
-                          <td>{bindingCell(connection, "claude")}</td>
-                          <td>{bindingCell(connection, "opencode")}</td>
-                          <td>
-                            {connection.toolCount === undefined ||
-                            connection.toolCount === null ? (
-                              <button
-                                className="text-button"
-                                disabled={!!busy}
-                                onClick={() => void probe(connection)}
-                              >
-                                检查工具
-                              </button>
-                            ) : (
-                              `${connection.toolCount} 个`
-                            )}
-                          </td>
-                        </tr>
+                        {bindingCell(connection, currentAgent.id)}
+                      </div>
+                    ))}
+                    {!currentServices.length && (
+                      <div className="agent-empty">
+                        <Server size={22} />
+                        <p>
+                          {agentOnlyConfigured
+                            ? "该客户端尚未接入 MCP 服务"
+                            : "暂无 MCP 服务，可先在 MCP 服务页添加"}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                  <details className="agent-source-details">
+                    <summary>
+                      配置位置<span>{currentSources.length}</span>
+                      <ChevronDown size={14} />
+                    </summary>
+                    <div>
+                      {currentSources.map((source) => (
+                        <div className="agent-source-item" key={source.id}>
+                          <strong>
+                            {source.label}
+                            <small>
+                              {source.readOnly
+                                ? "只读"
+                                : !currentAgent.installed
+                                  ? "不可配置"
+                                  : source.exists
+                                    ? "已找到"
+                                    : "尚未创建"}
+                            </small>
+                          </strong>
+                          <code>{source.path}</code>
+                          {source.error && (
+                            <p className="inline-error">{source.error}</p>
+                          )}
+                        </div>
                       ))}
-                    </tbody>
-                  </table>
+                    </div>
+                  </details>
                 </section>
-              </>
+              </div>
             )}
           </>
         )}
@@ -1000,7 +1271,8 @@ function App() {
         <Modal title="配置来源" wide onClose={() => setDialog(undefined)}>
           <div className="modal-body">
             <p className="muted">
-              自动读取用户配置。可添加其他 profile 或项目的原生配置文件。
+              支持八类 Agent 的配置管理和 MCP
+              共享代理。未安装的客户端不可配置，安装后刷新即可接入；配置目录残留不代表已安装。插件、托管及共享回退来源按各自权限维护。
             </p>
             {data?.sources.map((source) => (
               <div className="source-row" key={source.id}>
@@ -1012,12 +1284,11 @@ function App() {
                     {agentLabel(source.agent)} · {source.label}
                   </strong>
                   <code>{source.path}</code>
-                  {source.layout && (
-                    <small>OpenCode {source.layout.toUpperCase()}</small>
-                  )}
                   {source.project && <code>项目：{source.project}</code>}
                   <small className={source.error ? "inline-error" : "muted"}>
-                    {source.error ||
+                    {(!isInstalled(source.agent)
+                      ? "未安装 · 不可配置"
+                      : source.error) ||
                       (source.exists ? "已找到配置" : "尚未创建配置文件") +
                         (source.readOnly ? " · 只读来源" : "")}
                   </small>
@@ -1029,8 +1300,9 @@ function App() {
                 <button
                   className="button"
                   key={agent}
+                  disabled={!isInstalled(agent)}
                   onClick={async () => {
-                    if (agent === "claude" || agent === "opencode") {
+                    if (agent !== "codex" && agent !== "hermes") {
                       setDialog({ kind: "addSource", agent });
                       return;
                     }
@@ -1050,7 +1322,9 @@ function App() {
                   }}
                 >
                   <FolderPlus size={15} />
-                  添加 {agentLabel(agent)} 配置
+                  {isInstalled(agent)
+                    ? `添加 ${agentLabel(agent)} 配置`
+                    : `${agentLabel(agent)} · 未安装`}
                 </button>
               ))}
             </div>
@@ -1095,7 +1369,14 @@ function App() {
                   {operation.status === "applied" && (
                     <button
                       className="button small"
-                      disabled={!!busy}
+                      disabled={
+                        !!busy ||
+                        !isInstalled(
+                          data.sources.find(
+                            (source) => source.id === operation.sourceId,
+                          )?.agent,
+                        )
+                      }
                       onClick={async () => {
                         const result = await action(
                           "恢复配置",
@@ -1140,6 +1421,106 @@ function App() {
                 {data?.gateway.paused ? "恢复共享" : "暂停共享"}
               </button>
             </div>
+          </div>
+        </Modal>
+      )}
+      {dialog?.kind === "background" && (
+        <Modal title="后台运行" onClose={() => setDialog(undefined)}>
+          <div className="modal-body background-settings">
+            <div className="gateway-control">
+              <div>
+                <strong>
+                  {data?.gateway.paused ? "MCP 共享已暂停" : "MCP 共享运行中"}
+                </strong>
+                <p className="muted">
+                  暂停后停止共享调用，后台重启后仍保持暂停。
+                </p>
+              </div>
+              <button
+                className="button"
+                disabled={!!busy || !data}
+                onClick={() =>
+                  void action(
+                    "调整共享后台",
+                    data?.gateway.paused ? "gateway.resume" : "gateway.pause",
+                  )
+                }
+              >
+                {data?.gateway.paused ? "恢复共享" : "暂停共享"}
+              </button>
+            </div>
+            {desktop?.supported && (
+              <>
+                <div className="gateway-control">
+                  <div>
+                    <strong>
+                      {desktop.platform === "macos" ? "登录时启动" : "开机启动"}
+                    </strong>
+                    <p className="muted">
+                      登录 {desktop.platform === "macos" ? "macOS" : "Windows"}{" "}
+                      后启动{desktop.platform === "macos" ? "菜单栏" : "托盘"}
+                      和后台，主窗口保持隐藏。
+                    </p>
+                  </div>
+                  <button
+                    className="button"
+                    disabled={!!busy}
+                    aria-pressed={desktop.autostartEnabled}
+                    onClick={async () => {
+                      setBusy("设置开机启动");
+                      try {
+                        const next = await invoke<DesktopStatus>(
+                          "desktop_autostart",
+                          { enabled: !desktop.autostartEnabled },
+                        );
+                        setDesktop(next);
+                        setNotice({
+                          text: next.autostartEnabled
+                            ? "已开启开机启动"
+                            : "已关闭开机启动",
+                        });
+                      } catch (error) {
+                        setNotice({ text: String(error), error: true });
+                      } finally {
+                        setBusy("");
+                      }
+                    }}
+                  >
+                    {desktop.autostartEnabled
+                      ? "已开启 · 关闭"
+                      : "已关闭 · 开启"}
+                  </button>
+                </div>
+                <div className="background-note">
+                  <strong>关闭窗口后继续运行</strong>
+                  <p>
+                    {desktop.platform === "macos"
+                      ? "关闭窗口后应用留在菜单栏。菜单栏的“显示主窗口”、Dock 图标或再次启动应用都能重新打开窗口。"
+                      : "点击关闭会收起到系统托盘。左键点击图标可打开窗口，右键可暂停共享或调整开机启动。"}
+                  </p>
+                  <p>
+                    “退出
+                    mcplink”会停止后台并清理共享服务；“只退出界面”保留代理运行。后续
+                    Agent 请求仍可按需启动后台。
+                  </p>
+                  <button
+                    className="button small"
+                    disabled={!!busy}
+                    onClick={async () => {
+                      try {
+                        await invoke("desktop_menu");
+                      } catch (error) {
+                        setNotice({ text: String(error), error: true });
+                      }
+                    }}
+                  >
+                    {desktop.platform === "macos"
+                      ? "打开菜单栏菜单"
+                      : "打开托盘菜单"}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </Modal>
       )}
@@ -1351,7 +1732,10 @@ function App() {
       {dialog?.kind === "connect" && (
         <ConnectDialog
           connections={dialog.connections}
+          targetAgent={dialog.targetAgent}
+          onManage={manage}
           sources={data?.sources || []}
+          clients={localAgents}
           bindings={data?.bindings || []}
           onClose={() => setDialog(undefined)}
           onDone={async () => {
@@ -1395,7 +1779,6 @@ function SourceDialog({
   onSaved: () => Promise<void>;
 }) {
   const [scope, setScope] = useState("user");
-  const [layout, setLayout] = useState("auto");
   const [path, setPath] = useState("");
   const [project, setProject] = useState("");
   const [pending, setPending] = useState(false);
@@ -1415,7 +1798,6 @@ function SourceDialog({
               scope: scope === "readonly" ? null : scope,
               path: scoped && agent === "claude" ? null : path || null,
               project: scoped ? project : null,
-              layout: agent === "opencode" && layout !== "auto" ? layout : null,
             });
             await onSaved();
           } catch (error) {
@@ -1435,25 +1817,14 @@ function SourceDialog({
             {agent === "claude" && (
               <option value="local">Local · 个人项目配置</option>
             )}
-            <option value="project">Project · 项目配置</option>
+            {["claude", "opencode", "zcode", "kimicode"].includes(agent) && (
+              <option value="project">Project · 项目配置</option>
+            )}
             {agent === "claude" && (
               <option value="readonly">其他 JSON · 只读盘点</option>
             )}
           </select>
         </label>
-        {agent === "opencode" && (
-          <label className="field">
-            <span>OpenCode 配置版本</span>
-            <select
-              value={layout}
-              onChange={(event) => setLayout(event.target.value)}
-            >
-              <option value="auto">自动识别已有配置</option>
-              <option value="v1">V1 · mcp 下的服务</option>
-              <option value="v2">V2 · mcp.servers</option>
-            </select>
-          </label>
-        )}
         {scoped && (
           <label className="field">
             <span>项目目录</span>
@@ -1490,7 +1861,11 @@ function SourceDialog({
                 agent === "opencode"
                   ? "留空自动选择 opencode.json(c)"
                   : scope === "user"
-                    ? "留空使用当前用户 .claude.json"
+                    ? agent === "claude"
+                      ? "留空使用当前用户 .claude.json"
+                      : agent === "deepseek"
+                        ? "留空使用 desktop profile 的 cordis.patch.yml"
+                        : "留空使用当前用户的原生 MCP 配置"
                     : "完整 JSON 文件路径"
               }
             />
@@ -1502,9 +1877,11 @@ function SourceDialog({
                   multiple: false,
                   filters: [
                     {
-                      name: "JSON 配置",
+                      name: "原生 MCP 配置",
                       extensions:
-                        agent === "opencode" ? ["json", "jsonc"] : ["json"],
+                        agent === "deepseek"
+                          ? ["yml", "yaml"]
+                          : ["json", "jsonc"],
                     },
                   ],
                 });
@@ -1517,8 +1894,12 @@ function SourceDialog({
         )}
         <p className="field-help">
           {agent === "opencode"
-            ? "已有配置按结构识别 V1/V2；空文件须明确选择版本。保留 JSONC 注释及其他设置，不自动迁移原文件。"
-            : "User 与 Local 使用 .claude.json 的不同位置；Local 按 Git 项目根目录定位。Project 使用所选目录的 .mcp.json，客户端审批及信任由 Claude Code 维护。插件与托管来源保持只读。"}
+            ? "使用当前 OpenCode 配置格式，支持 JSON/JSONC 及空 MCP 配置，保留注释和其他设置。"
+            : agent === "claude"
+              ? "User 与 Local 使用 .claude.json 的不同位置；Local 按 Git 项目根目录定位。Project 使用所选目录的 .mcp.json，客户端审批及信任由 Claude Code 维护。插件与托管来源保持只读。"
+              : agent === "deepseek"
+                ? "按 profile 管理 cordis.patch.yml 中的 MCP 插件，可选择 desktop、web 或其他实际 profile。共享代理写入原生 stdio 入口。"
+                : "使用当前原生 MCP 格式，支持配置管理及共享代理。文件仅在应用预览后的变更时写入。"}
         </p>
         {error && (
           <div className="warning-banner" role="alert">
@@ -1540,20 +1921,39 @@ function SourceDialog({
 
 function ConnectDialog({
   connections,
+  targetAgent,
+  onManage,
   sources,
+  clients,
   bindings,
   onClose,
   onDone,
   onNotice,
 }: {
   connections: Connection[];
+  targetAgent?: Agent;
+  onManage: (connection: Connection) => Promise<Connection | undefined>;
   sources: Source[];
+  clients: LocalAgent[];
   bindings: Binding[];
   onClose: () => void;
   onDone: () => Promise<void>;
   onNotice: (notice: { text: string; error?: boolean }) => void;
 }) {
-  const [targets, setTargets] = useState<string[]>([]);
+  const [targets, setTargets] = useState<string[]>(() =>
+    targetAgent
+      ? sources
+          .filter(
+            (source) =>
+              source.agent === targetAgent &&
+              !source.readOnly &&
+              clients.some(
+                (client) => client.id === targetAgent && client.configurable,
+              ),
+          )
+          .map((source) => source.id)
+      : [],
+  );
   const [mode, setMode] = useState("direct");
   const [operation, setOperation] = useState("upsert");
   const [plans, setPlans] = useState<Plan[]>([]);
@@ -1561,12 +1961,42 @@ function ConnectDialog({
   const [error, setError] = useState("");
   const [results, setResults] =
     useState<{ sourceId: string; status: string; message: string }[]>();
+  const isAvailable = (source: Source) =>
+    !source.readOnly &&
+    clients.some((client) => client.id === source.agent && client.configurable);
+  useEffect(() => {
+    const available = new Set(
+      sources
+        .filter(
+          (source) =>
+            !source.readOnly &&
+            clients.some(
+              (client) => client.id === source.agent && client.configurable,
+            ),
+        )
+        .map((source) => source.id),
+    );
+    setTargets((previous) => previous.filter((id) => available.has(id)));
+    setPlans((previous) =>
+      previous.some((plan) =>
+        plan.changes.some((change) => !available.has(change.sourceId)),
+      )
+        ? []
+        : previous,
+    );
+  }, [clients, sources]);
   const preview = async () => {
     setPending(true);
     setError("");
     try {
+      const managed: Connection[] = [];
+      for (const connection of connections) {
+        const result = await onManage(connection);
+        if (!result) throw new Error("服务暂时无法纳入管理，请核对后重试");
+        managed.push(result);
+      }
       const plan = await rpc<Plan>("changes.preview", {
-        connectionIds: connections.map((c) => c.id),
+        connectionIds: managed.map((connection) => connection.id),
         targetSourceIds: targets,
         mode,
         action: operation,
@@ -1667,7 +2097,7 @@ function ConnectDialog({
                 <input
                   type="checkbox"
                   checked={targets.includes(source.id)}
-                  disabled={!!source.readOnly}
+                  disabled={!isAvailable(source)}
                   onChange={(event) =>
                     setTargets((previous) =>
                       event.target.checked
@@ -1685,7 +2115,14 @@ function ConnectDialog({
                   </strong>
                   <small>
                     {source.path}
-                    {source.readOnly ? " · 只读，请在原客户端维护" : ""}
+                    {!clients.some(
+                      (client) =>
+                        client.id === source.agent && client.installed,
+                    )
+                      ? " · 未安装，不可配置"
+                      : source.readOnly
+                        ? " · 只读，请在原客户端维护"
+                        : ""}
                   </small>
                 </div>
                 {bindings.some(

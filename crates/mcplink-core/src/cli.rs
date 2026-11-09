@@ -51,7 +51,7 @@ enum Command {
         #[command(subcommand)]
         command: CliCommand,
     },
-    /// 管理 Codex/Hermes 和 Claude Code 只读配置来源
+    /// 管理八类支持客户端的原生 MCP 配置来源
     Sources {
         #[command(subcommand)]
         command: SourceCommand,
@@ -109,9 +109,9 @@ enum Command {
 #[derive(Subcommand)]
 enum SourceCommand {
     List,
-    /// 添加真实来源；Claude 按作用域定位，OpenCode 须识别或选择配置版本
+    /// 添加真实来源；Claude 按作用域定位，OpenCode 使用当前配置格式
     Add {
-        #[arg(long, value_parser = ["codex", "hermes", "claude", "opencode"])]
+        #[arg(long, value_parser = ["codex", "hermes", "claude", "opencode", "zcode", "deepseek", "openclaw", "kimicode"])]
         agent: String,
         #[arg(long)]
         path: Option<PathBuf>,
@@ -121,8 +121,6 @@ enum SourceCommand {
         scope: Option<String>,
         #[arg(long)]
         project: Option<PathBuf>,
-        #[arg(long, value_parser=["v1","v2"])]
-        layout: Option<String>,
     },
 }
 
@@ -246,6 +244,8 @@ enum GatewayCommand {
     Status,
     Pause,
     Resume,
+    /// 停止已有后台并等待清理；不启动缺席的后台，不改暂停偏好
+    Stop,
 }
 
 #[derive(Subcommand)]
@@ -459,10 +459,9 @@ async fn execute(command: Command, data: PathBuf) -> Result<Value, Failure> {
                 label,
                 scope,
                 project,
-                layout,
             } => (
                 "sources.add",
-                json!({"agent":agent,"path":path,"label":label,"scope":scope,"project":project,"layout":layout}),
+                json!({"agent":agent,"path":path,"label":label,"scope":scope,"project":project}),
                 None,
                 false,
             ),
@@ -541,9 +540,10 @@ async fn execute(command: Command, data: PathBuf) -> Result<Value, Failure> {
             ChangeCommand::History => ("snapshot", json!({}), Some("history"), false),
         },
         Command::Gateway { command } => match command {
-            GatewayCommand::Status => ("snapshot", json!({}), Some("gateway"), false),
+            GatewayCommand::Status => ("gateway.status", json!({}), None, false),
             GatewayCommand::Pause => ("gateway.pause", json!({}), None, false),
             GatewayCommand::Resume => ("gateway.resume", json!({}), None, false),
+            GatewayCommand::Stop => ("gateway.stop", json!({}), None, false),
         },
         Command::Mcp { command } => match command {
             McpCommand::Describe { id } => ("mcp.describe", json!({"id":id}), None, false),
@@ -636,6 +636,9 @@ async fn execute(command: Command, data: PathBuf) -> Result<Value, Failure> {
 async fn call(data: &std::path::Path, method: &str, mut params: Value) -> Result<Value> {
     if !params.is_object() {
         bail!("请求参数必须是 JSON 对象");
+    }
+    if method == "gateway.stop" {
+        return Client::stop_existing(data).await;
     }
     if method == "changes.preview" {
         params["_bridgeExecutable"] =

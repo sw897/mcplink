@@ -76,9 +76,12 @@ jobs:
       - name: Isolated Claude writable scope acceptance
         timeout-minutes: 5
         run: python -u tests/e2e/claude_writable.py --record artifacts/e2e/ci-claude-writable
-      - name: Isolated OpenCode layout acceptance
+      - name: Isolated current OpenCode format acceptance
         timeout-minutes: 5
         run: python -u tests/e2e/opencode_sources.py --record artifacts/e2e/ci-opencode
+      - name: Isolated eight-Agent configuration and shared proxy acceptance
+        timeout-minutes: 5
+        run: python -u tests/e2e/agent_discovery.py --record artifacts/e2e/ci-agents
       - name: Isolated tool invocation acceptance
         timeout-minutes: 5
         run: python -u tests/e2e/tool_calls.py --record artifacts/e2e/ci-tools
@@ -91,6 +94,13 @@ jobs:
       - name: Isolated registered OAuth client acceptance
         timeout-minutes: 5
         run: python -u tests/e2e/oauth_clients.py --record artifacts/e2e/ci-oauth
+      - name: Windows background lifecycle acceptance
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
+        run: python -u tests/e2e/windows_background.py --record artifacts/e2e/ci-windows-background
+      - name: Daemon exit and process cleanup acceptance
+        timeout-minutes: 5
+        run: python -u tests/e2e/daemon_lifecycle.py --record artifacts/e2e/ci-lifecycle
       - name: macOS DMG acceptance
         if: runner.os == 'macOS'
         run: |
@@ -113,10 +123,13 @@ jobs:
             artifacts/e2e/ci-claude/report.json
             artifacts/e2e/ci-claude-writable/report.json
             artifacts/e2e/ci-opencode/report.json
+            artifacts/e2e/ci-agents/report.json
             artifacts/e2e/ci-tools/report.json
             artifacts/e2e/ci-generated/report.json
             artifacts/e2e/ci-remote/report.json
             artifacts/e2e/ci-oauth/report.json
+            artifacts/e2e/ci-windows-background/report.json
+            artifacts/e2e/ci-lifecycle/report.json
             artifacts/e2e/ci-package/package-report.json
             artifacts/e2e/ci-installed/report.json
             artifacts/e2e/ci-manifest/release-manifest.json
