@@ -166,6 +166,18 @@ enum ConnectionCommand {
         #[arg(long)]
         name: String,
     },
+    /// 解除托管绑定并保留 Agent 的原生配置
+    Detach {
+        id: String,
+        #[arg(long)]
+        source: String,
+        #[arg(long)]
+        name: String,
+    },
+    /// 重新启用已断开的连接
+    Reconnect {
+        id: String,
+    },
     /// 采用已绑定直连条目的外部修改
     Adopt {
         #[arg(long)]
@@ -296,7 +308,7 @@ fn schema() -> Value {
         "stdin":{"limitBytes":INPUT_LIMIT,"encoding":"UTF-8 JSON object; close stdin after one request",
             "connections save":{"required":["name","definition"],"optional":["id","title","accountLabel"],
                 "definition":{"command":"string (stdio)","args":"string[]","env":"object<string,string>","cwd":"string","url":"string (HTTP)","headers":"object<string,string>","enabled":"boolean (default true)","oauth":"boolean","clientId":"string or null","clientSecret":"string or null; masked on output","oauthScopes":"string[] (empty uses server suggestions)","oauthCallbackPort":"integer 1–65535 or null (automatic)","includeTools":"string[]","excludeTools":"string[]","includeSpecified":"boolean (true to restrict even when includeTools is empty)","timeout":"integer seconds","startupTimeout":"integer seconds","resourcesDisabled":"boolean","promptsDisabled":"boolean"},
-                "semantics":"Complete replacement. To edit, start from connections show .ok.definition and preserve masked fields. Omit transport; do not pass native config field names."},
+                "semantics":"Edit the normalized definition from connections show. Masked credentials stay with their origin. Changing origin suspends access. Metadata edits preserve connection state."},
             "credentials update":{"required":["value"],"optional":["header (default Authorization)"],"semantics":"Value stored verbatim, no Bearer prefix added"},
             "credentials oauth-config":{"optional":{"clientId":"string or null","clientSecret":"string, retained mask or null","scopes":"string[]; empty uses server suggestions","callbackPort":"integer 1–65535 or null"},"semantics":"Partial update. Omitted fields retain values; null clears optional fields. Does not start login or switch Token mode; changes invalidate an existing OAuth grant. Secrets use stdin and the system credential store; direct native export is unavailable for managed OAuth parameters."},
             "mcp request":{"required":["method"],"optional":["params"]},
@@ -480,6 +492,15 @@ async fn execute(command: Command, data: PathBuf) -> Result<Value, Failure> {
                 None,
                 false,
             ),
+            ConnectionCommand::Detach { id, source, name } => (
+                "connections.detach",
+                json!({"id":id,"sourceId":source,"name":name}),
+                None,
+                false,
+            ),
+            ConnectionCommand::Reconnect { id } => {
+                ("connections.reconnect", json!({"id":id}), None, false)
+            }
             ConnectionCommand::Adopt { source, name } => (
                 "connections.adopt_source",
                 json!({"sourceId":source,"name":name}),

@@ -76,7 +76,14 @@ class Lifecycle(AgentCli):
         assert not self.cli("gateway", "status")["paused"]
         self.passed("a subsequent Agent request restarts the stopped daemon and reuses its unchanged connection entry")
 
+        self.cli("connections", "probe", connection)
+        self.changes(connection, ["codex:user"], mode="shared")
         self.cli("gateway", "pause")
+        self.cli("connections", "probe", connection)
+        probed = json.loads(marker.read_text())
+        wait_until(lambda: all(exited(probed[key]) for key in ("pid", "descendant")))
+        assert self.cli("gateway", "status") == {"paused": True, "sessions": 0}
+        self.passed("a manual probe of a paused shared binding releases its upstream process tree")
         self.stop()
         assert self.cli("gateway", "status")["paused"]
         self.cli("gateway", "resume")

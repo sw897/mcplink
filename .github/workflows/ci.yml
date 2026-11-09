@@ -66,6 +66,9 @@ jobs:
       - name: Configuration integrity and recovery
         timeout-minutes: 5
         run: python -u tests/e2e/config_integrity.py --record artifacts/e2e/ci-integrity
+      - name: Existing Bridge adoption
+        timeout-minutes: 5
+        run: python -u tests/e2e/bridge_adoption.py --record artifacts/e2e/ci-bridge-adoption
       - name: Desktop renderer acceptance
         if: runner.os == 'macOS'
         timeout-minutes: 6
@@ -141,6 +144,7 @@ jobs:
           if-no-files-found: warn
           path: |
             artifacts/e2e/ci-integrity/report.json
+            artifacts/e2e/ci-bridge-adoption/report.json
             artifacts/e2e/ci-renderer/report.json
             artifacts/e2e/ci-cli/report.json
             artifacts/e2e/ci-core/report.json

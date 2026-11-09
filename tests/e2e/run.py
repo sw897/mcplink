@@ -220,6 +220,8 @@ class Harness:
         self.rpc("gateway.pause")
         assert "error" in a.call("tools/list")
         assert self.rpc("connections.probe", {"id": local})["connection"]["status"] == "ready"
+        assert self.rpc("connections.probe", {"id": office})["connection"]["status"] == "ready"
+        assert self.rpc("gateway.status") == {"paused": True, "sessions": 0}
         self.rpc("gateway.resume")
         assert "result" in b.call("tools/list")
         self.passed("paused gateway and independent direct connection")
@@ -271,6 +273,7 @@ class Harness:
 
         stale=self.rpc("changes.preview",{"connectionId":local,"targetSourceIds":["hermes:user"]})
         detail=self.rpc("connections.detail",{"id":local})
+        detail["definition"]["timeout"] = 45
         self.rpc("connections.save",{"id":local,"name":"local_notes","definition":detail["definition"]})
         failed=self.rpc("changes.apply",{"planId":stale["planId"]})
         assert failed["results"][0]["status"]=="failed"

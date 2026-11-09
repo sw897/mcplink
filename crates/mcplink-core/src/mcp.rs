@@ -136,13 +136,15 @@ impl McpPool {
         if !connection.active {
             bail!("连接已断开，请在账号页重新连接");
         }
-        let slot = self
-            .sessions
-            .lock()
-            .unwrap()
-            .entry(id.into())
-            .or_default()
-            .clone();
+        let slot = {
+            let mut sessions = self.sessions.lock().unwrap();
+            if std::ptr::eq(self, &engine.pool)
+                && engine.paused.load(std::sync::atomic::Ordering::SeqCst)
+            {
+                bail!("共享后台已暂停，请在 mcplink 恢复");
+            }
+            sessions.entry(id.into()).or_default().clone()
+        };
         let mut shutdown = engine.shutdown.subscribe();
         let mut slot = tokio::select! {
             _ = shutdown.wait_for(|stopping| *stopping) => bail!("共享后台正在退出"),
@@ -475,7 +477,7 @@ fn requires_authentication(error: &(dyn std::error::Error + 'static)) -> bool {
 
 fn connection_error(error: impl std::error::Error + 'static) -> anyhow::Error {
     if requires_authentication(&error) {
-        anyhow::anyhow!("认证已失效，请在账号页更新令牌或重新登录")
+        anyhow::anyhow!("服务要求认证，请在账号页设置凭据或重新登录")
     } else {
         anyhow::anyhow!("MCP 连接中断或协议不兼容，请检查端点与服务状态")
     }

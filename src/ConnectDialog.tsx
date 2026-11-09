@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Loader2, Server } from "lucide-react";
 import {
   Agent,
@@ -7,15 +7,57 @@ import {
   Source,
   Binding,
   Plan,
+  Change,
+  changeLabel,
   agentLabel,
   rpc,
 } from "./contracts";
 import { Status, Modal } from "./Modal";
 
+export function ChangeDiff({ change }: { change: Change }) {
+  const names: Record<string, string> = {
+    url: "服务地址",
+    args: "启动参数",
+    command: "启动命令",
+    cwd: "工作目录",
+    clientSecret: "OAuth 客户端机密",
+    enabled: "启用状态",
+    native: "客户端专属设置",
+    oauth: "OAuth 认证",
+    includeTools: "启用的工具",
+    excludeTools: "排除的工具",
+  };
+  return (
+    <>
+      <ul className="field-changes">
+        {change.fields.map((item) => (
+          <li key={JSON.stringify([item.field, item.key])}>
+            {item.key
+              ? (item.field === "env" ? "环境变量 " : "请求头 ") + item.key
+              : names[item.field] || item.field}
+            {" · "}
+            {item.kind === "update" ? "已更换" : changeLabel(item.kind)}
+          </li>
+        ))}
+      </ul>
+      <details>
+        <summary>查看脱敏配置变化</summary>
+        <pre>
+          {JSON.stringify(
+            { before: change.before, after: change.after },
+            null,
+            2,
+          )}
+        </pre>
+      </details>
+    </>
+  );
+}
+
 export function ConnectDialog({
   connections,
   targetAgent,
-  onManage,
+  binding,
   sources,
   clients,
   bindings,
@@ -25,7 +67,7 @@ export function ConnectDialog({
 }: {
   connections: Connection[];
   targetAgent?: Agent;
-  onManage: (connection: Connection) => Promise<Connection | undefined>;
+  binding?: Binding;
   sources: Source[];
   clients: LocalAgent[];
   bindings: Binding[];
@@ -34,6 +76,7 @@ export function ConnectDialog({
   onNotice: (notice: { text: string; error?: boolean }) => void;
 }) {
   const [targets, setTargets] = useState<string[]>(() => {
+    if (binding) return [binding.sourceId];
     const available = sources.filter(
       (s) =>
         s.agent === targetAgent &&
@@ -42,8 +85,10 @@ export function ConnectDialog({
     );
     return available.length === 1 ? [available[0].id] : [];
   });
-  const [mode, setMode] = useState("direct");
-  const [operation, setOperation] = useState("upsert");
+  const [mode, setMode] = useState(binding?.mode || "direct");
+  const [operation, setOperation] = useState(
+    binding?.missing ? "remove" : "upsert",
+  );
   const [plans, setPlans] = useState<Plan[]>([]);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
@@ -54,9 +99,30 @@ export function ConnectDialog({
   const isAvailable = (source: Source) =>
     !source.readOnly &&
     clients.some((client) => client.id === source.agent && client.configurable);
+  const visibleSources = useMemo(
+    () =>
+      sources
+        .filter((source) => !binding || source.id === binding.sourceId)
+        .filter(
+          (source) =>
+            operation === "upsert" ||
+            connections.every((connection) =>
+              bindings.some(
+                (b) =>
+                  b.sourceId === source.id &&
+                  b.connectionId === connection.id &&
+                  (operation === "remove" ||
+                    (!b.missing &&
+                      (operation === "enable" ? !b.enabled : b.enabled) &&
+                      source.agent !== "claude")),
+              ),
+            ),
+        ),
+    [sources, connections, bindings, operation, binding],
+  );
   useEffect(() => {
     const available = new Set(
-      sources
+      visibleSources
         .filter(
           (source) =>
             !source.readOnly &&
@@ -74,24 +140,22 @@ export function ConnectDialog({
         ? []
         : previous,
     );
-  }, [clients, sources]);
+  }, [clients, visibleSources]);
   const preview = async () => {
     setPending(true);
     setError("");
     try {
-      const managed: Connection[] = [];
-      for (const connection of connections) {
-        const result = await onManage(connection);
-        if (!result) throw new Error("服务暂时无法纳入管理，请核对后重试");
-        managed.push(result);
-      }
       const plan = await rpc<Plan>("changes.preview", {
-        connectionIds: managed.map((connection) => connection.id),
+        connectionIds: connections.map((connection) => connection.id),
         targetSourceIds: targets,
+        bindingTarget: binding
+          ? { sourceId: binding.sourceId, name: binding.name }
+          : undefined,
         mode,
         action: operation,
       });
-      setPlans([plan]);
+      if (plan.changes.length) setPlans([plan]);
+      else setError("这些配置已经移除，无需写入。");
     } catch (error) {
       setError((error as Error).message);
     } finally {
@@ -118,7 +182,11 @@ export function ConnectDialog({
       await onDone();
       onNotice({
         text: all.every((result) => result.status === "applied")
-          ? "配置已写入，请在对应 Agent 重新加载 MCP"
+          ? plans.every((plan) =>
+              plan.changes.every((change) => change.kind === "cleanup"),
+            )
+            ? "已清理失效绑定"
+            : "配置已写入，请在对应 Agent 重新加载 MCP"
           : "部分目标未完成，请核对每项结果",
         error: all.some((result) => result.status !== "applied"),
       });
@@ -131,7 +199,13 @@ export function ConnectDialog({
   return (
     <Modal
       title={
-        results ? "接入结果" : plans.length ? "核对配置变更" : "接给 Agent"
+        results
+          ? "接入结果"
+          : plans.length
+            ? "核对配置变更"
+            : binding
+              ? "管理 Agent 绑定"
+              : "接给 Agent"
       }
       wide
       onClose={onClose}
@@ -189,7 +263,10 @@ export function ConnectDialog({
               </div>
             )}
             <h3 className="section-label">目标 Agent 与配置位置</h3>
-            {sources.map((source) => (
+            {!visibleSources.length && (
+              <p className="muted">没有符合此操作的绑定。</p>
+            )}
+            {visibleSources.map((source) => (
               <label className="target" key={source.id}>
                 <input
                   type="checkbox"
@@ -265,22 +342,12 @@ export function ConnectDialog({
                     直连会将连接设置写入上述文件，令牌会以明文保存。请核对项目文件的共享范围。
                   </p>
                 )}
-                <p>{change.reload}</p>
-                <details>
-                  <summary>查看脱敏配置变化</summary>
-                  <pre>
-                    {JSON.stringify(
-                      { before: change.before, after: change.after },
-                      null,
-                      2,
-                    )}
-                  </pre>
-                </details>
-                <details>
-                  <summary>配置位置与接入名称</summary>
-                  <code>{change.path}</code>
-                  <code>{change.name}</code>
-                </details>
+                <p>
+                  {change.kind === "cleanup"
+                    ? "仅清理托管记录。"
+                    : change.reload}
+                </p>
+                <ChangeDiff change={change} />
               </div>
             ))}
           </div>

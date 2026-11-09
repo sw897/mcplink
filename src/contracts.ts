@@ -38,6 +38,7 @@ export type Connection = {
   accountLabel: string;
   authKind: string;
   active: boolean;
+  revision?: number;
   status: string;
   checkedAt?: number;
   toolCount?: number;
@@ -66,6 +67,7 @@ export type Binding = {
   changed: boolean;
   needsUpdate?: boolean;
   missing?: boolean;
+  unavailable?: boolean;
   mode: string;
   overriddenIn?: { sourceId: string; project: string; scope: string }[];
 };
@@ -76,6 +78,8 @@ export type Operation = {
   sourceId: string;
   status: string;
   createdAt: number;
+  kind?: string;
+  restoreEffect?: string;
   error?: string;
 };
 export type Snapshot = {
@@ -103,6 +107,8 @@ export type Change = {
   mode: string;
   action: string;
   reload: string;
+  kind: string;
+  fields: { field: string; key?: string; kind: string }[];
   before?: Json;
   after?: Json;
 };
@@ -146,9 +152,41 @@ export type Dialog =
   | { kind: "history" }
   | { kind: "background" }
   | { kind: "editor"; connection?: Connection }
-  | { kind: "connect"; connections: Connection[]; targetAgent?: Agent }
+  | {
+      kind: "connect";
+      connections: Connection[];
+      targetAgent?: Agent;
+      binding?: Binding;
+    }
+  | {
+      kind: "adopt";
+      connections: Connection[];
+      intent: "connect" | "probe" | "credential" | "detail";
+      targetAgent?: Agent;
+      binding?: Binding;
+    }
+  | { kind: "restore"; operation: Operation; change: Change; effect: string }
   | { kind: "detail"; connection: Connection }
   | { kind: "credential"; connection: Connection };
+
+export const changeLabel = (kind?: string) =>
+  ({
+    add: "新增",
+    update: "更新",
+    remove: "移除",
+    cleanup: "清理失效绑定",
+    disable: "停用",
+    enable: "启用",
+    restore: "恢复",
+  })[kind || ""] || "历史变更";
+
+export const restoreLabel = (effect?: string) =>
+  ({
+    remove: "移除当前条目",
+    add: "重新添加原配置",
+    update: "还原该条目的配置",
+    none: "无需写入配置文件",
+  })[effect || ""] || "核对恢复内容";
 
 export const agentLabel = (agent: Agent) =>
   ({

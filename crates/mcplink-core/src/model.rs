@@ -87,7 +87,7 @@ pub struct Source {
     pub scope: Option<String>,
 }
 
-#[derive(Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Definition {
     pub command: Option<String>,
@@ -127,6 +127,49 @@ impl Definition {
             return "HTTP MCP".into();
         }
         self.command.as_deref().unwrap_or("未设置启动命令").into()
+    }
+
+    pub fn changed_origin(&self, previous: &Self) -> bool {
+        let (Some(old), Some(new)) = (&previous.url, &self.url) else {
+            return false;
+        };
+        if old == new {
+            return false;
+        }
+        match (url::Url::parse(old), url::Url::parse(new)) {
+            (Ok(a), Ok(b)) if a.host().is_some() && b.host().is_some() => a.origin() != b.origin(),
+            _ => true,
+        }
+    }
+
+    pub fn discard_inherited_auth(&mut self, previous: &Self) {
+        self.headers.retain(|key, value| {
+            value != "••••••••"
+                && !previous
+                    .headers
+                    .iter()
+                    .any(|(old_key, old)| old_key.eq_ignore_ascii_case(key) && old == value)
+        });
+        if self.client_secret.as_deref() == Some("••••••••")
+            || self.client_secret == previous.client_secret
+        {
+            self.client_secret = None;
+        }
+    }
+
+    pub fn clear_native_auth(&mut self) {
+        if let Some(map) = self.original.as_object_mut() {
+            for key in [
+                "headers",
+                "http_headers",
+                "env_http_headers",
+                "bearer_token_env_var",
+                "oauth",
+                "auth",
+            ] {
+                map.remove(key);
+            }
+        }
     }
 
     pub fn has_credentials(&self) -> bool {
@@ -225,7 +268,7 @@ impl Connection {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Binding {
     pub connection_id: String,
@@ -262,9 +305,31 @@ pub struct Change {
     #[serde(default)]
     pub previous_binding: Option<Binding>,
     #[serde(default)]
+    pub entry_version: Option<(i64, i64)>,
+    #[serde(default)]
     pub restore_unmanaged: bool,
     pub before: Option<Value>,
     pub after: Option<Value>,
+}
+
+impl Change {
+    pub fn kind(&self) -> &str {
+        match self.action.as_str() {
+            "upsert" if self.before.is_none() => "add",
+            "upsert" => "update",
+            "remove" if self.before.is_none() => "cleanup",
+            other => other,
+        }
+    }
+
+    pub fn restore_effect(&self) -> &'static str {
+        match (&self.before, &self.after) {
+            (None, None) => "none",
+            (None, Some(_)) => "remove",
+            (Some(_), None) => "add",
+            _ => "update",
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]

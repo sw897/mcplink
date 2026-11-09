@@ -5,10 +5,12 @@ import { Modal } from "./Modal";
 
 export function Editor({
   connection,
+  sharedAgents,
   onClose,
   onDone,
 }: {
   connection?: Connection;
+  sharedAgents: string[];
   onClose: () => void;
   onDone: () => Promise<void>;
 }) {
@@ -29,16 +31,19 @@ export function Editor({
   useEffect(() => {
     if (connection) {
       setPending(true);
-      rpc<{ connection: Connection; definition: Definition }>(
-        "connections.detail",
-        {
-          id: connection.id,
-        },
+      rpc<{ connection?: Connection; definition: Definition }>(
+        connection.detected
+          ? "connections.source_detail"
+          : "connections.detail",
+        connection.detected
+          ? { sourceId: connection.sourceId, sourceName: connection.name }
+          : { id: connection.id },
       )
         .then((result) => {
-          setName(result.connection.name);
-          setTitle(result.connection.title);
-          setAccount(result.connection.accountLabel);
+          const current = result.connection || connection;
+          setName(current.name);
+          setTitle(current.title);
+          setAccount(current.accountLabel);
           setDefinition(result.definition);
           setType(result.definition.url ? "http" : "stdio");
           setUrl(result.definition.url || "");
@@ -52,6 +57,18 @@ export function Editor({
         .finally(() => setPending(false));
     }
   }, [connection]);
+  const origin = (address: string) => {
+    try {
+      return new URL(address).origin;
+    } catch {
+      return address;
+    }
+  };
+  const originChanged =
+    type === "http" &&
+    !!definition?.url &&
+    !!url &&
+    origin(definition.url) !== origin(url);
   const save = async (event: React.FormEvent) => {
     event.preventDefault();
     setPending(true);
@@ -83,9 +100,11 @@ export function Editor({
         next.cwd = cwd || undefined;
         next.env = JSON.parse(environment);
       } else {
-        next.args = [];
-        next.env = {};
-        next.cwd = undefined;
+        if (definition?.command) {
+          next.args = [];
+          next.env = {};
+          next.cwd = undefined;
+        }
         next.headers = JSON.parse(customHeaders);
       }
       for (const map of [next.env, next.headers]) {
@@ -107,7 +126,9 @@ export function Editor({
         next.oauth = false;
       }
       await rpc("connections.save", {
-        id: connection?.id,
+        ...(connection?.detected
+          ? { sourceId: connection.sourceId, sourceName: connection.name }
+          : { id: connection?.id }),
         name,
         title: title || name,
         accountLabel: account || "用户标签",
@@ -122,135 +143,161 @@ export function Editor({
   };
   return (
     <Modal
-      title={connection ? "编辑服务连接" : "添加 MCP 服务"}
+      title={
+        connection?.detected
+          ? "编辑并纳入托管"
+          : connection
+            ? "编辑服务连接"
+            : "添加 MCP 服务"
+      }
       onClose={onClose}
     >
       <form className="modal-body" onSubmit={(event) => void save(event)}>
-        <div className="form-grid">
-          <label className="field">
-            <span>显示名称</span>
-            <input
-              value={title}
-              onChange={(event) => setTitle(event.target.value)}
-              placeholder="例如 腾讯文档 · 工作账号"
-            />
-          </label>
-          <label className="field">
-            <span>接入名称</span>
-            <input
-              required
-              pattern={"[A-Za-z0-9_\\-]{1,80}"}
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              placeholder="tencent_docs"
-            />
-          </label>
-        </div>
-        <label className="field">
-          <span>服务类型</span>
-          <select
-            value={type}
-            onChange={(event) => setType(event.target.value)}
-          >
-            <option value="http">HTTP MCP</option>
-            <option value="stdio">本地进程 · STDIO</option>
-          </select>
-        </label>
-        {type === "http" ? (
-          <>
-            <label className="field">
-              <span>MCP 地址</span>
-              <input
-                required
-                value={url}
-                onChange={(event) => setUrl(event.target.value)}
-                placeholder="https://example.com/mcp"
-              />
-            </label>
-            <label className="field">
-              <span>Authorization 值</span>
-              <input
-                type="password"
-                autoComplete="off"
-                value={token}
-                onChange={(event) => setToken(event.target.value)}
-                placeholder={
-                  connection
-                    ? "留空保留现有认证"
-                    : "免登录服务可留空，按服务要求填写完整值"
-                }
-              />
-            </label>
-            <label className="field">
-              <span>账号标签</span>
-              <input
-                value={account}
-                onChange={(event) => setAccount(event.target.value)}
-                placeholder="工作账号（用于本机识别）"
-              />
-            </label>
-          </>
-        ) : (
-          <>
-            <label className="field">
-              <span>启动命令</span>
-              <input
-                required
-                value={command}
-                onChange={(event) => setCommand(event.target.value)}
-                placeholder="npx 或可执行文件完整路径"
-              />
-            </label>
-            <label className="field">
-              <span>启动参数，每行一个。编号标记保留对应的已存参数。</span>
-              <textarea
-                value={args}
-                onChange={(event) => setArgs(event.target.value)}
-                placeholder={
-                  "-y\n@modelcontextprotocol/server-filesystem\n/path/to/folder"
-                }
-                rows={4}
-              />
-            </label>
-          </>
+        {connection?.detected && (
+          <p className="field-help">
+            保存后由 mcplink 托管此连接。原客户端配置保留在原处。
+          </p>
         )}
-        <details className="oauth-option">
-          <summary>更多连接设置</summary>
-          {type === "stdio" ? (
+        <fieldset
+          className="editor-fields"
+          disabled={pending || (!!connection && !definition)}
+        >
+          <div className="form-grid">
+            <label className="field">
+              <span>显示名称</span>
+              <input
+                value={title}
+                onChange={(event) => setTitle(event.target.value)}
+                placeholder="例如 腾讯文档 · 工作账号"
+              />
+            </label>
+            <label className="field">
+              <span>接入名称</span>
+              <input
+                required
+                pattern={"[A-Za-z0-9_\\-]{1,80}"}
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                placeholder="tencent_docs"
+              />
+            </label>
+          </div>
+          <label className="field">
+            <span>服务类型</span>
+            <select
+              value={type}
+              onChange={(event) => setType(event.target.value)}
+            >
+              <option value="http">HTTP MCP</option>
+              <option value="stdio">本地进程 · STDIO</option>
+            </select>
+          </label>
+          {type === "http" ? (
             <>
               <label className="field">
-                <span>工作目录</span>
+                <span>MCP 地址</span>
                 <input
-                  value={cwd}
-                  onChange={(e) => setCwd(e.target.value)}
-                  placeholder="可留空"
+                  required
+                  value={url}
+                  onChange={(event) => setUrl(event.target.value)}
+                  placeholder="https://example.com/mcp"
+                />
+              </label>
+              {originChanged && (
+                <div className="warning-banner" role="status">
+                  保存后连接将暂停，旧地址的认证不会发送到新地址。请在账号页设置新凭据，或确认地址后重新连接。
+                  {sharedAgents.length > 0 && (
+                    <p>受影响的共享 Agent · {sharedAgents.join("、")}</p>
+                  )}
+                </div>
+              )}
+              <label className="field">
+                <span>Authorization 值</span>
+                <input
+                  type="password"
+                  autoComplete="off"
+                  value={token}
+                  onChange={(event) => setToken(event.target.value)}
+                  placeholder={
+                    connection
+                      ? originChanged
+                        ? "新地址的认证值"
+                        : "留空保留现有认证"
+                      : "免登录服务可留空，按服务要求填写完整值"
+                  }
                 />
               </label>
               <label className="field">
-                <span>环境变量 · JSON</span>
-                <textarea
-                  rows={4}
-                  value={environment}
-                  onChange={(e) => setEnvironment(e.target.value)}
-                  spellCheck={false}
+                <span>账号标签</span>
+                <input
+                  value={account}
+                  onChange={(event) => setAccount(event.target.value)}
+                  placeholder="工作账号（用于本机识别）"
                 />
               </label>
             </>
           ) : (
-            <label className="field">
-              <span>自定义请求头 · JSON</span>
-              <textarea
-                rows={4}
-                value={customHeaders}
-                onChange={(e) => setCustomHeaders(e.target.value)}
-                spellCheck={false}
-              />
-            </label>
+            <>
+              <label className="field">
+                <span>启动命令</span>
+                <input
+                  required
+                  value={command}
+                  onChange={(event) => setCommand(event.target.value)}
+                  placeholder="npx 或可执行文件完整路径"
+                />
+              </label>
+              <label className="field">
+                <span>启动参数，每行一个。编号标记保留对应的已存参数。</span>
+                <textarea
+                  value={args}
+                  onChange={(event) => setArgs(event.target.value)}
+                  placeholder={
+                    "-y\n@modelcontextprotocol/server-filesystem\n/path/to/folder"
+                  }
+                  rows={4}
+                />
+              </label>
+            </>
           )}
-          <p className="field-help">
-            •••••••• 表示保留已存值；变量引用可使用 $&#123;env:NAME&#125;。
-          </p>
-        </details>
+          <details className="oauth-option">
+            <summary>更多连接设置</summary>
+            {type === "stdio" ? (
+              <>
+                <label className="field">
+                  <span>工作目录</span>
+                  <input
+                    value={cwd}
+                    onChange={(e) => setCwd(e.target.value)}
+                    placeholder="可留空"
+                  />
+                </label>
+                <label className="field">
+                  <span>环境变量 · JSON</span>
+                  <textarea
+                    rows={4}
+                    value={environment}
+                    onChange={(e) => setEnvironment(e.target.value)}
+                    spellCheck={false}
+                  />
+                </label>
+              </>
+            ) : (
+              <label className="field">
+                <span>自定义请求头 · JSON</span>
+                <textarea
+                  rows={4}
+                  value={customHeaders}
+                  onChange={(e) => setCustomHeaders(e.target.value)}
+                  spellCheck={false}
+                />
+              </label>
+            )}
+            <p className="field-help">
+              •••••••• 表示保留已存值；变量引用可使用 $&#123;env:NAME&#125;。
+            </p>
+          </details>
+        </fieldset>
         {error && (
           <div className="warning-banner" role="alert">
             {error}
@@ -264,7 +311,8 @@ export function Editor({
             className="button primary"
             disabled={pending || (!!connection && !definition)}
           >
-            {pending && <Loader2 className="spin" size={15} />}保存连接
+            {pending && <Loader2 className="spin" size={15} />}
+            {connection?.detected ? "保存并纳入托管" : "保存连接"}
           </button>
         </footer>
       </form>

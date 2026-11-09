@@ -486,6 +486,80 @@ h1 {
   color: #616b5a;
   font-size: 10px;
 }
+.density-toggle {
+  margin-left: auto;
+}
+.density-toggle[aria-pressed="true"] {
+  border-color: #85aa99;
+  background: #eef5ef;
+}
+.compact.service-list {
+  gap: 6px;
+}
+.compact .service-card {
+  display: grid;
+  grid-template-columns:
+    16px minmax(110px, 1fr) minmax(95px, 1fr)
+    auto auto 24px;
+  grid-template-areas: "select name agents status action more";
+  align-items: center;
+  gap: 10px;
+  min-height: 56px;
+  padding: 9px 14px;
+}
+.compact .service-card-heading,
+.compact .service-card-footer {
+  display: contents;
+}
+.compact .service-card-heading > input {
+  grid-area: select;
+}
+.compact .service-name {
+  grid-area: name;
+}
+.compact .service-name small,
+.compact .service-name em,
+.compact .checked-at {
+  display: none;
+}
+.compact .linked-agents {
+  grid-area: agents;
+  gap: 4px;
+}
+.compact .service-health {
+  grid-area: status;
+}
+.compact .service-card-footer > button {
+  grid-area: action;
+}
+.compact .service-card-heading > .icon {
+  grid-area: more;
+}
+.compact .service-icon {
+  width: 26px;
+  height: 30px;
+}
+.editor-fields {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.field-changes {
+  padding-left: 20px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.field-changes:empty {
+  display: none;
+}
+.source-path {
+  overflow-wrap: anywhere;
+  font-size: 11px;
+}
+.history-row > div {
+  min-width: 0;
+}
 .service-list > .empty {
   border: 1px dashed #dce4d5;
   border-radius: 10px;
@@ -1414,6 +1488,15 @@ dd {
   color: #526d3b;
   line-height: 1.6;
   font-size: 12px;
+}
+.modal > .toast {
+  position: static;
+  width: 100%;
+  max-width: none;
+  flex: 0 0 auto;
+  padding: 7px 20px;
+  border-radius: 0;
+  box-shadow: none;
 }
 .toast.error {
   background: #fff9ef;

@@ -74,8 +74,8 @@ export function Modal({
           <X size={19} />
         </button>
       </header>
-      {children}
       {React.useContext(ModalNotice)}
+      {children}
     </dialog>
   );
 }

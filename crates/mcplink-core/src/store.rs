@@ -25,6 +25,9 @@ impl Store {
             CREATE TABLE IF NOT EXISTS settings(name TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, source_id TEXT NOT NULL, connection_id TEXT NOT NULL, name TEXT NOT NULL, status TEXT NOT NULL, credential_ref TEXT NOT NULL, backup TEXT, created_at INTEGER NOT NULL, error TEXT);
             CREATE INDEX IF NOT EXISTS pending_operations ON operations(status) WHERE status='pending';
+            CREATE INDEX IF NOT EXISTS operations_by_entry ON operations(source_id,name);
+            CREATE TABLE IF NOT EXISTS entry_ownership(source_id TEXT NOT NULL,name TEXT NOT NULL,generation INTEGER NOT NULL,history_floor INTEGER NOT NULL,PRIMARY KEY(source_id,name));
+            CREATE TABLE IF NOT EXISTS operation_details(id TEXT PRIMARY KEY REFERENCES operations(id),kind TEXT NOT NULL,restore_effect TEXT NOT NULL);
             PRAGMA user_version=1;")?;
         Ok(Self { db: Mutex::new(db) })
     }
@@ -93,11 +96,45 @@ impl Store {
         Ok(())
     }
 
+    pub fn save_bound_connection(&self, connection: &Connection, binding: &Binding) -> Result<()> {
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        mark_ownership(&tx, &binding.source_id, &binding.name)?;
+        tx.execute(
+            "INSERT INTO connections(id, document) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET document=excluded.document",
+            params![connection.id, serde_json::to_string(connection)?],
+        )?;
+        let updated = tx.execute(
+            "INSERT INTO bindings(connection_id,source_id,name,document) VALUES(?1,?2,?3,?4)
+             ON CONFLICT(source_id,name) DO UPDATE SET document=excluded.document WHERE bindings.connection_id=excluded.connection_id",
+            params![
+                binding.connection_id,
+                binding.source_id,
+                binding.name,
+                serde_json::to_string(binding)?
+            ],
+        )?;
+        anyhow::ensure!(updated == 1, "绑定已由其他连接接管");
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn delete_connection(&self, id: &str) -> Result<()> {
-        self.db
-            .lock()
-            .unwrap()
-            .execute("DELETE FROM connections WHERE id=?1", [id])?;
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        {
+            let mut bindings =
+                tx.prepare("SELECT source_id,name FROM bindings WHERE connection_id=?1")?;
+            let rows = bindings.query_map([id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (source, name) = row?;
+                mark_ownership(&tx, &source, &name)?;
+            }
+        }
+        tx.execute("DELETE FROM connections WHERE id=?1", [id])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -109,7 +146,48 @@ impl Store {
     }
 
     pub fn bind(&self, value: &Binding) -> Result<()> {
-        self.db.lock().unwrap().execute("INSERT INTO bindings(connection_id,source_id,name,document) VALUES(?1,?2,?3,?4) ON CONFLICT(source_id,name) DO UPDATE SET connection_id=excluded.connection_id, document=excluded.document",params![value.connection_id,value.source_id,value.name,serde_json::to_string(value)?])?;
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        mark_ownership(&tx, &value.source_id, &value.name)?;
+        tx.execute("INSERT INTO bindings(connection_id,source_id,name,document) VALUES(?1,?2,?3,?4) ON CONFLICT(source_id,name) DO UPDATE SET connection_id=excluded.connection_id, document=excluded.document",params![value.connection_id,value.source_id,value.name,serde_json::to_string(value)?])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn detach(&self, id: &str, source: &str, name: &str) -> Result<()> {
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        let removed = tx.execute(
+            "DELETE FROM bindings WHERE source_id=?1 AND name=?2 AND connection_id=?3",
+            params![source, name, id],
+        )?;
+        anyhow::ensure!(removed == 1, "绑定已变化，请刷新后重试");
+        mark_ownership(&tx, source, name)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn entry_version(&self, source: &str, name: &str) -> Result<(i64, i64)> {
+        Ok(self.db.lock().unwrap().query_row("SELECT COALESCE((SELECT generation FROM entry_ownership WHERE source_id=?1 AND name=?2),0), COALESCE(MAX(rowid),0) FROM operations WHERE source_id=?1 AND name=?2", params![source,name], |r| Ok((r.get(0)?,r.get(1)?)))?)
+    }
+
+    pub fn can_restore(&self, id: &str) -> Result<bool> {
+        // A completed undo cancels its original operation. An undo of an older
+        // operation still supersedes the requested record (including redo).
+        Ok(self.db.lock().unwrap().query_row(
+            "SELECT op.rowid > COALESCE(owner.history_floor,0) AND NOT EXISTS (
+                SELECT 1 FROM operations later LEFT JOIN operations undone ON later.plan_id='restore/'||undone.id
+                WHERE later.source_id=op.source_id AND later.name=op.name AND later.rowid>op.rowid
+                AND later.status IN ('applied','pending','conflict') AND (undone.rowid IS NULL OR undone.rowid<=op.rowid))
+             FROM operations op LEFT JOIN entry_ownership owner ON owner.source_id=op.source_id AND owner.name=op.name
+             WHERE op.id=?1", [id], |r| r.get(0))?)
+    }
+
+    pub fn cache_operation_details(&self, change: &crate::model::Change) -> Result<()> {
+        self.db.lock().unwrap().execute(
+            "INSERT OR IGNORE INTO operation_details VALUES(?1,?2,?3)",
+            params![change.id, change.kind(), change.restore_effect()],
+        )?;
         Ok(())
     }
 
@@ -152,7 +230,14 @@ impl Store {
         reference: &str,
         backup: &str,
     ) -> Result<()> {
-        self.db.lock().unwrap().execute("INSERT INTO operations(id,plan_id,source_id,connection_id,name,status,credential_ref,backup,created_at) VALUES(?1,?2,?3,?4,?5,'pending',?6,?7,?8)",params![change.id,plan,change.source_id,change.connection_id,change.name,reference,backup,now() as i64])?;
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        tx.execute("INSERT INTO operations(id,plan_id,source_id,connection_id,name,status,credential_ref,backup,created_at) VALUES(?1,?2,?3,?4,?5,'pending',?6,?7,?8)",params![change.id,plan,change.source_id,change.connection_id,change.name,reference,backup,now() as i64])?;
+        tx.execute(
+            "INSERT INTO operation_details VALUES(?1,?2,?3)",
+            params![change.id, change.kind(), change.restore_effect()],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -197,12 +282,13 @@ impl Store {
 
     pub fn history_page(&self, before: Option<i64>, limit: u32) -> Result<Vec<Value>> {
         let db = self.db.lock().unwrap();
-        let mut statement = db.prepare("SELECT rowid,id,plan_id,source_id,connection_id,name,status,created_at,error
-            FROM operations WHERE rowid < COALESCE(?1,9223372036854775807) ORDER BY rowid DESC LIMIT ?2")?;
+        let mut statement = db.prepare("SELECT op.rowid,op.id,plan_id,source_id,connection_id,name,status,created_at,error,d.kind,d.restore_effect
+            FROM operations op LEFT JOIN operation_details d ON d.id=op.id
+            WHERE op.rowid < COALESCE(?1,9223372036854775807) ORDER BY op.rowid DESC LIMIT ?2")?;
         let rows = statement.query_map(params![before, limit], |r| Ok(json!({
             "cursor":r.get::<_,i64>(0)?, "id":r.get::<_,String>(1)?, "planId":r.get::<_,String>(2)?,
             "sourceId":r.get::<_,String>(3)?, "connectionId":r.get::<_,String>(4)?, "name":r.get::<_,String>(5)?,
-            "status":r.get::<_,String>(6)?, "createdAt":r.get::<_,i64>(7)?, "error":r.get::<_,Option<String>>(8)?
+            "status":r.get::<_,String>(6)?, "createdAt":r.get::<_,i64>(7)?, "error":r.get::<_,Option<String>>(8)?, "kind":r.get::<_,Option<String>>(9)?, "restoreEffect":r.get::<_,Option<String>>(10)?
         })))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -214,6 +300,16 @@ impl Store {
             .query_map([], operation_row)?
             .collect::<rusqlite::Result<_>>()?)
     }
+}
+
+fn mark_ownership(tx: &rusqlite::Transaction<'_>, source: &str, name: &str) -> Result<()> {
+    let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM operations WHERE source_id=?1 AND name=?2 AND status='pending')", params![source,name], |r| r.get(0))?;
+    anyhow::ensure!(!pending, "此条目有待核对的配置写入");
+    tx.execute("INSERT INTO entry_ownership(source_id,name,generation,history_floor)
+        SELECT ?1,?2,1,COALESCE(MAX(rowid),0) FROM operations WHERE source_id=?1 AND name=?2
+        ON CONFLICT(source_id,name) DO UPDATE SET generation=generation+1,history_floor=excluded.history_floor",
+        params![source,name])?;
+    Ok(())
 }
 
 fn operation_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {

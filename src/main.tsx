@@ -30,6 +30,10 @@ import {
 import {
   Agent,
   agents,
+  Binding,
+  Change,
+  changeLabel,
+  restoreLabel,
   Json,
   Connection,
   Operation,
@@ -43,10 +47,12 @@ import {
 } from "./contracts";
 import { Status, ModalNotice, Modal } from "./Modal";
 import { SourceDialog } from "./SourceDialog";
-import { ConnectDialog } from "./ConnectDialog";
+import { ConnectDialog, ChangeDiff } from "./ConnectDialog";
 import { Editor, CredentialDialog } from "./ConnectionEditor";
 import "./style.css";
 
+const toolKey = (connection: Connection) =>
+  JSON.stringify([connection.id, connection.revision, connection.checkedAt]);
 function App() {
   const [page, setPage] = useState<"services" | "accounts" | "agents">(
     "services",
@@ -57,6 +63,9 @@ function App() {
   const [agentOnlyConfigured, setAgentOnlyConfigured] = useState(false);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all");
+  const [compact, setCompact] = useState(
+    () => localStorage.getItem("mcplink.serviceLayout") !== "cards",
+  );
   const [selected, setSelected] = useState<string[]>([]);
   const [dialog, setDialog] = useState<Dialog>();
   const [busy, setBusy] = useState("");
@@ -88,19 +97,35 @@ function App() {
           "后台版本或支持名单与当前桌面不一致，请退出并重新启动 mcplink。",
         );
       setData(next);
+      const validKeys = new Set(
+        next.connections
+          .filter((c) => c.active && c.status === "ready")
+          .map(toolKey),
+      );
+      setTools((previous) =>
+        Object.fromEntries(
+          Object.entries(previous).filter(([key]) => validKeys.has(key)),
+        ),
+      );
       void invoke<DesktopStatus>("desktop_status")
         .then(setDesktop)
         .catch((error) => {
           setNotice({ text: String(error), error: true });
         });
-      setDialog((previous) =>
-        previous?.kind === "addSource" &&
-        !next.agents.some(
-          (client) => client.id === previous.agent && client.configurable,
-        )
+      setDialog((previous) => {
+        if (previous?.kind === "detail") {
+          const connection = next.connections.find(
+            (c) => c.id === previous.connection.id,
+          );
+          return connection ? { ...previous, connection } : undefined;
+        }
+        return previous?.kind === "addSource" &&
+          !next.agents.some(
+            (client) => client.id === previous.agent && client.configurable,
+          )
           ? undefined
-          : previous,
-      );
+          : previous;
+      });
       setSelected((previous) =>
         previous.filter((id) =>
           next.connections.some((connection) => connection.id === id),
@@ -153,6 +178,7 @@ function App() {
     params: Json = {},
   ) => {
     setBusy(label);
+    setNotice(undefined);
     try {
       const result = await rpc<T>(method, params);
       await load();
@@ -167,28 +193,37 @@ function App() {
       setBusy("");
     }
   };
-  const manage = async (connection: Connection) =>
-    connection.detected
-      ? action<Connection>("读取连接", "connections.import", {
-          sourceId: connection.sourceId,
-          name: connection.name,
-        })
-      : connection;
-  const connect = (connections: Connection[], targetAgent?: Agent) => {
-    setDialog({ kind: "connect", connections, targetAgent });
+  const connect = (
+    connections: Connection[],
+    targetAgent?: Agent,
+    binding?: Binding,
+  ) => {
+    setDialog(
+      connections.some((c) => c.detected)
+        ? {
+            kind: "adopt",
+            intent: "connect",
+            connections,
+            targetAgent,
+            binding,
+          }
+        : { kind: "connect", connections, targetAgent, binding },
+    );
   };
   const probe = async (connection: Connection) => {
-    const managed = await manage(connection);
-    if (!managed) return;
+    if (connection.detected) {
+      setDialog({ kind: "adopt", intent: "probe", connections: [connection] });
+      return;
+    }
     const result = await action<{
       tools: Tool[];
       connection: Connection;
       error?: unknown;
-    }>("检查连接", "connections.probe", { id: managed.id });
+    }>("检查连接", "connections.probe", { id: connection.id });
     if (result) {
       setTools((previous) => ({
         ...previous,
-        [managed.id]: result.tools || [],
+        [toolKey(result.connection)]: result.tools || [],
       }));
       setNotice({
         text:
@@ -200,6 +235,12 @@ function App() {
       setDialog({ kind: "detail", connection: result.connection });
     }
   };
+  const visibleTools =
+    dialog?.kind === "detail" &&
+    dialog.connection.active &&
+    dialog.connection.status === "ready"
+      ? tools[toolKey(dialog.connection)]
+      : undefined;
   const ownBindings = (connection: Connection) =>
     data?.bindings.filter(
       (binding) =>
@@ -390,10 +431,12 @@ function App() {
           </button>
           <button
             className="utility"
-            onClick={() => {
+            onClick={async () => {
               setOlderHistory([]);
               setHistoryEnd(false);
               setDialog({ kind: "history" });
+              if (data?.history.some((op) => !op.kind))
+                await action("读取历史", "changes.history");
             }}
           >
             <History size={16} />
@@ -536,6 +579,19 @@ function App() {
                       </button>
                     ))}
                   </div>
+                  <button
+                    className="button small density-toggle"
+                    aria-pressed={compact}
+                    onClick={() => {
+                      localStorage.setItem(
+                        "mcplink.serviceLayout",
+                        compact ? "cards" : "compact",
+                      );
+                      setCompact(!compact);
+                    }}
+                  >
+                    紧凑列表
+                  </button>
                   <label className="search">
                     <Search size={16} />
                     <input
@@ -571,7 +627,10 @@ function App() {
                     </button>
                   </div>
                 )}
-                <section className="service-list" aria-label="MCP 服务列表">
+                <section
+                  className={compact ? "service-list compact" : "service-list"}
+                  aria-label="MCP 服务列表"
+                >
                   {list.length > 0 && (
                     <label className="service-list-heading">
                       <input
@@ -686,6 +745,8 @@ function App() {
                                         ? ownBindings(connection).some(
                                             (binding) =>
                                               binding.agent === client.id &&
+                                              binding.enabled &&
+                                              !binding.missing &&
                                               binding.mode === "shared",
                                           )
                                           ? "共享"
@@ -772,7 +833,7 @@ function App() {
                           <dt>认证维护</dt>
                           <dd>
                             {connection.authKind === "none"
-                              ? "无需认证"
+                              ? "本机未配置独立凭据"
                               : connection.detected
                                 ? "原客户端 / 服务"
                                 : connection.authKind === "oauth"
@@ -810,17 +871,24 @@ function App() {
                         </button>
                         <button
                           className="button small"
-                          onClick={async () => {
-                            const managed = await manage(connection);
-                            if (managed)
-                              setDialog({
-                                kind:
-                                  managed.transport === "http"
-                                    ? "credential"
-                                    : "editor",
-                                connection: managed,
-                              });
-                          }}
+                          onClick={() =>
+                            setDialog(
+                              connection.detected &&
+                                connection.transport === "http"
+                                ? {
+                                    kind: "adopt",
+                                    intent: "credential",
+                                    connections: [connection],
+                                  }
+                                : {
+                                    kind:
+                                      connection.transport === "http"
+                                        ? "credential"
+                                        : "editor",
+                                    connection,
+                                  },
+                            )
+                          }
                         >
                           {connection.transport === "stdio"
                             ? "编辑启动配置"
@@ -828,6 +896,22 @@ function App() {
                               ? "设置认证"
                               : "更新认证"}
                         </button>
+                        {!connection.active && !connection.detected && (
+                          <button
+                            className="button small"
+                            onClick={() =>
+                              setDialog({
+                                kind: "confirm",
+                                title: "重新连接",
+                                message: `重新启用 ${connection.title}（${connection.endpoint}）后，已共享的 Agent 可再次请求该服务。`,
+                                method: "connections.reconnect",
+                                params: { id: connection.id },
+                              })
+                            }
+                          >
+                            重新连接
+                          </button>
+                        )}
                         {!connection.detected &&
                           connection.active &&
                           connection.authKind !== "none" && (
@@ -1171,20 +1255,35 @@ function App() {
                 <div className="history-row" key={operation.id}>
                   <Clock3 size={17} />
                   <div>
-                    <strong>{operation.name}</strong>
-                    <p>
-                      {
-                        data.sources.find(
-                          (source) => source.id === operation.sourceId,
-                        )?.agent
-                      }{" "}
-                      · {time(operation.createdAt)}
-                    </p>
+                    <strong>
+                      {changeLabel(operation.kind)} · {operation.name}
+                    </strong>
+                    {data.sources
+                      .filter((s) => s.id === operation.sourceId)
+                      .map((s) => (
+                        <p key={s.id}>
+                          {agentLabel(s.agent)} · {s.label} ·{" "}
+                          {time(operation.createdAt)}
+                          <br />
+                          <code className="source-path">{s.path}</code>
+                        </p>
+                      ))}
+                    {operation.status === "applied" && (
+                      <small>{restoreLabel(operation.restoreEffect)}</small>
+                    )}
                     {operation.error && (
                       <small className="inline-error">{operation.error}</small>
                     )}
                   </div>
-                  <Status value={operation.status} />
+                  <Status
+                    value={operation.status}
+                    label={
+                      operation.status === "applied" &&
+                      operation.kind === "cleanup"
+                        ? "已清理"
+                        : undefined
+                    }
+                  />
                   {operation.status === "pending" && (
                     <button
                       className="button small"
@@ -1206,36 +1305,37 @@ function App() {
                       重新核对
                     </button>
                   )}
-                  {["applied", "failed"].includes(operation.status) && (
-                    <button
-                      className="button small"
-                      disabled={
-                        !!busy ||
-                        !isInstalled(
-                          data.sources.find(
-                            (source) => source.id === operation.sourceId,
-                          )?.agent,
-                        )
-                      }
-                      onClick={async () => {
-                        const result = await action(
-                          "恢复配置",
-                          "changes.restore",
-                          { operationId: operation.id },
-                        );
-                        if (result) {
-                          setOlderHistory([]);
-                          setHistoryEnd(false);
+                  {["applied", "failed"].includes(operation.status) &&
+                    operation.restoreEffect !== "none" && (
+                      <button
+                        className="button small"
+                        disabled={
+                          !!busy ||
+                          !isInstalled(
+                            data.sources.find(
+                              (source) => source.id === operation.sourceId,
+                            )?.agent,
+                          )
                         }
-                        if (result)
-                          setNotice({
-                            text: "配置已恢复，请在对应 Agent 重新加载",
+                        onClick={async () => {
+                          const result = await action<{
+                            change?: Change;
+                            effect: string;
+                          }>("预览恢复", "changes.preview_restore", {
+                            operationId: operation.id,
                           });
-                      }}
-                    >
-                      {operation.status === "failed" ? "核对并恢复" : "恢复"}
-                    </button>
-                  )}
+                          if (result?.change)
+                            setDialog({
+                              kind: "restore",
+                              operation,
+                              change: result.change,
+                              effect: result.effect,
+                            });
+                        }}
+                      >
+                        预览恢复
+                      </button>
+                    )}
                 </div>
               ))
             ) : (
@@ -1431,14 +1531,43 @@ function App() {
               <button
                 className="button"
                 disabled={!!busy}
-                onClick={async () => {
-                  const managed = await manage(dialog.connection);
-                  if (managed)
-                    setDialog({ kind: "editor", connection: managed });
-                }}
+                onClick={() =>
+                  setDialog({ kind: "editor", connection: dialog.connection })
+                }
               >
-                编辑
+                {dialog.connection.detected ? "编辑并纳入托管" : "编辑"}
               </button>
+              {dialog.connection.detected && (
+                <button
+                  className="button"
+                  disabled={!!busy}
+                  onClick={() =>
+                    setDialog({
+                      kind: "adopt",
+                      intent: "detail",
+                      connections: [dialog.connection],
+                    })
+                  }
+                >
+                  纳入托管
+                </button>
+              )}
+              {!dialog.connection.active && (
+                <button
+                  className="button"
+                  onClick={() =>
+                    setDialog({
+                      kind: "confirm",
+                      title: "重新连接",
+                      message: `重新启用 ${dialog.connection.title}（${dialog.connection.endpoint}）后，已共享的 Agent 可再次请求该服务。`,
+                      method: "connections.reconnect",
+                      params: { id: dialog.connection.id },
+                    })
+                  }
+                >
+                  重新连接
+                </button>
+              )}
             </div>
             <h3 className="section-label">Agent 接入</h3>
             {ownBindings(dialog.connection).map((binding) => (
@@ -1459,13 +1588,15 @@ function App() {
                       ? "通过 mcplink 共享账号"
                       : "直连"}{" "}
                     · {binding.enabled ? "启用" : "停用"}
-                    {binding.missing
-                      ? " · 来源已移除，可清理绑定"
-                      : binding.changed
-                        ? " · 外部配置有变化"
-                        : binding.needsUpdate
-                          ? " · 待同步更新"
-                          : ""}
+                    {binding.unavailable
+                      ? " · 来源不可读取，可解除绑定"
+                      : binding.missing
+                        ? " · 来源已移除，可清理绑定"
+                        : binding.changed
+                          ? " · 外部配置有变化"
+                          : binding.needsUpdate
+                            ? " · 待同步更新"
+                            : ""}
                     {binding.changed &&
                       !binding.missing &&
                       binding.mode === "direct" && (
@@ -1497,24 +1628,45 @@ function App() {
                 </div>
                 <button
                   className="text-button"
-                  disabled={!!busy}
-                  onClick={async () => {
-                    const managed = await manage(dialog.connection);
-                    if (managed)
-                      setDialog({ kind: "connect", connections: [managed] });
-                  }}
+                  disabled={
+                    !!busy ||
+                    binding.unavailable ||
+                    data?.sources.find((s) => s.id === binding.sourceId)
+                      ?.readOnly
+                  }
+                  onClick={() =>
+                    connect([dialog.connection], binding.agent, binding)
+                  }
                 >
                   管理
                 </button>
+                {!dialog.connection.detected && (
+                  <button
+                    className="text-button"
+                    disabled={!!busy}
+                    onClick={() =>
+                      setDialog({
+                        kind: "confirm",
+                        title: "解除托管绑定",
+                        message: `保留 ${agentLabel(binding.agent)} 配置中的 ${binding.name}，仅解除 mcplink 的绑定记录。${binding.mode === "shared" ? "原配置仍引用此连接，删除连接后该入口将失效。" : ""}`,
+                        method: "connections.detach",
+                        params: {
+                          id: dialog.connection.id,
+                          sourceId: binding.sourceId,
+                          name: binding.name,
+                        },
+                      })
+                    }
+                  >
+                    解除绑定
+                  </button>
+                )}
               </div>
             ))}
             <h3 className="section-label">
-              实际工具{" "}
-              {tools[dialog.connection.id]
-                ? `· ${tools[dialog.connection.id].length}`
-                : ""}
+              实际工具 {visibleTools ? `· ${visibleTools.length}` : ""}
             </h3>
-            {tools[dialog.connection.id]?.map((tool) => (
+            {visibleTools?.map((tool) => (
               <details className="tool" key={tool.name}>
                 <summary>
                   <code>{tool.name}</code>
@@ -1524,9 +1676,11 @@ function App() {
                 <pre>{JSON.stringify(tool.inputSchema, null, 2)}</pre>
               </details>
             ))}
-            {!tools[dialog.connection.id] && (
+            {!visibleTools && (
               <p className="muted">
-                点击“检查工具”读取当前服务暴露的工具与参数。
+                {dialog.connection.active
+                  ? "点击“检查工具”读取当前服务暴露的工具与参数。"
+                  : "重新连接并检查后，可查看当前账号的工具。"}
               </p>
             )}
             {!dialog.connection.detected &&
@@ -1547,6 +1701,111 @@ function App() {
                   删除本地连接
                 </button>
               )}
+          </div>
+        </Modal>
+      )}
+      {dialog?.kind === "adopt" && (
+        <Modal title="纳入托管" onClose={() => setDialog(undefined)}>
+          <div className="modal-body">
+            <p>
+              继续前，将下列来源的连接设置和认证保存到
+              mcplink，并与原配置建立绑定。
+            </p>
+            <ul>
+              {dialog.connections
+                .filter((c) => c.detected)
+                .map((c) => (
+                  <li key={c.id}>
+                    {c.title} ·{" "}
+                    {data?.sources.find((s) => s.id === c.sourceId)?.label}
+                  </li>
+                ))}
+            </ul>
+            <footer className="modal-footer">
+              <button
+                className="button"
+                disabled={!!busy}
+                onClick={() => setDialog(undefined)}
+              >
+                取消
+              </button>
+              <button
+                className="button primary"
+                disabled={!!busy}
+                onClick={async () => {
+                  const managed: Connection[] = [];
+                  for (const c of dialog.connections) {
+                    const result = c.detected
+                      ? await action<Connection>(
+                          "纳入托管",
+                          "connections.import",
+                          { sourceId: c.sourceId, name: c.name },
+                        )
+                      : c;
+                    if (!result) return;
+                    managed.push(result);
+                  }
+                  if (dialog.intent === "probe") await probe(managed[0]);
+                  else if (dialog.intent === "credential")
+                    setDialog({ kind: "credential", connection: managed[0] });
+                  else if (dialog.intent === "detail")
+                    setDialog({ kind: "detail", connection: managed[0] });
+                  else connect(managed, dialog.targetAgent, dialog.binding);
+                }}
+              >
+                纳入托管并继续
+              </button>
+            </footer>
+          </div>
+        </Modal>
+      )}
+      {dialog?.kind === "restore" && (
+        <Modal
+          title="核对恢复内容"
+          onClose={() => setDialog({ kind: "history" })}
+        >
+          <div className="modal-body">
+            <h3>
+              {restoreLabel(dialog.effect)} · {dialog.change.name}
+            </h3>
+            <p>
+              {agentLabel(dialog.change.agent)} · {dialog.change.sourceLabel}
+            </p>
+            <code className="source-path">{dialog.change.path}</code>
+            {dialog.change.after && (
+              <p>
+                {dialog.change.mode === "shared"
+                  ? "恢复共享入口"
+                  : "恢复直连配置，凭据可能以明文写入该文件"}
+              </p>
+            )}
+            <ChangeDiff change={dialog.change} />
+            <footer className="modal-footer">
+              <button
+                className="button"
+                onClick={() => setDialog({ kind: "history" })}
+              >
+                返回记录
+              </button>
+              <button
+                className="button primary"
+                disabled={!!busy}
+                onClick={async () => {
+                  if (
+                    await action("恢复配置", "changes.restore", {
+                      operationId: dialog.operation.id,
+                    })
+                  ) {
+                    setOlderHistory([]);
+                    setHistoryEnd(false);
+                    setDialog({ kind: "history" });
+                    setNotice({ text: "配置已恢复，请在对应 Agent 重新加载" });
+                  }
+                }}
+              >
+                确认恢复
+              </button>
+            </footer>
           </div>
         </Modal>
       )}
@@ -1580,7 +1839,7 @@ function App() {
         <ConnectDialog
           connections={dialog.connections}
           targetAgent={dialog.targetAgent}
-          onManage={manage}
+          binding={dialog.binding}
           sources={data?.sources || []}
           clients={localAgents}
           bindings={data?.bindings || []}
@@ -1595,6 +1854,17 @@ function App() {
       {dialog?.kind === "editor" && (
         <Editor
           connection={dialog.connection}
+          sharedAgents={
+            dialog.connection
+              ? [
+                  ...new Set(
+                    ownBindings(dialog.connection)
+                      .filter((b) => b.mode === "shared" && !b.missing)
+                      .map((b) => agentLabel(b.agent)),
+                  ),
+                ]
+              : []
+          }
           onClose={() => setDialog(undefined)}
           onDone={async () => {
             await load();

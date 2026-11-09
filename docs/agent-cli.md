@@ -76,6 +76,8 @@ Cargo 默认将程序放入 `~/.cargo/bin`，该目录需在 PATH 中。也可�
 
 `AGENT` 为 `codex`、`hermes`、`claude`、`opencode`、`zcode`、`deepseek`、`openclaw`、`kimicode`。`ACTION` 为 `upsert`、`disable`、`enable`、`remove`。目标使用来源 ID（如 `hermes:user`），连接使用导入或保存返回的托管 ID。
 
+原生条目已经是本机 mcplink Bridge 时，`connections import` 会关联其指向的已有托管 ID，登记为共享绑定，不另建上游连接或改写原生文件。识别要求绝对路径、标准 Bridge 参数、相同构建和管理数据目录；其他运行环境或未知连接会被拒绝，保留原配置供核对。
+
 Claude Code 支持可写 user，以及显式添加的 local/project 作用域；插件、托管和未明确作用域的其他 JSON 仍只读。OpenCode 仅支持当前 `mcp.servers` JSON/JSONC 来源，空 MCP 配置无需选择版本。参数、覆盖关系、保留格式与转换限制见 [Agent 配置适配](agent-adapters.md)。只读来源不会因以其他 Agent 或路径重复登记而变为可写。
 
 此路径使用 Claude 的原生配置入口和插件目录结构；配置位置与插件格式参照 [Claude MCP 文档](https://code.claude.com/docs/en/mcp) 和 [插件清单文档](https://code.claude.com/docs/en/plugins-reference)。
@@ -198,6 +200,8 @@ connection_id = response["ok"]["id"]
 - `rpc --stdin`：`{"method":"snapshot","params":{}}`。一般不需要使用兼容入口。
 
 ## 接入和恢复
+
+`mcplink connections detach ID --source SOURCE_ID --name ENTRY_NAME` 解除托管绑定并保留原配置文件。修改服务地址的协议、主机或端口后，请重新设置认证，或核对地址后使用 `mcplink connections reconnect ID` 显式恢复访问。仅编辑名称或账号标签会保留连接状态。
 
 先盘点、导入或保存连接；共享接入前完成 `probe`。核对预览中的真实目标路径、动作和接入方式，再按用户授权应用。写入完成后对应 Agent 仍需重新加载 MCP 或开启新会话。
 

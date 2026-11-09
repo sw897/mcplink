@@ -1,6 +1,8 @@
 """Check configuration edits, write recovery and history through the installed CLI."""
 import argparse
 import hashlib
+import http.server
+import threading
 import json
 import os
 from pathlib import Path
@@ -13,7 +15,43 @@ from agent_cli import AgentCli
 from run import BINARY
 
 
+def verify_origin(h):
+    received = []
+    class Endpoint(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            received.append(self.headers.get("Authorization"))
+            self.send_response(403)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    with http.server.ThreadingHTTPServer(("127.0.0.1", 0), Endpoint) as endpoint:
+        threading.Thread(target=endpoint.serve_forever, daemon=True).start()
+        try:
+            connection = h.rpc("connections.save", {"name": "move_origin", "definition": {
+                "url": h.url, "headers": {"Authorization": "synthetic-fixture-authorization"}}})["id"]
+            h.rpc("connections.probe", {"id": connection})
+            h.changes(connection, ["hermes:user"], mode="shared")
+            bridge = h.bridge(connection, "origin-check")
+            assert "result" in bridge.call("tools/list")
+            definition = h.rpc("connections.detail", {"id": connection})["definition"]
+            definition["url"] = f"http://127.0.0.1:{endpoint.server_port}/mcp"
+            result = h.rpc("connections.save", {"id": connection, "name": "move_origin", "definition": definition})
+            assert not result["active"] and "error" in bridge.call("tools/list") and received == []
+            h.cli("connections", "reconnect", connection)
+            assert "error" in bridge.call("tools/list") and received and not any(received)
+            h.rpc("credentials.update", {"id": connection, "value": "synthetic-new-origin"})
+            bridge.call("tools/list")
+            assert received[-1] == "synthetic-new-origin" and "synthetic-fixture-authorization" not in received
+        finally:
+            endpoint.shutdown()
+    h.passed("existing Bridge blocks a changed origin until reconnect and never sends the old header")
+
+
 def verify(h):
+    verify_origin(h)
     native = h.home / ".codex/config.toml"
 
     def save(name, definition, **metadata):
@@ -93,6 +131,43 @@ def verify(h):
     assert not {op["id"] for op in recent}.intersection(op["id"] for op in earlier)
     assert not any("credentialRef" in op or "backup" in op for op in recent + earlier)
     h.passed("history cursor exposes older operations without duplicates or private storage references")
+
+    # Same bytes under a new owner must invalidate both restore and old previews.
+    first_owner = save("replacement", {"url": h.url}, title="First owner")
+    original_op = apply(preview(first_owner))["operationId"]
+    apply(preview(first_owner, "remove"))
+    second_owner = save("replacement", {"url": h.url}, title="Second owner")
+    apply(preview(second_owner))
+    for method in ("changes.preview_restore", "changes.restore"):
+        assert "后续修改" in h.rpc(method, {"operationId": original_op}, error=True)
+    assert entry("replacement")["url"] == h.url
+    assert any(b.get("connectionId") == second_owner for b in h.rpc("snapshot")["bindings"])
+    stale_plan = preview(second_owner, "remove")
+    h.cli("connections", "detach", second_owner, "--source", "codex:user", "--name", "replacement")
+    assert entry("replacement")["url"] == h.url
+    assert h.rpc("changes.apply", {"planId": stale_plan["planId"]})["results"][0]["status"] == "failed"
+    h.passed("same-name replacement keeps the new owner and native entry; detached plans expire")
+
+    absent = next(s for s in h.rpc("snapshot")["sources"] if s["agent"] == "kimicode" and not s["exists"])
+    empty = h.rpc("changes.preview", {"connectionId": second_owner, "targetSourceIds": [absent["id"]], "action": "remove"})
+    assert not empty["changes"] and not h.rpc("changes.apply", {"planId": empty["planId"]})["results"]
+    assert not Path(absent["path"]).exists()
+    h.passed("removing an absent entry never creates a native file")
+
+    auth = save("private_docs", {"url": h.url, "headers": {"Authorization": "synthetic-fixture-authorization"}})
+    apply(preview(auth))
+    h.rpc("credentials.update", {"id": auth, "value": "synthetic-second"})
+    diff = preview(auth)["changes"][0]
+    assert diff["before"] == diff["after"] and diff["fields"] == [{"field": "headers", "key": "Authorization", "kind": "update"}]
+    assert "synthetic-second" not in json.dumps(diff)
+    before = h.rpc("credentials.disconnect", {"id": auth})
+    old = h.cli("connections", "show", auth)["definition"]
+    save("private_docs", old, id=auth, title="Archived")
+    after = h.cli("connections", "show", auth)["connection"]
+    assert not after["active"] and after["status"] == "disconnected" and after["revision"] == before["revision"]
+    h.cli("connections", "reconnect", auth)
+    assert h.cli("connections", "show", auth)["connection"]["active"]
+    h.passed("field diff names rotated secrets without exposing them; rename preserves the disconnected state")
 
     launcher = h.launchers["codex"]
     pinned = h.home / "custom" / launcher.name

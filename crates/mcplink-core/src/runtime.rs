@@ -63,7 +63,7 @@ async fn health(State(state): State<ServerState>, headers: HeaderMap) -> impl In
     (
         StatusCode::OK,
         Json(
-            json!({"application":"mcplink","instance":state.info.instance,"version":env!("CARGO_PKG_VERSION"),"managementApi":12}),
+            json!({"application":"mcplink","instance":state.info.instance,"version":env!("CARGO_PKG_VERSION"),"managementApi":13}),
         ),
     )
 }
@@ -458,6 +458,24 @@ impl Client {
         }
         if matches!(method, "tools.describe" | "tools.call") && self.management_api < 2 {
             bail!("旧后台不支持当前工具调用命令；请退出桌面并停止旧后台，再使用同一构建重试");
+        }
+        if self.management_api < 13
+            && matches!(
+                method,
+                "connections.save"
+                    | "connections.source_detail"
+                    | "connections.detach"
+                    | "connections.reconnect"
+                    | "connections.adopt_source"
+                    | "connections.probe"
+                    | "connections.tools"
+                    | "changes.restore"
+                    | "changes.preview_restore"
+                    | "changes.preview"
+                    | "changes.apply"
+            )
+        {
+            bail!("旧后台不支持当前的连接与恢复保护，请退出并重启后台");
         }
         if self.management_api < 12
             && matches!(
