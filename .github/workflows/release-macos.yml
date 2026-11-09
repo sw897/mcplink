@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing release tag matching the source version (e.g. v0.1.0)
+        description: Existing release tag matching the source version
         required: true
         type: string
 
@@ -68,7 +68,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh release create "$RELEASE_TAG" artifacts/releases/*/*/* --verify-tag --draft --title "mcplink $RELEASE_TAG" --notes-file "docs/releases/$RELEASE_TAG.md"
+        run: gh release create "$RELEASE_TAG" artifacts/releases/*/*/* --verify-tag --draft --title "mcplink $RELEASE_TAG" --notes-file "docs/release-notes.md"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: signed-macos-release

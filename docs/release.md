@@ -9,11 +9,11 @@ npm ci
 npm run release:macos
 ```
 
-入口按序检查版本、运行 Rust 静态检查、重建 sidecar/桌面/DMG、核对包内 CLI/Skill 和真实架构、从 DMG 安装到隔离目录并验证凭据更新、后台恢复和路径迁移，再运行 12 项 CLI 场景。成功后才生成 `artifacts/releases/<版本>/<时间>/`：
+入口按序检查版本、运行 Rust 静态检查、重建 sidecar/桌面/DMG、核对包内 CLI/Skill 和真实架构、从 DMG 安装到隔离目录并验证凭据更新、后台恢复和路径迁移，再运行 CLI 与后台生命周期场景。成功后才生成 `artifacts/releases/<版本>/<时间>/`：
 
 - DMG、保留可执行权限的 app ZIP、含许可声明的 CLI tar.gz。
 - `SHA256SUMS`、包含版本/源码哈希/产物哈希的 `release-manifest.json`。
-- 发布说明、`verification.json`，后者汇总签名和隔离验收结论。
+- 从 `docs/release-notes.md` 复制的发布说明，以及汇总签名和隔离验收结论的 `verification.json`。
 
 包校验只在临时副本中去签名、按相同参数重签，再比较 Mach-O 内容，避免签名区域尺寸造成误报，并拒绝旧 sidecar。原始安装包保持签名不变。隔离环境使用合成原生配置和显式 fixture Vault，不能替代新 macOS 账号或真实钥匙串验收。
 
@@ -57,12 +57,12 @@ npm run release:macos -- --signed
 
 发布前核对待公开的源码、文档和 Git 历史，扫描凭据，避免纳入本机配置、账号验收记录或签名材料。根据两平台 CI 的实际结果记录兼容性；合成测试不能代替 Windows 桌面实机验收。
 
-## 公开预览版
+## 预览包交付
 
-v0.1.0 以 GitHub **Pre-release** 发布，包含 macOS Apple Silicon 的 DMG、App ZIP、独立 CLI，以及 Windows x64 NSIS 安装包。macOS 为 ad-hoc 签名，尚无 Developer ID 和公证；Windows 未签名。预览版不运行要求 Apple 凭据的正式签名工作流，也不把合成测试描述为桌面实机验收。
+预览包可按 GitHub Pre-release 交付 macOS Apple Silicon 的 DMG、App ZIP、独立 CLI，以及 Windows x64 NSIS 安装包。签名和公证状态以实际构建的 `verification.json` 为准。
 
-预览发布使用独立、干净的公开源码检出目录。固定最终提交后执行本地 macOS 发布入口，并等待同一提交的两平台 CI 完成。Windows 安装包从该次成功 CI 获取，解包核对 CLI、桌面程序、许可及编译路径；Tauri 会将桌面 PE 内唯一的 bundle-type 标记从 `UNK` 改为 `NSS`，其余内容应与构建清单一致。
+固定源码提交后，在干净的公开源码检出目录构建，并等待同一提交的两平台 CI 完成。Windows 安装包从对应的成功 CI 获取，核对 CLI、桌面程序、许可及编译路径；Tauri 会将桌面 PE 内唯一的 bundle-type 标记从 `UNK` 改为 `NSS`，其余内容应与构建清单一致。
 
-为两平台产物汇总 `release-manifest.json` 和 `SHA256SUMS`，记录相同的源码提交、逐文件哈希、平台验收范围与签名状态。公开清单只保留必要的版本、源码相对路径和产物元数据，不附测试 home、系统凭据库、机器绝对路径或原始日志。
+为两平台产物汇总 `release-manifest.json` 和 `SHA256SUMS`，记录相同的源码提交、逐文件哈希、平台验收范围与签名状态。公开清单只保留版本、源码相对路径和产物元数据，不附测试 home、系统凭据库、机器绝对路径或原始日志。
 
-核对 tag 与源码版本一致后，先创建 Release 草稿并上传已验证产物；文件名与 README 下载链接一致，检查草稿及校验值后公开为 Pre-release。发布后重新下载附件并核对哈希，确认 tag 指向、Release 状态和下载入口。签名状态不同的后续产物须单独标明来源及校验值，不静默替换已发布文件。
+发布说明统一维护在 `docs/release-notes.md`。核对 tag 与源码构建版本一致后，先创建 Release 草稿并上传已验证产物，检查说明及校验值后发布为 Pre-release。发布后重新下载附件核对哈希，并确认 tag 指向、Release 状态和下载入口。签名状态不同的产物应单独标明来源及校验值。

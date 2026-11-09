@@ -71,7 +71,7 @@ const zip = join(output, `mcplink_${version}_aarch64.app.zip`);
 const cli = join(output, `mcplink_cli_${version}_aarch64-apple-darwin.tar.gz`);
 run("python3", ["scripts/package_release.py", "--app", app, "--zip", zip, "--cli", cli]);
 run("python3", ["tests/e2e/verify_archives.py", "--zip", zip, "--cli", cli, "--record", join(record, "archives"), ...(signed ? ["--require-notarization"] : [])]);
-copyFileSync(`docs/releases/v${version}.md`, join(output, "RELEASE_NOTES.md"));
+copyFileSync("docs/release-notes.md", join(output, "RELEASE_NOTES.md"));
 run("python3", ["scripts/release_manifest.py", "--record", output, "--artifact", dmgCopy, "--artifact", zip, "--artifact", cli]);
 const packageReport = JSON.parse(readFileSync(join(record, "package/package-report.json"), "utf8"));
 const installedReport = JSON.parse(readFileSync(join(record, "installed/report.json"), "utf8"));

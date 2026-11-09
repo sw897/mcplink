@@ -1,87 +1,82 @@
-# mcplink — MCP Manager for AI Agents
+# mcplink: Desktop MCP manager and local gateway
 
 [![CI](https://github.com/sw897/mcplink/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/sw897/mcplink/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.1.0%20preview-blue)](https://github.com/sw897/mcplink/releases/tag/v0.1.0)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-**English · [简体中文](README.zh-CN.md)**
+English · [简体中文](README.zh-CN.md)
 
-mcplink is a local desktop **MCP (Model Context Protocol) manager and gateway**. Inspect MCP servers, manage credentials, and share connections across AI agents from a Tauri desktop app or a JSON CLI. Current source builds support **Codex, Hermes, Claude Code, OpenCode, ZCode, DeepSeek Harness, OpenClaw, and Kimi Code**. Uninstalled clients remain visible with configuration disabled; install the client and refresh to enable it. See [eight-Agent integration](docs/agent-discovery.md) for native formats, shared proxy access, and per-source permissions.
+mcplink is a desktop MCP (Model Context Protocol) manager for people who use multiple AI agents. Discover configured MCP servers, manage connections and account authorization, and connect services to the agents that need them. It supports native direct connections and shared access through a local gateway, subject to each client's configuration support.
 
-本地 MCP 接入管理器：统一查看服务与账号，预览配置变更，并在多个 AI Agent 之间复用连接和托管凭据。
+The desktop app is free and MIT-licensed. Local management requires no mcplink account; upstream MCP services keep their own authentication and authorization requirements.
 
-**v0.1.0 is a preview release for macOS Apple Silicon and Windows x64.** macOS packages are ad-hoc signed and not notarized; the Windows installer is unsigned. See [platform support](#platform-support) before installing.
+[Quick start](#quick-start) · [Install and run](#install-and-run) · [Build from source](#build-from-source) · [CLI guide](docs/agent-cli.md)
 
-## What you can do
+## Features
 
-- **Discover existing MCP servers:** inspect native agent configuration and import selected connections into mcplink.
-- **Choose direct or shared access:** keep a connection in the agent's configuration or route it through the local MCP gateway. Shared connections continue working after the desktop window closes.
-- **Preview configuration changes:** review target files and edits before applying, detect concurrent changes, and restore individual operations from history.
-- **Reuse managed credentials:** store secrets in the system credential store and update shared authorization in one place.
-- **Use desktop or CLI:** the UI and JSON CLI share the same Rust management core, gateway, and transaction logic.
-- **Let agents manage connections:** install the bundled mcplink management Skill for supported agents.
-- **Run in the background:** Windows tray and macOS menu bar support close-to-hide, login startup, and reopening the window. Shared pause persists across restarts; full quit waits for service cleanup. See the [Windows](docs/windows-background.md) and [macOS](docs/macos-background.md) behavior and acceptance scope.
+| Feature                     | What you can do                                                                                                                                                      |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Local inventory             | View existing MCP servers, configuration sources, connected agents, and connection status. Add project or profile configurations explicitly.                         |
+| Connections and accounts    | Import or create connections, maintain account labels, tokens, and OAuth authorization, and inspect available tools.                                                 |
+| Access across agents        | Choose services and connection modes for each client, and connect multiple agents to the same managed connection.                                                    |
+| Preview and recovery        | Review target files and edits before writing, detect concurrent changes, back up configuration, and restore individual operations.                                   |
+| Tool CLI                    | Manage connections through a JSON CLI, validate tool arguments against their schemas, invoke tools, and generate small command-line entry points for selected tools. |
+| Desktop background controls | Use the macOS menu bar or Windows tray for gateway status, login startup, and pause controls. Choose whether quitting also stops shared services.                    |
 
-mcplink supports STDIO and Streamable HTTP MCP connections. Authentication and protocol details are documented in [compatibility](docs/compatibility.md) and [architecture](docs/architecture.md).
+The desktop, CLI, and bundled management Skill use the same managed data and configuration workflow. Updating credentials in mcplink lets existing shared agent entries keep using the same connection.
 
-## Download and install
+## Direct or shared access
 
-Get the [v0.1.0 release](https://github.com/sw897/mcplink/releases/tag/v0.1.0), including checksums and a source/artifact manifest.
+| Mode                 | How it works                                                                                                      | When to use it                                                                                   |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| Native direct access | mcplink writes the client's native configuration. The agent starts or connects to the upstream MCP server itself. | You want the client to run the service and manage its native authentication independently.       |
+| Shared gateway       | The agent uses a local Bridge to access mcplink's managed connection, credentials, and tool filters.              | Multiple agents need the same service account, or you want to update authorization in one place. |
 
-| Platform | Download |
-| --- | --- |
-| macOS · Apple Silicon | [DMG installer](https://github.com/sw897/mcplink/releases/download/v0.1.0/mcplink_0.1.0_aarch64.dmg) · [App ZIP](https://github.com/sw897/mcplink/releases/download/v0.1.0/mcplink_0.1.0_aarch64.app.zip) |
-| Windows · x64 | [NSIS installer](https://github.com/sw897/mcplink/releases/download/v0.1.0/mcplink_0.1.0_x64-setup.exe) |
-| macOS · Apple Silicon · CLI only | [CLI tar.gz](https://github.com/sw897/mcplink/releases/download/v0.1.0/mcplink_cli_0.1.0_aarch64-apple-darwin.tar.gz) |
-| SHA-256 checksums | [SHA256SUMS](https://github.com/sw897/mcplink/releases/download/v0.1.0/SHA256SUMS) |
+Shared entries store only the local launcher and connection references in native configuration. Upstream credentials stay in the system credential store. Each service keeps its own entry name; the shared gateway preserves upstream tool names and schemas. Clients decide how those names appear in their own interfaces.
 
-On macOS, copy `mcplink.app` from the DMG to `/Applications` before setting up shared connections. If macOS blocks this preview, review [Apple's guidance for opening an app from an unidentified developer](https://support.apple.com/en-us/102445). On Windows, run the x64 installer; Windows may display an unsigned-publisher warning.
+Closing the window can leave the app in the menu bar or tray. The gateway keeps its paused state across restarts. Full quit waits for shared-service cleanup; quitting only the interface keeps the proxy running. Later agent requests can also start the backend on demand. See the [macOS](docs/macos-background.md) and [Windows](docs/windows-background.md) background guides.
 
-Compare the downloaded file's SHA-256 with its entry in `SHA256SUMS`:
+## Supported agents
 
-```sh
-# macOS
-shasum -a 256 mcplink_0.1.0_aarch64.dmg
-```
+mcplink supports Codex, Hermes, Claude Code, OpenCode, ZCode, DeepSeek Harness, OpenClaw, and Kimi Code.
 
-```powershell
-# Windows PowerShell
-Get-FileHash .\mcplink_0.1.0_x64-setup.exe -Algorithm SHA256
-```
+mcplink detects client installation and discovers supported user configurations. Uninstalled clients stay visible; install the client and refresh to enable configuration. Add project and other profile sources explicitly. Plugin, managed, and other read-only sources retain their permissions.
 
-Keep the application or standalone CLI in a permanent location. Shared agent configuration uses its absolute path; after moving it, preview and apply the connection again from the new location.
+See [eight-Agent integration](docs/agent-discovery.md) and [configuration adapters](docs/agent-adapters.md) for native formats, writable sources, and enable/disable behavior.
 
-## Get started
+## Quick start
 
-1. Open mcplink and review discovered services and configuration sources. Add a real configuration file to include another project or profile.
-2. Select a connection and inspect its tools and authentication state.
-3. Choose the target agent and direct or shared mode, review the preview, then apply it.
-4. Reload MCP or start a new agent session as prompted.
+1. [Build mcplink from source](#build-from-source) and keep the application or standalone CLI in a permanent location. Shared configurations reference its executable path.
+2. Open the app and review local services and installed agents. Add real project or profile configuration files as needed.
+3. Import an existing connection, or create one with a STDIO command or remote MCP URL. Supply credentials or complete OAuth authorization, then inspect its tools.
+4. Select the target agent and direct or shared mode, review the configuration preview, and apply it.
+5. Reload the agent's MCP configuration as prompted and make an actual tool call to confirm access.
 
-Configuration discovery and a successful file write do not prove that a running agent has loaded the connection.
+Use the account and service views to update managed authorization, and the change history to inspect or restore operations. After moving the executable, preview and apply shared configuration again from the new location.
 
-### Agent support
+## Install and run
 
-| Agent | Discover and import | Write configuration |
-| --- | --- | --- |
-| Codex | User configuration and explicitly added TOML files | Yes |
-| Hermes | User configuration and explicitly added YAML files | Yes |
-| Claude Code | User configuration and enabled user plugins; explicitly added JSON files | Read-only |
+[Build from source](#build-from-source) to use the desktop app or standalone CLI:
 
-This table describes v0.1.0. Source development adds writable Claude Code user/local/project scopes and adapters for the current OpenCode 2.x JSON/JSONC format. Earlier OpenCode layouts are no longer supported. These changes are not included in the release downloads; see [adapter scope and validation](docs/agent-adapters.md). Client approvals, policies, and login caches remain under the client's control.
+| Platform            | Installation                                                                                                            |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| macOS Apple Silicon | Run `npm run release:macos` to generate a DMG and App ZIP, then install `mcplink.app` in `/Applications`.               |
+| Windows x64         | Run `npm run bundle` to generate an NSIS installer, then run the installer.                                             |
+| Standalone CLI      | Run `cargo install --path crates/mcplink-core --locked` from the checkout and add Cargo's executable directory to PATH. |
 
-### CLI and management Skill
+macOS release candidates go to `artifacts/releases/<version>/<timestamp>/`; Windows installers go to `target/release/bundle/nsis/`. Check the checksums and source manifest supplied with each build.
 
-Unpack the standalone CLI archive and keep its license files, or use the CLI inside the installed macOS app at `/Applications/mcplink.app/Contents/MacOS/mcplink`. With `mcplink` on your PATH:
+Default macOS preview builds use ad-hoc signing; Windows installers are unsigned. See the [release guide](docs/release.md) for signing and notarization. Intel Mac and Linux have no validated installer packages.
+
+## CLI and management Skill
+
+The CLI provides JSON output and stdin input for scripts and agent automation. With `mcplink` on your PATH, inspect the current build's command contract and connection state:
 
 ```sh
 mcplink schema
 mcplink status
-mcplink skill install --agent codex
-mcplink skill install --agent hermes
 ```
 
-Import an existing service and preview sharing it with another agent:
+For example, connect a service named `notes` from Codex to Hermes:
 
 ```sh
 mcplink connections import --source codex:user --name notes
@@ -90,21 +85,21 @@ mcplink changes preview --connection CONNECTION_ID --target hermes:user --mode s
 mcplink changes apply PLAN_ID
 ```
 
-Replace `notes` with an existing server name; use the connection and plan IDs returned by the preceding commands. Pass credentials through stdin. The [CLI guide](docs/agent-cli.md) covers JSON input, semantic exit codes, MCP requests, and recovery. `mcplink schema` exposes the command contract.
+Confirm source IDs with `status`, replace `notes` with an existing service name, and use the connection and plan IDs returned by the preceding commands. Pass credentials through stdin.
 
-## Platform support
+Install the bundled management Skill for Codex, Hermes, Claude Code, or OpenCode to let an agent use the same CLI workflow:
 
-| Platform | v0.1.0 validation | Signing |
-| --- | --- | --- |
-| macOS Apple Silicon | Local desktop flow; CI build and 44 isolated core/CLI/source scenarios; DMG and 5 installed-app scenarios | Ad-hoc; no Developer ID or notarization |
-| Windows x64 | CI build and 44 isolated core/CLI/source scenarios; installer payload, license, and build-path checks | Unsigned |
-| Intel Mac / Linux | No release package or real-device acceptance | — |
+```sh
+mcplink skill install --agent codex
+```
 
-Windows desktop interaction, first Keychain access under a new macOS account, and downloaded-app Gatekeeper acceptance remain unverified. Isolated tests use synthetic MCP/OAuth services and fixture credentials; upstream services require their own compatibility checks. The preview has no automatic updater.
+The [CLI guide](docs/agent-cli.md) covers tool invocation, generated command-line entry points, account authorization, and operation recovery.
 
 ## Build from source
 
-mcplink uses **React + TypeScript, Tauri 2, and Rust**. Development and CI use **Node.js 22 LTS**, pinned in [.node-version](.node-version); the minimum supported version is **22.12.0**. Install the Rust version pinned in [rust-toolchain.toml](rust-toolchain.toml), Python 3.11+, and the [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/). macOS requires Xcode Command Line Tools; Windows requires the MSVC build tools and WebView2.
+mcplink uses Tauri 2, Rust, React, and TypeScript. Development and CI use Node.js 22 LTS, pinned in [.node-version](.node-version), with a minimum of 22.12.0. Rust is pinned in [rust-toolchain.toml](rust-toolchain.toml). Install Python 3.11+ and the [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/) as well.
+
+macOS requires Xcode Command Line Tools; Windows requires the MSVC build tools and WebView2.
 
 ```sh
 git clone https://github.com/sw897/mcplink.git
@@ -113,39 +108,38 @@ npm ci
 npm run desktop
 ```
 
-For a standalone CLI built from the checkout:
+Build and run static checks:
 
 ```sh
-cargo install --path crates/mcplink-core --locked
-```
-
-Build and verify:
-
-```sh
-npm run build
 npm run check
 npm run bundle
-python3 tests/e2e/run.py
-python3 tests/e2e/agent_cli.py --record artifacts/e2e/agent-cli/local
-python3 tests/e2e/claude_sources.py --record artifacts/e2e/claude/local
 ```
 
-`npm run check` builds the debug sidecar used by the default tests. Set `MCPLINK_E2E_BINARY` to test another binary. The tests use isolated homes and synthetic services; reports go to the ignored `artifacts/` directory. `npm run release:macos` builds and validates macOS release candidates with checksums and normalized archives. See the [release guide](docs/release.md) for signing and publication.
+Generate a macOS release candidate with installers, archives, checksums, and acceptance reports:
 
-## Data and credentials
+```sh
+npm run release:macos
+```
 
-Configuration, management metadata, and the gateway stay on your computer. SQLite stores management metadata; managed secrets use the system credential store. Configuration backups may retain sensitive fields already present in native client files. Connections contact their configured upstream services.
+Output goes to `artifacts/releases/<version>/<timestamp>/`. See the [release guide](docs/release.md) for signing and publication. To install the standalone CLI from the checkout, run `cargo install --path crates/mcplink-core --locked`.
 
-Standard OAuth, manual tokens, and native agent login have separate support boundaries. See [architecture and authentication](docs/architecture.md). Do not include real credentials, configurations, or databases in bug reports; report vulnerabilities through [SECURITY.md](SECURITY.md).
+## Data and authorization
+
+Connection metadata, configuration history, and the gateway stay on your computer. Managed credentials use the system credential store. Connections contact their configured upstream MCP services. Configuration backups may retain plaintext credentials already present in native files; treat those backups as sensitive data.
+
+mcplink supports STDIO and Streamable HTTP, with ordinary tools, resources, and prompts requests. Configure tokens and OAuth according to the upstream service's contract. Authorization, refresh, and business tool calls are validated separately for each service. See [supported scope](docs/compatibility.md) for protocol limits and [real upstream validation](docs/real-upstreams.md) for recorded integrations.
+
+Use synthetic configurations and examples in issue reports. Keep real credentials, databases, and business content out of them. Report security issues through the channels in [SECURITY.md](SECURITY.md).
 
 ## Documentation and contributing
 
 Detailed guides are currently in Chinese:
 
-- [Compatibility](docs/compatibility.md) · [Architecture](docs/architecture.md) · [CLI guide](docs/agent-cli.md)
-- [Agent adapters](docs/agent-adapters.md) · [Real upstream validation](docs/real-upstreams.md)
-- [Release guide](docs/release.md) · [v0.1.0 notes](docs/releases/v0.1.0.md)
-- [Contributing](CONTRIBUTING.md) · [Roadmap](ROADMAP.md) · [Issues](https://github.com/sw897/mcplink/issues)
+- [Architecture](docs/architecture.md) · [Supported scope](docs/compatibility.md)
+- [Eight-Agent integration](docs/agent-discovery.md) · [Configuration adapters](docs/agent-adapters.md)
+- [CLI guide](docs/agent-cli.md) · [Real upstream validation](docs/real-upstreams.md)
+- [Release guide](docs/release.md) · [Current build notes](docs/release-notes.md)
+- [Roadmap](ROADMAP.md) · [Contributing](CONTRIBUTING.md) · [Issues](https://github.com/sw897/mcplink/issues)
 
 ## License
 

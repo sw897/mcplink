@@ -73,9 +73,9 @@ Cargo 默认将程序放入 `~/.cargo/bin`，该目录需在 PATH 中。也可�
 | `cli inspect MANIFEST` / `cli rebind MANIFEST --connection ID` | 离线检查清单，或核对契约后显式重新绑定当前数据目录中的连接。 |
 | `skill show` / `skill install --agent AGENT` | 导出或安装 mcplink 自身管理 Skill。 |
 
-`AGENT` 为 `codex`、`hermes`、`claude`；源码 management API 6 另支持当前格式的 `opencode`。`ACTION` 为 `upsert`、`disable`、`enable`、`remove`。目标使用来源 ID（如 `hermes:user`），连接使用导入或保存返回的托管 ID。
+`AGENT` 为 `codex`、`hermes`、`claude`、`opencode`、`zcode`、`deepseek`、`openclaw`、`kimicode`。`ACTION` 为 `upsert`、`disable`、`enable`、`remove`。目标使用来源 ID（如 `hermes:user`），连接使用导入或保存返回的托管 ID。
 
-v0.1.0 中 Claude Code 来源只读。源码开发能力支持可写 user，以及显式添加的 local/project 作用域；插件、托管和未明确作用域的其他 JSON 仍只读。OpenCode 仅支持当前 `mcp.servers` JSON/JSONC 来源，空 MCP 配置无需选择版本。参数、覆盖关系、保留格式与转换限制见 [Agent 配置适配](agent-adapters.md)。只读来源不会因以其他 Agent 或路径重复登记而变为可写。
+Claude Code 支持可写 user，以及显式添加的 local/project 作用域；插件、托管和未明确作用域的其他 JSON 仍只读。OpenCode 仅支持当前 `mcp.servers` JSON/JSONC 来源，空 MCP 配置无需选择版本。参数、覆盖关系、保留格式与转换限制见 [Agent 配置适配](agent-adapters.md)。只读来源不会因以其他 Agent 或路径重复登记而变为可写。
 
 此路径使用 Claude 的原生配置入口和插件目录结构；配置位置与插件格式参照 [Claude MCP 文档](https://code.claude.com/docs/en/mcp) 和 [插件清单文档](https://code.claude.com/docs/en/plugins-reference)。
 
@@ -83,9 +83,9 @@ v0.1.0 中 Claude Code 来源只读。源码开发能力支持可写 user，以�
 
 标准输入必须是一条 UTF-8 JSON 对象，最多 8 MiB，传完后关闭管道。凭据及可能含凭据的完整定义经 stdin 传入，不使用 argv、Shell 字面量、临时凭据文件或日志。
 
-## 通用工具调用（源码开发能力）
+## 通用工具调用
 
-以下入口未包含在 v0.1.0 发布包中。先运行当前程序的 `schema` 确认命令；后台也须使用同一构建。新 CLI 连接旧后台时会明确失败，不会重放成其他命令或自动停止旧后台。
+先运行 `schema` 确认命令契约，并让 CLI 与后台使用同一构建。
 
 ```sh
 mcplink connections tools CONNECTION_ID --tool read_document
@@ -116,9 +116,9 @@ response = json.loads(result.stdout)
 
 终端调用不继承原生 Agent 的工具确认流程。按当前任务授权核对工具与参数，不能把工具的 `readOnlyHint` 当作授权依据。超时或连接中断后先核对执行结果，不自动重发。
 
-## 按连接生成 CLI（源码开发能力）
+## 按连接生成 CLI
 
-该能力未包含在 v0.1.0 发布包中；先核对当前二进制的 `schema`，并让后台使用同一构建。
+先核对当前二进制的 `schema`，并让后台使用同一构建。
 
 ```sh
 mcplink cli generate CONNECTION_ID --name notes --output ./notes-cli --tool search_documents --tool read_document
@@ -150,9 +150,9 @@ mcplink cli rebind ./notes-cli/notes.mcplink.json --connection LOCAL_CONNECTION_
 
 `gateway stop` 需要 management API 11，等待上游进程树清理和后台运行锁释放；后台原本未运行时直接成功，不启动后台或创建数据目录。它不改变持久化的暂停偏好，后续 Agent 调用仍可按需启动后台。桌面仍在运行时也会通过巡检恢复后台；需要停止并退出应用时使用桌面菜单。持续阻止共享调用请使用 `gateway pause`。退出进行中的调用会报告结果待核对，不自动重试。
 
-## OAuth 客户端配置（源码开发能力）
+## OAuth 客户端配置
 
-该能力未包含在 v0.1.0 发布包中。`credentials oauth-config ID --stdin` 接受部分更新对象，可选 `clientId`、`clientSecret`、`scopes`（字符串数组）和 `callbackPort`（1–65535）。省略字段保留原值；`clientId`、`clientSecret`、`callbackPort` 可用 `null` 清除。机密的 `••••••••` 掩码表示保留已存值。`scopes: []` 使用服务建议的 scope，回调端口留空自动分配，回调路径为 `/callback`。
+`credentials oauth-config ID --stdin` 接受部分更新对象，可选 `clientId`、`clientSecret`、`scopes`（字符串数组）和 `callbackPort`（1–65535）。省略字段保留原值；`clientId`、`clientSecret`、`callbackPort` 可用 `null` 清除。机密的 `••••••••` 掩码表示保留已存值。`scopes: []` 使用服务建议的 scope，回调端口留空自动分配，回调路径为 `/callback`。
 
 使用你有权使用的注册应用和权限。机密经 stdin 传入系统凭据库，管理输出只返回掩码；不将机密写入命令参数或文件。配置完成后运行 `credentials login ID`，由用户打开返回的 URL 同意授权，再运行 `connections probe ID`。支持 DCR 的上游可不提供预注册应用；不支持 DCR 的上游须先配置 Client ID 及其要求的客户端机密。机密客户端的 `client_secret_basic` / `client_secret_post` 按发现的元数据选择。
 
