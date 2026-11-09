@@ -5,10 +5,11 @@ import hashlib
 import json
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import traceback
 
-from run import BINARY, FIXTURE, Harness
+from run import BINARY, FIXTURE, ROOT, Harness
 
 
 def main():
@@ -74,7 +75,13 @@ def main():
         plan = harness.rpc('changes.preview', {'connectionId': managed, 'targetSourceIds': ['hermes:user'], 'mode': 'direct'})
         applied = harness.rpc('changes.apply', {'planId': plan['planId']})
         assert applied['results'][0]['status'] == 'applied'
-        assert str(plugin / 'server.py') in (harness.home / ".hermes/config.yaml").read_text()
+        native = json.loads(subprocess.check_output([
+            'node', str(ROOT / 'tests/fixtures/read-native-config.mjs'), 'hermes',
+            str(harness.home / '.hermes/config.yaml'), 'plugin_notes',
+        ], timeout=20))
+        script, mode = native['args']
+        assert Path(script).is_absolute() and Path(script).samefile(plugin / 'server.py')
+        assert mode == '--stdio'
         harness.rpc('changes.restore', {'operationId': applied['results'][0]['operationId']})
         passed('reuse imported literal/plugin-root definition on writable Hermes source and restore target entry')
         plugin_config.write_text('invalid enabled JSON with synthetic-native-value')
