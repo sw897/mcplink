@@ -11,7 +11,7 @@ mcplink 自有代码使用 MIT。具体依赖解析由 Cargo.lock 与 package-lo
 | jsonc-parser | 0.34.0 | JSON/JSONC 校验及保留注释、空白的配置编辑 | MIT |
 | tokio / axum | 1.54.1 / 0.8.9 | 异步运行时、本地 HTTP | MIT |
 | reqwest | 0.13.5 | rustls HTTP 客户端 | MIT / Apache-2.0 |
-| rusqlite | 0.38.0 | SQLite，内嵌 SQLite 构建 | MIT；SQLite public domain |
+| rusqlite | 0.41.1 | SQLite，内嵌 SQLite 3.54.1 | MIT；SQLite public domain |
 | keyring | 4.2.0 | 系统凭据库 | MIT / Apache-2.0 |
 | windows-sys | 0.61.2 | Windows 后台进程启动与父进程句柄隔离 | MIT / Apache-2.0 |
 | toml / toml_edit | 0.9.12 / 0.23.10 | TOML 读取和保留格式编辑 | MIT / Apache-2.0 |
