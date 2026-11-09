@@ -182,6 +182,9 @@ impl McpPool {
                         transport.custom_headers.insert(key, value);
                     }
                     if definition.oauth {
+                        // A refresh can immediately revoke the access token on an
+                        // outstanding POST. Queue ordinary POSTs on this OAuth session.
+                        transport.max_concurrent_requests = 1;
                         let mut manager = AuthorizationManager::new(endpoint)
                             .await
                             .context("无法发现 OAuth 认证服务")?;

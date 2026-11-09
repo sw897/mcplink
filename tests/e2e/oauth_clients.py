@@ -89,7 +89,7 @@ class OAuthClients(ToolCalls):
 
         clients=[self.bridge(connection,"confidential-"+str(index)) for index in range(2)]
         for client in clients: assert "result" in client.call("tools/list")
-        refreshes=self.stats()["refreshes"]
+        before_calls=self.stats()
         time.sleep(4)
         def bridge_call(client): return client.call("tools/call",{"name":"read_document","arguments":{"id":"weekly-fixture"}})
         with ThreadPoolExecutor(max_workers=3) as workers:
@@ -100,7 +100,9 @@ class OAuthClients(ToolCalls):
         # The fixture's three-second grants stay inside the SDK's proactive
         # refresh window, so each request may refresh. Rotation must serialize
         # and reload the latest grant rather than reuse a stale refresh token.
-        assert self.stats()["refreshes"]>refreshes
+        after_calls=self.stats()
+        assert after_calls["refreshes"]>before_calls["refreshes"]
+        assert after_calls["calls"]==before_calls["calls"]+len(futures)
         self.passed("two established Bridges and CLI serialize confidential refresh and reuse the rotated grant")
 
         runtime=json.loads((self.data/"runtime.json").read_text());os.kill(runtime["pid"],signal.SIGTERM);time.sleep(0.4)

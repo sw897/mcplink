@@ -176,6 +176,10 @@ class Handler(BaseHTTPRequestHandler):
             self.server.refresh_token = f"synthetic-refresh-{time.monotonic_ns()}"
             return self.send(200, {"access_token": self.server.access_token, "refresh_token": self.server.refresh_token, "token_type": "Bearer", "expires_in": 3, "scope": "documents:read"})
         authorization = self.headers.get("Authorization", "")
+        # Let another concurrent request reach the token endpoint before this
+        # protected POST validates its bearer. Rotation invalidates the old one.
+        if self.server.registered and authorization.startswith("Bearer "):
+            time.sleep(0.05)
         accepted = not self.server.auth or authorization == "synthetic-fixture-authorization" or authorization == "Bearer " + self.server.access_token
         if not accepted:
             challenge = None if path == "/mcp-no-challenge" else {"WWW-Authenticate": f'Bearer resource_metadata="{origin}/.well-known/oauth-protected-resource"'}
