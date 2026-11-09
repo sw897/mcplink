@@ -57,6 +57,8 @@ npm run release:macos -- --signed
 
 发布前核对待公开的源码、文档和 Git 历史，扫描凭据，避免纳入本机配置、账号验收记录或签名材料。根据两平台 CI 的实际结果记录兼容性；合成测试不能代替 Windows 桌面实机验收。
 
+Windows CI 在打包前用 `scripts/prepare_windows_bundler.py` 通过 GitHub Release API 准备 NSIS 和 Tauri 插件。下载有限重试，缓存资源每次校验固定的 SHA-256，再重建 Tauri 工具目录；校验失败会停止构建。工具版本和目录结构对应锁定的 [Tauri CLI 2.12.4](https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.12.4/crates/tauri-bundler/src/bundle/windows/nsis/mod.rs)，升级 CLI 时须同时复核。后续安装包构建及端到端验收照常执行。
+
 ## 预览包交付
 
 预览包可按 GitHub Pre-release 交付 macOS Apple Silicon 的 DMG、App ZIP、独立 CLI，以及 Windows x64 NSIS 安装包。签名和公证状态以实际构建的 `verification.json` 为准。

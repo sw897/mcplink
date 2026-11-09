@@ -41,6 +41,18 @@ jobs:
             rust-v1-${{ runner.os }}-${{ runner.arch }}-
       - run: npm ci
       - run: npm run check
+      - name: Cache Windows bundler downloads
+        if: runner.os == 'Windows'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/AppData/Local/tauri/mcplink-downloads
+          key: windows-bundler-v1-${{ hashFiles('package-lock.json', 'scripts/prepare_windows_bundler.py') }}
+      - name: Prepare verified Windows bundler tools
+        if: runner.os == 'Windows'
+        timeout-minutes: 6
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python -u scripts/prepare_windows_bundler.py
       - run: npm run bundle
       - name: Select acceptance binary
         shell: python {0}
