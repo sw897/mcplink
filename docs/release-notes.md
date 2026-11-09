@@ -1,12 +1,13 @@
 # mcplink · Preview / 预览构建说明
 
-mcplink is a local desktop MCP manager and shared gateway for Codex, Hermes, Claude Code, OpenCode, ZCode, DeepSeek Harness, OpenClaw, and Kimi Code.
+mcplink is a local desktop MCP manager and shared gateway for Codex, Hermes, Claude Code, OpenCode, ZCode, DeepSeek Harness, OpenClaw, Kimi Code, and WorkBuddy, with connector import generation for QwenWork and Doubao Work.
 
 ## Features
 
 - Discover local MCP configurations and connect services to installed agents through native direct access or the shared gateway.
 - Maintain managed connections and account authorization, with credentials in the system credential store.
 - Preview configuration edits, detect concurrent changes, back up files, and restore individual operations.
+- Manage WorkBuddy user/project MCP files, or generate QwenWork JSON and Doubao Work HTTP/STDIO connector fields for import in the client. Generated imports do not confirm client loading or create native bindings.
 - Use the desktop, JSON CLI, or bundled management Skill. Invoke tools or generate command-line entry points for selected tools.
 - Use the macOS menu bar or Windows tray for background controls, login startup, persistent pause, and exit cleanup.
 
@@ -20,7 +21,7 @@ See the [project guide](https://github.com/sw897/mcplink/blob/main/README.md), [
 
 ## 中文说明
 
-mcplink 在一个桌面应用里管理本机 MCP 服务、账号授权和八类 Agent 的接入。每项连接可按客户端支持情况选择原生直连或共享网关，共享凭据在系统凭据库中维护。
+mcplink 在一个桌面应用里管理本机 MCP 服务、账号授权和十一类 Agent 的接入。九类支持原生文件管理，包括 WorkBuddy 用户及项目配置；千问办公生成导入 JSON，豆包工作生成自定义连接器字段。生成后需在客户端完成导入并验证工具调用。每项连接可按客户端支持情况选择原生直连或共享网关，共享凭据在系统凭据库中维护。
 
 配置先预览再应用，写入前检查文件变化，支持备份和逐条恢复。桌面与 JSON CLI 共用管理核心，可通过内置管理 Skill 操作连接，也可直接调用工具或生成轻量命令入口。
 

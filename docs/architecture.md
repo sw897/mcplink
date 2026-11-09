@@ -4,8 +4,8 @@ mcplink 管理个人电脑的 MCP 接入。服务、账号、Agent 三个视图�
 
 ## 组件与调用
 
-- **桌面**：Tauri 2 + React/TypeScript，扫描、连接编辑、账号维护、按 Agent 查看接入、变更预览和恢复。服务页使用纵向卡片汇总已接入的客户端；Agent 页按已安装/未安装分组切换，右侧显示当前客户端的服务与配置位置，避免八列矩阵带来的横向滚动。未安装客户端仅可查看，配置操作禁用。打开接入窗口不纳管服务，生成预览时才导入所选连接。
-- **管理核心**：Rust `mcplink-core`，包含八类客户端的 TOML、YAML、JSON/JSONC/JSON5 适配、SQLite 元数据、系统凭据库和配置操作日志。完整支持名单及原生格式见[八类 Agent 接入](agent-discovery.md)。
+- **桌面**：Tauri 2 + React/TypeScript，扫描、连接编辑、账号维护、按 Agent 查看接入、变更预览和恢复。服务页使用纵向卡片汇总已接入的客户端；Agent 页按已安装/未安装分组切换，右侧显示当前客户端的服务与配置位置。未安装时禁用原生文件写入；千问办公/豆包工作可离线生成导入内容，并显示待客户端导入。打开接入窗口不纳管服务，来源导入需明确操作。
+- **管理核心**：Rust `mcplink-core`，包含九类客户端的 TOML、YAML、JSON/JSONC/JSON5 适配，以及千问办公 JSON、豆包工作表单导出，维护 SQLite 元数据、系统凭据库和配置操作日志。导出复用规范连接与 Bridge 入口，不猜测客户端存储，不生成绑定或原生变更记录。完整支持名单及原生格式见[Agent 接入](agent-discovery.md)。
 - **Agent 配置来源**：源码支持 Claude Code user/local/project 的独立 JSON 位置，以及当前 OpenCode `mcp.servers` JSONC 服务表。OpenCode 不再提供旧版配置选择。JSON 编辑复用同一预览、哈希检查、备份和逐条恢复事务，保留无关设置、注释及空白。Claude 插件与托管来源保持只读，客户端审批、信任、登录缓存和插件升级由原客户端维护。具体边界见 [Agent 配置适配](agent-adapters.md)。
 - **Agent CLI**：`mcplink schema/status/sources/connections/credentials/changes/gateway/mcp`，JSON 输出和 stdin 输入；复用后台 RPC，带语义失败退出码，预览／应用仍走同一配置事务。`skill show/install` 从二进制导出或安装管理 Skill，无需后台。详见 [Agent CLI](agent-cli.md)。
 - **后台**：独立 `mcplink daemon`，每个数据目录单实例。Windows 关闭窗口后收起到托盘，左键显示窗口，右键可暂停共享、设置登录自启或退出托盘。登录自启使用当前用户启动项和 `--background`，窗口从创建起隐藏；重复启动复用现有桌面实例。托盘每 10 秒检查后台并按需恢复；退出托盘后代理继续运行，由后续调用按需恢复，不安装 Windows 系统服务。

@@ -42,12 +42,14 @@ import {
   Tool,
   Dialog,
   agentLabel,
+  manualImport,
   time,
   rpc,
 } from "./contracts";
 import { Status, ModalNotice, Modal } from "./Modal";
 import { SourceDialog } from "./SourceDialog";
 import { ConnectDialog, ChangeDiff } from "./ConnectDialog";
+import { importInstructions } from "./ImportConfigCard";
 import { Editor, CredentialDialog } from "./ConnectionEditor";
 import "./style.css";
 
@@ -87,10 +89,15 @@ function App() {
       if (
         !Array.isArray(next.agents) ||
         next.agents.length !== agents.length ||
+        new Set(next.agents.map((client) => client.id)).size !==
+          agents.length ||
         next.agents.some(
           (client) =>
             !agents.includes(client.id) ||
-            client.configurable !== client.installed,
+            (manualImport(client.id)
+              ? client.management !== "manual" || !client.configurable
+              : client.management !== "writable" ||
+                client.configurable !== client.installed),
         )
       )
         throw new Error(
@@ -312,6 +319,17 @@ function App() {
   };
 
   const bindingCell = (connection: Connection, agent: Agent) => {
+    if (manualImport(agent))
+      return (
+        <button
+          className="cell-add"
+          aria-label={`生成 ${connection.title} 的 ${agentLabel(agent)} 配置`}
+          onClick={() => void connect([connection], agent)}
+        >
+          <Plus size={13} />
+          生成配置
+        </button>
+      );
     if (!isInstalled(agent)) return <span className="muted">未安装</span>;
     const bindings = ownBindings(connection).filter(
       (binding) => binding.agent === agent,
@@ -1010,17 +1028,32 @@ function App() {
                       </div>
                     </div>
                     <div className="agent-panel-actions">
-                      <button
-                        className="button small"
-                        disabled={!currentAgent.configurable}
-                        onClick={() => void addSource(currentAgent.id)}
-                      >
-                        <FolderPlus size={14} />
-                        添加来源
-                      </button>
+                      {currentAgent.management === "manual" ? (
+                        <span className="pill">客户端导入</span>
+                      ) : (
+                        <button
+                          className="button small"
+                          disabled={!currentAgent.configurable}
+                          onClick={() => void addSource(currentAgent.id)}
+                        >
+                          <FolderPlus size={14} />
+                          添加来源
+                        </button>
+                      )}
                     </div>
                   </header>
-                  {!currentAgent.installed ? (
+                  {currentAgent.management === "manual" ? (
+                    <div className="agent-unavailable">
+                      <ArrowRight size={19} />
+                      <div>
+                        <strong>选择服务，生成导入配置</strong>
+                        <p>{importInstructions(currentAgent.id)}</p>
+                        <p>
+                          可在安装客户端前准备配置。导入结果需在客户端确认，此处不显示已接入状态。
+                        </p>
+                      </div>
+                    </div>
+                  ) : !currentAgent.installed ? (
                     <div className="agent-unavailable">
                       <Unplug size={19} />
                       <div>
@@ -1037,7 +1070,7 @@ function App() {
                             try {
                               const path = await open({
                                 multiple: false,
-                                title: `选择 ${currentAgent.label} 的 CLI 可执行文件`,
+                                title: `选择 ${currentAgent.label} 的${currentAgent.id === "workbuddy" ? "应用程序" : " CLI 可执行文件"}`,
                               });
                               if (typeof path === "string")
                                 await action(
@@ -1050,7 +1083,9 @@ function App() {
                             }
                           }}
                         >
-                          选择已安装的 CLI
+                          {currentAgent.id === "workbuddy"
+                            ? "选择已安装的程序"
+                            : "选择已安装的 CLI"}
                         </button>
                       </div>
                     </div>
@@ -1082,30 +1117,32 @@ function App() {
                   )}
                   <div className="agent-service-heading">
                     <h3>MCP 服务</h3>
-                    <div
-                      className="agent-service-filters"
-                      aria-label="按接入状态筛选"
-                    >
-                      <button
-                        className={!agentOnlyConfigured ? "active" : ""}
-                        onClick={() => setAgentOnlyConfigured(false)}
+                    {currentAgent.management !== "manual" && (
+                      <div
+                        className="agent-service-filters"
+                        aria-label="按接入状态筛选"
                       >
-                        全部 {data.connections.length}
-                      </button>
-                      <button
-                        className={agentOnlyConfigured ? "active" : ""}
-                        onClick={() => setAgentOnlyConfigured(true)}
-                      >
-                        已接入{" "}
-                        {
-                          new Set(
-                            currentBindings.map(
-                              (binding) => binding.connectionId || binding.id,
-                            ),
-                          ).size
-                        }
-                      </button>
-                    </div>
+                        <button
+                          className={!agentOnlyConfigured ? "active" : ""}
+                          onClick={() => setAgentOnlyConfigured(false)}
+                        >
+                          全部 {data.connections.length}
+                        </button>
+                        <button
+                          className={agentOnlyConfigured ? "active" : ""}
+                          onClick={() => setAgentOnlyConfigured(true)}
+                        >
+                          已接入{" "}
+                          {
+                            new Set(
+                              currentBindings.map(
+                                (binding) => binding.connectionId || binding.id,
+                              ),
+                            ).size
+                          }
+                        </button>
+                      </div>
+                    )}
                   </div>
                   <div className="agent-services">
                     {currentServices.map((connection) => (
@@ -1142,34 +1179,36 @@ function App() {
                       </div>
                     )}
                   </div>
-                  <details className="agent-source-details">
-                    <summary>
-                      配置位置<span>{currentSources.length}</span>
-                      <ChevronDown size={14} />
-                    </summary>
-                    <div>
-                      {currentSources.map((source) => (
-                        <div className="agent-source-item" key={source.id}>
-                          <strong>
-                            {source.label}
-                            <small>
-                              {source.readOnly
-                                ? "只读"
-                                : !currentAgent.installed
-                                  ? "不可配置"
-                                  : source.exists
-                                    ? "已找到"
-                                    : "尚未创建"}
-                            </small>
-                          </strong>
-                          <code>{source.path}</code>
-                          {source.error && (
-                            <p className="inline-error">{source.error}</p>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  </details>
+                  {currentAgent.management !== "manual" && (
+                    <details className="agent-source-details">
+                      <summary>
+                        配置位置<span>{currentSources.length}</span>
+                        <ChevronDown size={14} />
+                      </summary>
+                      <div>
+                        {currentSources.map((source) => (
+                          <div className="agent-source-item" key={source.id}>
+                            <strong>
+                              {source.label}
+                              <small>
+                                {source.readOnly
+                                  ? "只读"
+                                  : !currentAgent.installed
+                                    ? "不可配置"
+                                    : source.exists
+                                      ? "已找到"
+                                      : "尚未创建"}
+                              </small>
+                            </strong>
+                            <code>{source.path}</code>
+                            {source.error && (
+                              <p className="inline-error">{source.error}</p>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </details>
+                  )}
                 </section>
               </div>
             )}
@@ -1187,8 +1226,9 @@ function App() {
         <Modal title="配置来源" wide onClose={() => setDialog(undefined)}>
           <div className="modal-body">
             <p className="muted">
-              支持八类 Agent 的配置管理和 MCP
-              共享代理。未安装的客户端不可配置，安装后刷新即可接入；配置目录残留不代表已安装。插件、托管及共享回退来源按各自权限维护。
+              九类 Agent 支持原生配置管理和 MCP 共享代理，未安装时不可写入。
+              千问办公和豆包工作通过「接给
+              Agent」生成客户端导入配置。插件、托管及共享回退来源按各自权限维护。
             </p>
             {data?.sources.map((source) => (
               <div className="source-row" key={source.id}>
@@ -1212,19 +1252,21 @@ function App() {
               </div>
             ))}
             <div className="split-buttons">
-              {agents.map((agent) => (
-                <button
-                  className="button"
-                  key={agent}
-                  disabled={!isInstalled(agent)}
-                  onClick={() => void addSource(agent)}
-                >
-                  <FolderPlus size={15} />
-                  {isInstalled(agent)
-                    ? `添加 ${agentLabel(agent)} 配置`
-                    : `${agentLabel(agent)} · 未安装`}
-                </button>
-              ))}
+              {agents
+                .filter((agent) => !manualImport(agent))
+                .map((agent) => (
+                  <button
+                    className="button"
+                    key={agent}
+                    disabled={!isInstalled(agent)}
+                    onClick={() => void addSource(agent)}
+                  >
+                    <FolderPlus size={15} />
+                    {isInstalled(agent)
+                      ? `添加 ${agentLabel(agent)} 配置`
+                      : `${agentLabel(agent)} · 未安装`}
+                  </button>
+                ))}
             </div>
           </div>
         </Modal>

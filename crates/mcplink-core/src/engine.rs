@@ -58,8 +58,17 @@ impl Engine {
     pub fn sources(&self) -> Result<Vec<Source>> {
         let mut sources = config::default_sources()?;
         for stored in self.store.sources()? {
-            if let Some(position) = sources.iter().position(|s| s.id == stored.id) {
-                if stored.agent == Agent::Opencode && stored.path == sources[position].path {
+            if let Some(position) = sources.iter().position(|s| {
+                s.id == stored.id
+                    || (stored.agent == Agent::Workbuddy
+                        && s.agent == Agent::Workbuddy
+                        && s.path
+                            == config::canonical_path(&stored.path).unwrap_or(stored.path.clone())
+                        && s.project == stored.project)
+            }) {
+                if (stored.agent == Agent::Opencode && stored.path == sources[position].path)
+                    || stored.agent == Agent::Workbuddy
+                {
                     sources[position] = stored;
                 }
             } else {
@@ -821,6 +830,52 @@ impl Engine {
         )
     }
 
+    fn export_config(&self, p: &Value) -> Result<Value> {
+        let agent: Agent =
+            serde_json::from_value(p["targetAgent"].clone()).context("请选择导入客户端")?;
+        if !agent.manual_import() {
+            bail!("此客户端使用原生配置预览，请选择千问办公或豆包工作导入")
+        }
+        let mode = required(p, "mode")?;
+        if !matches!(mode, "direct" | "shared") {
+            bail!("接入方式无效")
+        }
+        let ids = p["connectionIds"]
+            .as_array()
+            .filter(|v| !v.is_empty())
+            .context("请选择服务")?;
+        let mut names = std::collections::HashSet::new();
+        let mut servers = serde_json::Map::new();
+        let mut entries = Vec::new();
+        for id in ids {
+            let connection = self
+                .store
+                .connection(id.as_str().context("服务标识无效")?)?;
+            if !connection.active {
+                bail!("连接已断开，请先重新连接")
+            }
+            if !names.insert(config::name_key(&connection.name)) {
+                bail!("导入服务名称重复，请分开导出或先修改接入名称")
+            }
+            let def = if mode == "shared" {
+                if connection.status != "ready" {
+                    bail!("请先检查共享连接并完成账号认证")
+                }
+                serde_json::from_value(
+                    self.bridge_config(&connection.id, p["_bridgeExecutable"].as_str())?,
+                )?
+            } else {
+                self.definition(&connection)?
+            };
+            let entry = crate::client_import::entry(&def, &agent)?;
+            entries.push(json!({"name":connection.name,"definition":entry}));
+            servers.insert(connection.name, entry);
+        }
+        Ok(json!({"agent":agent,"mode":mode,"entries":entries,
+            "config":if agent == Agent::Qwenwork { json!({"mcpServers":servers}) } else { Value::Null },
+            "gatewayPaused":self.paused.load(Ordering::SeqCst),"requiresImport":true}))
+    }
+
     fn bridge_config(&self, id: &str, client_executable: Option<&str>) -> Result<Value> {
         let executable = client_executable
             .map(PathBuf::from)
@@ -1246,7 +1301,7 @@ impl Engine {
                 let _guard = self.mutation.lock().await;
                 let agent: Agent =
                     serde_json::from_value(p["agent"].clone()).context("客户端类型无效")?;
-                if agent != Agent::Removed {
+                if agent != Agent::Removed && !agent.manual_import() {
                     crate::discovery::require_installed(&agent, &self.store)?;
                 }
                 let sources = self.sources()?;
@@ -1363,6 +1418,10 @@ impl Engine {
                     .unwrap_or(false);
                 self.delete_connection(required(&p, "id")?, keep_native)
                     .await
+            }
+            "connections.export_config" => {
+                let _guard = self.mutation.lock().await;
+                self.export_config(&p)
             }
             "changes.preview" => {
                 let _guard = self.mutation.lock().await;

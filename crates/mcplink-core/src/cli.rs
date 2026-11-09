@@ -51,7 +51,7 @@ enum Command {
         #[command(subcommand)]
         command: CliCommand,
     },
-    /// 管理八类支持客户端的原生 MCP 配置来源
+    /// 管理支持文件配置的客户端原生 MCP 来源
     Sources {
         #[command(subcommand)]
         command: SourceCommand,
@@ -111,7 +111,7 @@ enum SourceCommand {
     List,
     /// 添加真实来源；Claude 按作用域定位，OpenCode 使用当前配置格式
     Add {
-        #[arg(long, value_parser = ["codex", "hermes", "claude", "opencode", "zcode", "deepseek", "openclaw", "kimicode"])]
+        #[arg(long, value_parser = ["codex", "hermes", "claude", "opencode", "zcode", "deepseek", "openclaw", "kimicode", "workbuddy"])]
         agent: String,
         #[arg(long)]
         path: Option<PathBuf>,
@@ -157,6 +157,15 @@ enum CliCommand {
 #[derive(Subcommand)]
 enum ConnectionCommand {
     List,
+    /// 生成千问办公 JSON 或豆包工作表单字段；直连输出含明文凭据，不写客户端或建立绑定
+    ExportConfig {
+        #[arg(long, value_parser = ["qwenwork", "doubaowork"])]
+        agent: String,
+        #[arg(long, required = true)]
+        connection: Vec<String>,
+        #[arg(long, default_value = "shared", value_parser = ["direct", "shared"])]
+        mode: String,
+    },
     Show {
         id: String,
     },
@@ -488,6 +497,16 @@ async fn execute(command: Command, data: PathBuf) -> Result<Value, Failure> {
         },
         Command::Connections { command } => match command {
             ConnectionCommand::List => ("snapshot", json!({}), Some("connections"), false),
+            ConnectionCommand::ExportConfig {
+                agent,
+                connection,
+                mode,
+            } => (
+                "connections.export_config",
+                json!({"targetAgent":agent,"connectionIds":connection,"mode":mode}),
+                None,
+                false,
+            ),
             ConnectionCommand::Show { id } => ("connections.detail", json!({"id":id}), None, false),
             ConnectionCommand::Import { source, name } => (
                 "connections.import",
@@ -675,7 +694,7 @@ async fn call(data: &std::path::Path, method: &str, mut params: Value) -> Result
     if method == "gateway.stop" {
         return Client::stop_existing(data).await;
     }
-    if method == "changes.preview" {
+    if matches!(method, "changes.preview" | "connections.export_config") {
         params["_bridgeExecutable"] =
             json!(std::env::current_exe().context("无法定位共享入口程序")?);
     }

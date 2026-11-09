@@ -39,18 +39,18 @@ Closing the window can leave the app in the menu bar or tray. The gateway keeps 
 
 ## Supported agents
 
-mcplink supports Codex, Hermes, Claude Code, OpenCode, ZCode, DeepSeek Harness, OpenClaw, and Kimi Code.
+Native file management supports Codex, Hermes, Claude Code, OpenCode, ZCode, DeepSeek Harness, OpenClaw, Kimi Code, and WorkBuddy. QwenWork (千问办公) supports generated JSON for its connector import screen; Doubao Work (豆包工作) supports generated HTTP/STDIO connector fields. Both import workflows offer direct and shared access and can be prepared before installing the client.
 
-mcplink detects client installation and discovers supported user configurations. Uninstalled clients stay visible; install the client and refresh to enable configuration. Add project and other profile sources explicitly. Plugin, managed, and other read-only sources retain their permissions.
+mcplink detects client installation and discovers supported user configurations. Uninstalled clients stay visible; install the client and refresh to enable native file writes. Add project and other profile sources explicitly. Plugin, managed, and other read-only sources retain their permissions. Generated imports do not create bindings or confirm that the client has loaded the service; complete the import and verify a tool call in the client.
 
-See [eight-Agent integration](docs/agent-discovery.md) and [configuration adapters](docs/agent-adapters.md) for native formats, writable sources, and enable/disable behavior.
+See [Agent integration](docs/agent-discovery.md) and [configuration adapters](docs/agent-adapters.md) for native formats, import steps, writable sources, and enable/disable behavior.
 
 ## Quick start
 
 1. [Build mcplink from source](#build-from-source) and keep the application or standalone CLI in a permanent location. Shared configurations reference its executable path.
 2. Open the app and review local services and installed agents. Add real project or profile configuration files as needed.
 3. Import an existing connection, or create one with a STDIO command or remote MCP URL. Supply credentials or complete OAuth authorization, then inspect its tools.
-4. Select the target agent and direct or shared mode, review the configuration preview, and apply it.
+4. Select the target agent and direct or shared mode, review the configuration preview, and apply it. For QwenWork or Doubao Work, copy the generated configuration into the client's connector screen.
 5. Reload the agent's MCP configuration as prompted and make an actual tool call to confirm access.
 
 Use the account and service views to update managed authorization, and the change history to inspect or restore operations. After moving the executable, preview and apply shared configuration again from the new location.
@@ -138,7 +138,7 @@ Use synthetic configurations and examples in issue reports. Keep real credential
 Detailed guides are currently in Chinese:
 
 - [Architecture](docs/architecture.md) · [Supported scope](docs/compatibility.md)
-- [Eight-Agent integration](docs/agent-discovery.md) · [Configuration adapters](docs/agent-adapters.md)
+- [Agent integration](docs/agent-discovery.md) · [Configuration adapters](docs/agent-adapters.md)
 - [CLI guide](docs/agent-cli.md) · [Real upstream validation](docs/real-upstreams.md)
 - [Release guide](docs/release.md) · [Current build notes](docs/release-notes.md)
 - [Roadmap](ROADMAP.md) · [Contributing](CONTRIBUTING.md) · [Issues](https://github.com/sw897/mcplink/issues)

@@ -1,4 +1,5 @@
 mod agent_config;
+mod client_import;
 pub mod config;
 mod discovery;
 mod dsh_config;

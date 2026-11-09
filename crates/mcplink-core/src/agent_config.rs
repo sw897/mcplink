@@ -9,6 +9,9 @@ use std::path::{Path, PathBuf};
 
 pub fn directory(agent: &Agent) -> Result<PathBuf> {
     let home = config::user_home()?;
+    if *agent == Agent::Workbuddy {
+        return Ok(home.join(".workbuddy"));
+    }
     let (variable, folder) = match agent {
         Agent::Zcode => ("ZCODE_HOME", ".zcode"),
         Agent::Deepseek => ("DSH_HOME", ".dsh"),
@@ -60,14 +63,19 @@ pub fn default_path(agent: &Agent) -> Result<PathBuf> {
         Agent::Openclaw => std::env::var_os("OPENCLAW_CONFIG_PATH")
             .map(PathBuf::from)
             .unwrap_or_else(|| root.join("openclaw.json")),
-        Agent::Kimicode => root.join("mcp.json"),
+        Agent::Kimicode | Agent::Workbuddy => root.join("mcp.json"),
         _ => unreachable!(),
     })
 }
 
 pub fn default_sources() -> Result<Vec<Source>> {
     let mut result = Vec::new();
-    for agent in [Agent::Zcode, Agent::Openclaw, Agent::Kimicode] {
+    for agent in [
+        Agent::Zcode,
+        Agent::Openclaw,
+        Agent::Kimicode,
+        Agent::Workbuddy,
+    ] {
         result.push(source(
             agent.clone(),
             default_path(&agent)?,
@@ -143,15 +151,16 @@ pub fn source_from_params(agent: Agent, params: &Value, sources: &[Source]) -> R
         })
         .transpose()?;
     if (scope == "project") != project.is_some()
-        || (project.is_some() && !matches!(agent, Agent::Zcode | Agent::Kimicode))
+        || (project.is_some()
+            && !matches!(agent, Agent::Zcode | Agent::Kimicode | Agent::Workbuddy))
     {
-        bail!("仅 ZCode 和 Kimi Code 支持显式项目来源，且需要项目目录")
+        bail!("仅 ZCode、Kimi Code 和 WorkBuddy 支持显式项目来源，且需要项目目录")
     }
     let default = if let Some(root) = &project {
-        root.join(if agent == Agent::Zcode {
-            ".zcode/config.json"
-        } else {
-            ".kimi-code/mcp.json"
+        root.join(match agent {
+            Agent::Zcode => ".zcode/config.json",
+            Agent::Workbuddy => ".workbuddy/mcp.json",
+            _ => ".kimi-code/mcp.json",
         })
     } else {
         default_path(&agent)?
@@ -253,6 +262,17 @@ pub fn render(source: &Source, text: &str, name: &str, value: Option<&Value>) ->
 pub fn normalize(raw: &Value, agent: &Agent, project: Option<&Path>) -> Result<Definition> {
     let fields = raw.as_object().context("MCP 服务需要映射")?;
     let allowed = match agent {
+        Agent::Workbuddy => vec![
+            "type",
+            "command",
+            "args",
+            "env",
+            "cwd",
+            "url",
+            "headers",
+            "timeout",
+            "disabledTools",
+        ],
         Agent::Zcode => vec![
             "type", "command", "args", "env", "cwd", "url", "headers", "enable",
         ],
@@ -338,6 +358,13 @@ pub fn normalize(raw: &Value, agent: &Agent, project: Option<&Path>) -> Result<D
     let mut value = raw.clone();
     let map = value.as_object_mut().unwrap();
     let transport = raw["transport"].as_str().or_else(|| raw["type"].as_str());
+    let transport = transport.map(|v| {
+        if *agent == Agent::Workbuddy && v == "streamableHttp" {
+            "streamable-http"
+        } else {
+            v
+        }
+    });
     if transport.is_some_and(|v| !matches!(v, "stdio" | "http" | "streamable-http"))
         || (transport == Some("stdio") && raw.get("url").is_some())
         || (transport.is_some_and(|v| v != "stdio") && raw.get("command").is_some())
@@ -360,6 +387,15 @@ pub fn normalize(raw: &Value, agent: &Agent, project: Option<&Path>) -> Result<D
         "enabled".into(),
         json!(enabled.and_then(Value::as_bool).unwrap_or(true)),
     );
+    if *agent == Agent::Workbuddy
+        && let Some(value) = map.remove("timeout")
+    {
+        let millis = value.as_u64().context("原生连接超时需要正整数毫秒")?;
+        if millis == 0 || millis % 1000 != 0 {
+            bail!("毫秒连接超时不能等价转换为托管秒数，请显式建立共享连接")
+        }
+        map.insert("startup_timeout_sec".into(), json!(millis / 1000));
+    }
     for (native, canonical) in [
         ("connectionTimeoutMs", "startup_timeout_sec"),
         ("startupTimeoutMs", "startup_timeout_sec"),
@@ -429,6 +465,17 @@ pub fn normalize(raw: &Value, agent: &Agent, project: Option<&Path>) -> Result<D
 
 pub fn native(def: &Definition, source: &Source) -> Result<Value> {
     config::validate(def)?;
+    if source.agent == Agent::Workbuddy {
+        crate::client_import::check_portable(def)?;
+        if def.original_agent == Some(Agent::Hermes)
+            && def
+                .exclude_tools
+                .iter()
+                .any(|v| v.contains(['*', '?', '[']))
+        {
+            bail!("WorkBuddy 无等价的工具通配符过滤，请使用共享代理")
+        }
+    }
     if def.command.is_some()
         && def
             .origin_project
@@ -447,6 +494,16 @@ pub fn native(def: &Definition, source: &Source) -> Result<Value> {
     }
     if def.resources_disabled || def.prompts_disabled {
         bail!("原生资源或提示词过滤请使用共享代理")
+    }
+    if source.agent == Agent::Workbuddy
+        && (!def.enabled
+            || def.timeout.is_some()
+            || def.include_specified
+            || !def.include_tools.is_empty())
+    {
+        bail!(
+            "WorkBuddy 无等价的启停、请求超时或工具白名单字段，请在原客户端维护启停，或使用共享代理保留限制"
+        )
     }
     if matches!(source.agent, Agent::Zcode | Agent::Deepseek)
         && (def.include_specified || !def.exclude_tools.is_empty())
@@ -471,6 +528,24 @@ pub fn native(def: &Definition, source: &Source) -> Result<Value> {
     }
     if value.to_string().contains("${") {
         bail!("托管变量不能直接写入此客户端，请使用共享代理")
+    }
+    if source.agent == Agent::Workbuddy {
+        value["type"] = json!(if def.url.is_some() {
+            "streamableHttp"
+        } else {
+            "stdio"
+        });
+        if let Some(seconds) = def.startup_timeout {
+            let millis = seconds
+                .checked_mul(1000)
+                .filter(|v| *v > 0)
+                .context("连接超时超出范围")?;
+            value["timeout"] = json!(millis);
+        }
+        if !def.exclude_tools.is_empty() {
+            value["disabledTools"] = json!(def.exclude_tools);
+        }
+        return Ok(value);
     }
     if source.agent == Agent::Zcode {
         value["type"] = json!(if def.url.is_some() { "http" } else { "stdio" });
@@ -535,6 +610,9 @@ pub fn native(def: &Definition, source: &Source) -> Result<Value> {
 }
 
 pub fn set_enabled(value: &mut Value, agent: &Agent, enabled: bool) -> Result<()> {
+    if *agent == Agent::Workbuddy {
+        bail!("WorkBuddy 启停请在原客户端维护；此处可预览移除配置")
+    }
     value.as_object_mut().context("MCP 服务需要映射")?.insert(
         if *agent == Agent::Zcode {
             "enable"

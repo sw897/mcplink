@@ -63,7 +63,7 @@ async fn health(State(state): State<ServerState>, headers: HeaderMap) -> impl In
     (
         StatusCode::OK,
         Json(
-            json!({"application":"mcplink","instance":state.info.instance,"version":env!("CARGO_PKG_VERSION"),"managementApi":14}),
+            json!({"application":"mcplink","instance":state.info.instance,"version":env!("CARGO_PKG_VERSION"),"managementApi":15}),
         ),
     )
 }
@@ -378,6 +378,27 @@ impl Client {
     }
 
     pub async fn call(&self, method: &str, params: Value) -> Result<Value> {
+        if self.management_api < 15
+            && (matches!(method, "snapshot" | "connections.export_config")
+                || (method == "sources.add"
+                    && matches!(
+                        params["agent"].as_str(),
+                        Some("workbuddy" | "qwenwork" | "doubaowork")
+                    ))
+                || (matches!(method, "connections.import" | "connections.adopt_source")
+                    && params["sourceId"]
+                        .as_str()
+                        .is_some_and(|id| id.starts_with("native:workbuddy:")))
+                || (method == "changes.preview"
+                    && params["targetSourceIds"].as_array().is_some_and(|ids| {
+                        ids.iter().any(|id| {
+                            id.as_str()
+                                .is_some_and(|id| id.starts_with("native:workbuddy:"))
+                        })
+                    })))
+        {
+            bail!("旧后台不支持办公客户端接入，请退出并重启后台");
+        }
         if self.management_api < 14
             && method == "connections.delete"
             && params

@@ -8,7 +8,10 @@ export type Agent =
   | "zcode"
   | "deepseek"
   | "openclaw"
-  | "kimicode";
+  | "kimicode"
+  | "workbuddy"
+  | "qwenwork"
+  | "doubaowork";
 export const agents: Agent[] = [
   "codex",
   "hermes",
@@ -18,6 +21,9 @@ export const agents: Agent[] = [
   "deepseek",
   "openclaw",
   "kimicode",
+  "workbuddy",
+  "qwenwork",
+  "doubaowork",
 ];
 export type LocalAgent = {
   id: Agent;
@@ -25,8 +31,28 @@ export type LocalAgent = {
   detected: boolean;
   installed: boolean;
   configurable: boolean;
-  profilePath: string;
-  management: "writable" | "readOnly" | "discovery";
+  profilePath: string | null;
+  management: "writable" | "readOnly" | "discovery" | "manual";
+};
+export const manualImport = (agent: Agent) =>
+  agent === "qwenwork" || agent === "doubaowork";
+export type ImportConfig = {
+  agent: Agent;
+  mode: string;
+  config: Json | null;
+  entries: {
+    name: string;
+    definition: {
+      type: string;
+      command?: string;
+      args?: string[];
+      env?: Record<string, string>;
+      url?: string;
+      headers?: Record<string, string>;
+    };
+  }[];
+  gatewayPaused: boolean;
+  requiresImport: boolean;
 };
 export type Json = Record<string, unknown>;
 export type Connection = {
@@ -198,6 +224,9 @@ export const agentLabel = (agent: Agent) =>
     deepseek: "DeepSeek Harness",
     openclaw: "OpenClaw",
     kimicode: "Kimi Code",
+    workbuddy: "WorkBuddy",
+    qwenwork: "千问办公",
+    doubaowork: "豆包工作",
   })[agent] || agent;
 export const time = (value?: number) =>
   value

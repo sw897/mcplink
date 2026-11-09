@@ -37,7 +37,7 @@ def main():
                     or self.headers.get("X-Fixture") != secret):
                 return self.send_error(403)
             request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            if request.get("method") not in {"snapshot","connections.detail","connections.save","changes.preview","changes.apply","sources.add","connections.source_detail","connections.import","connections.detach","connections.probe","changes.preview_restore","changes.restore","credentials.disconnect","changes.history"}:
+            if request.get("method") not in {"snapshot","connections.detail","connections.save","connections.export_config","changes.preview","changes.apply","sources.add","connections.source_detail","connections.import","connections.detach","connections.probe","changes.preview_restore","changes.restore","credentials.disconnect","changes.history"}:
                 return self.send_error(403)
             if request["method"] == "sources.add" and request.get("params") != {"agent":"codex","path":str(extra)}:
                 return self.send_error(403)
@@ -58,6 +58,8 @@ def main():
     shim.write_text("""
 if (location.origin === ORIGIN) {
   let sequence = 0;
+  // Observe the clipboard adapter without overwriting the developer's OS clipboard.
+  Object.defineProperty(navigator, "clipboard", {value:{async writeText(value) {window.__fixtureClipboard = value;}}});
   window.__TAURI_EVENT_PLUGIN_INTERNALS__ = {unregisterListener() {}};
   window.__TAURI_INTERNALS__ = {
     transformCallback() { return ++sequence; },
@@ -222,6 +224,63 @@ if (location.origin === ORIGIN) {
         assert "synthetic-before" not in browser("snapshot") and "synthetic-after" not in browser("snapshot")
         browser("screenshot",str(record/"credential-diff.png"))
         checks.append("secret rotation is visible in the field diff without either credential value")
+        browser("press","Escape")
+
+        # New office clients: prepare imports while uninstalled, without claiming native loading.
+        harness.launchers["workbuddy"].unlink()
+        office_url = harness.url + "?ui-office=1"
+        office_id = harness.rpc("connections.save", {"name":"office_ui","title":"办公接入验收","definition":{
+            "url":office_url,"headers":{"Authorization":"synthetic-fixture-authorization"}}})["id"]
+        harness.rpc("connections.probe", {"id":office_id})
+        button("刷新本机配置")
+        button("Agent")
+        button("查看 WorkBuddy（未安装）")
+        wait_for("document.querySelector('.agent-unavailable')?.innerText.includes('未安装，暂不可配置') && document.querySelector('.agent-panel-actions button')?.disabled")
+        checks.append("uninstalled WorkBuddy remains visible with native writes disabled")
+
+        before = harness.rpc("snapshot")
+        browser("set","viewport","940","620")
+        for client in ("千问办公", "豆包工作"):
+            button(f"查看 {client}（未安装）")
+            wait_for("document.querySelector('.agent-unavailable')?.innerText.includes('导入结果需在客户端确认') && !document.querySelector('.agent-source-details')")
+            button(f"生成 办公接入验收 的 {client} 配置")
+            wait_for("document.querySelectorAll('dialog .target input:checked').length === 1 && document.querySelector('dialog .target input:checked')?.closest('label').innerText.includes(" + json.dumps(client) + ")")
+            button("生成导入配置")
+            browser("wait","--text",f"{client} · 待客户端导入")
+            wait_for("document.querySelector('dialog .modal-body').scrollTop === 0")
+            browser("screenshot", str(record / ("qwen-import-top.png" if client == "千问办公" else "doubao-import-top.png")))
+            wait_for("document.querySelector('dialog footer').getBoundingClientRect().bottom <= innerHeight && ![...document.querySelectorAll('dialog button')].some(b=>b.textContent==='应用配置')")
+            if client == "千问办公":
+                generated = json.loads(browser("eval", "document.querySelector('.import-config textarea').value"))
+                assert json.loads(generated)["mcpServers"]["office_ui"]["url"] == office_url
+                button("复制JSON 配置")
+                wait_for("window.__fixtureClipboard === document.querySelector('.import-config textarea').value")
+            else:
+                assert json.loads(browser("eval", "document.querySelector('input[aria-label=\"服务器 URL\"]').value")) == office_url
+                button("复制服务器 URL")
+                wait_for("window.__fixtureClipboard === " + json.dumps(office_url))
+                button("复制Header Authorization")
+                wait_for("window.__fixtureClipboard === 'synthetic-fixture-authorization'")
+            audit("qwen-import" if client == "千问办公" else "doubao-import")
+            browser("screenshot", str(record / ("qwen-import.png" if client == "千问办公" else "doubao-import.png")))
+            button("返回调整")
+            browser("click","dialog .mode-choices label:nth-child(2)")
+            button("生成导入配置")
+            browser("wait","--text",f"{client} · 待客户端导入")
+            if client == "千问办公":
+                generated = json.loads(browser("eval", "document.querySelector('.import-config textarea').value"))
+                definition = json.loads(generated)["mcpServers"]["office_ui"]
+                assert definition["command"] == str(BINARY) and definition["args"] == ["bridge","--connection",office_id]
+            else:
+                assert json.loads(browser("eval", "document.querySelector('input[aria-label=运行命令]').value")) == str(BINARY)
+                button("复制参数 3")
+                wait_for("window.__fixtureClipboard === " + json.dumps(office_id))
+            assert "synthetic-fixture-authorization" not in browser("snapshot")
+            button("完成")
+        after = harness.rpc("snapshot")
+        assert before["bindings"] == after["bindings"] and before["history"] == after["history"]
+        assert not any(b["agent"] in {"qwenwork","doubaowork"} for b in after["bindings"])
+        checks.append("QwenWork JSON and DoubaoWork form values reach the clipboard adapter in direct and shared modes, with no binding or history mutation")
         result["conclusion"]="PASS"
     finally:
         try:

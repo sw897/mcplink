@@ -39,11 +39,13 @@ mcplink 是面向个人的桌面 MCP（Model Context Protocol）接入管理器�
 
 ## 支持的 Agent
 
-mcplink 支持 Codex、Hermes、Claude Code、OpenCode、ZCode、DeepSeek Harness、OpenClaw 和 Kimi Code。
+mcplink 支持 Codex、Hermes、Claude Code、OpenCode、ZCode、DeepSeek Harness、OpenClaw、Kimi Code、WorkBuddy、千问办公和豆包工作。
 
-mcplink 会识别客户端安装状态并盘点支持的用户配置。未安装的客户端仍显示在列表中，安装并刷新后即可配置。项目或其他 profile 的配置需显式添加；插件和系统托管等只读来源保留只读权限。
+mcplink 会识别客户端安装状态并盘点支持的用户配置。未安装的客户端仍显示在列表中，安装并刷新后即可写入原生文件。项目或其他 profile 的配置需显式添加；插件和系统托管等只读来源保留只读权限。
 
-各客户端的配置格式、可写来源和原生启停方式见[八类 Agent 接入管理](docs/agent-discovery.md)及[配置适配](docs/agent-adapters.md)。
+新增 WorkBuddy 原生文件管理，支持用户及显式项目 `.workbuddy/mcp.json` 的预览、写入、移除和恢复。千问办公可生成连接器导入 JSON，豆包工作可生成 HTTP/STDIO 连接器的填写字段，均支持直连或共享模式。生成配置不会建立绑定或确认客户端已接入，需要在对应客户端完成导入并验证工具调用；本机未安装也可准备导入配置。
+
+各客户端的配置格式、导入步骤、可写来源和原生启停方式见[Agent 接入管理](docs/agent-discovery.md)及[配置适配](docs/agent-adapters.md)。
 
 ## 快速上手
 
@@ -136,7 +138,7 @@ npm run release:macos
 ## 文档与参与
 
 - [架构](docs/architecture.md) · [支持范围与验证](docs/compatibility.md)
-- [八类 Agent 接入](docs/agent-discovery.md) · [配置适配](docs/agent-adapters.md)
+- [Agent 接入](docs/agent-discovery.md) · [配置适配](docs/agent-adapters.md)
 - [CLI 指南](docs/agent-cli.md) · [真实上游验收](docs/real-upstreams.md)
 - [发布指南](docs/release.md) · [当前构建说明](docs/release-notes.md)
 - [路线图](ROADMAP.md) · [参与开发](CONTRIBUTING.md) · [Issues](https://github.com/sw897/mcplink/issues)

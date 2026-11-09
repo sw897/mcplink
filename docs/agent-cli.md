@@ -2,7 +2,9 @@
 
 `mcplink` CLI 与桌面使用同一个管理核心、后台、系统凭据库和配置事务。命令不启动桌面或浏览器；后台在首次管理调用时按需启动。`schema` 和 `skill` 离线可用。
 
-当前 MCP 接入支持 `codex|hermes|claude|opencode|zcode|deepseek|openclaw|kimicode` 八类客户端，未安装时显示但不可配置，安装后刷新即可接入。配置写入与安装状态校验需要 management API 9，原生路径与逐来源限制见[八类 Agent 接入](agent-discovery.md)。管理 Skill 的复制安装目标另见下文。
+当前原生文件管理支持 `codex|hermes|claude|opencode|zcode|deepseek|openclaw|kimicode|workbuddy` 九类客户端，未安装时不可写入，安装后刷新。`qwenwork`（千问办公）和 `doubaowork`（豆包工作）支持离线生成客户端导入配置，需要 management API 15。原生路径与逐来源限制见[Agent 接入](agent-discovery.md)。管理 Skill 的复制安装目标另见下文。
+
+用 `mcplink connections export-config --agent qwenwork --connection CONNECTION_ID` 生成千问办公 JSON；将 `--agent` 改为 `doubaowork` 则生成豆包工作自定义连接器字段。默认共享模式，须先检查连接成功；`--connection` 可重复。显式传 `--mode direct` 才导出上游直连设置，其中包含完整 URL、明文凭据和启动参数。输出的 `.ok.config`（千问办公）或 `.ok.entries`（豆包工作）用于对应界面，不写原生文件、不建立绑定。导入步骤和能力限制见[办公客户端](agent-discovery.md#客户端导入)。
 
 ## 安装与发现
 

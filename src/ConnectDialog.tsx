@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, Server } from "lucide-react";
 import {
   Agent,
@@ -8,11 +8,13 @@ import {
   Binding,
   Plan,
   Change,
+  ImportConfig,
   changeLabel,
   agentLabel,
   rpc,
 } from "./contracts";
 import { Status, Modal } from "./Modal";
+import { ImportConfigCard } from "./ImportConfigCard";
 
 export function ChangeDiff({ change }: { change: Change }) {
   const names: Record<string, string> = {
@@ -77,6 +79,8 @@ export function ConnectDialog({
 }) {
   const [targets, setTargets] = useState<string[]>(() => {
     if (binding) return [binding.sourceId];
+    if (clients.some((c) => c.id === targetAgent && c.management === "manual"))
+      return [`import:${targetAgent}`];
     const available = sources.filter(
       (s) =>
         s.agent === targetAgent &&
@@ -90,12 +94,18 @@ export function ConnectDialog({
     binding?.missing ? "remove" : "upsert",
   );
   const [plans, setPlans] = useState<Plan[]>([]);
+  const [imports, setImports] = useState<ImportConfig[]>([]);
+  const hasPreview = plans.length > 0 || imports.length > 0;
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const [results, setResults] =
     useState<
       { sourceId: string; name: string; status: string; message: string }[]
     >();
+  const body = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    body.current?.scrollTo({ top: 0 });
+  }, [hasPreview, results]);
   const isAvailable = (source: Source) =>
     !source.readOnly &&
     clients.some((client) => client.id === source.agent && client.configurable);
@@ -114,7 +124,7 @@ export function ConnectDialog({
                   (operation === "remove" ||
                     (!b.missing &&
                       (operation === "enable" ? !b.enabled : b.enabled) &&
-                      source.agent !== "claude")),
+                      !["claude", "workbuddy"].includes(source.agent))),
               ),
             ),
         ),
@@ -132,6 +142,10 @@ export function ConnectDialog({
         )
         .map((source) => source.id),
     );
+    if (operation === "upsert" && !binding)
+      clients
+        .filter((c) => c.management === "manual" && c.configurable)
+        .forEach((c) => available.add(`import:${c.id}`));
     setTargets((previous) => previous.filter((id) => available.has(id)));
     setPlans((previous) =>
       previous.some((plan) =>
@@ -140,22 +154,39 @@ export function ConnectDialog({
         ? []
         : previous,
     );
-  }, [clients, visibleSources]);
+  }, [clients, visibleSources, operation, binding]);
   const preview = async () => {
     setPending(true);
     setError("");
     try {
-      const plan = await rpc<Plan>("changes.preview", {
-        connectionIds: connections.map((connection) => connection.id),
-        targetSourceIds: targets,
-        bindingTarget: binding
-          ? { sourceId: binding.sourceId, name: binding.name }
-          : undefined,
-        mode,
-        action: operation,
-      });
-      if (plan.changes.length) setPlans([plan]);
-      else setError("这些配置已经移除，无需写入。");
+      const generated = [];
+      for (const client of clients.filter(
+        (c) => c.management === "manual" && targets.includes(`import:${c.id}`),
+      )) {
+        generated.push(
+          await rpc<ImportConfig>("connections.export_config", {
+            connectionIds: connections.map((c) => c.id),
+            targetAgent: client.id,
+            mode,
+          }),
+        );
+      }
+      const nativeTargets = targets.filter((id) => !id.startsWith("import:"));
+      const plan = nativeTargets.length
+        ? await rpc<Plan>("changes.preview", {
+            connectionIds: connections.map((connection) => connection.id),
+            targetSourceIds: nativeTargets,
+            bindingTarget: binding
+              ? { sourceId: binding.sourceId, name: binding.name }
+              : undefined,
+            mode,
+            action: operation,
+          })
+        : undefined;
+      if (plan?.changes.length) setPlans([plan]);
+      setImports(generated);
+      if (!plan?.changes.length && !generated.length)
+        setError("这些配置已经移除，无需写入。");
     } catch (error) {
       setError((error as Error).message);
     } finally {
@@ -201,8 +232,10 @@ export function ConnectDialog({
       title={
         results
           ? "接入结果"
-          : plans.length
-            ? "核对配置变更"
+          : hasPreview
+            ? plans.length
+              ? "核对配置变更"
+              : "客户端导入配置"
             : binding
               ? "管理 Agent 绑定"
               : "接给 Agent"
@@ -210,7 +243,7 @@ export function ConnectDialog({
       wide
       onClose={onClose}
     >
-      <div className="modal-body">
+      <div className="modal-body" ref={body}>
         <div className="connection-summary">
           <Server size={20} />
           <div>
@@ -222,7 +255,7 @@ export function ConnectDialog({
             <p>{connections.map((connection) => connection.name).join("、")}</p>
           </div>
         </div>
-        {!plans.length && !results && (
+        {!hasPreview && !results && (
           <>
             <label className="field">
               <span>操作</span>
@@ -236,6 +269,11 @@ export function ConnectDialog({
                 <option value="remove">移除所选 Agent 的配置</option>
               </select>
             </label>
+            {["disable", "enable"].includes(operation) && (
+              <p className="field-help">
+                Claude Code 和 WorkBuddy 的启停请在原客户端维护。
+              </p>
+            )}
             {operation === "upsert" && (
               <div className="mode-choices">
                 <label className={mode === "direct" ? "chosen" : ""}>
@@ -247,7 +285,7 @@ export function ConnectDialog({
                   />
                   <strong>直连</strong>
                   <small>
-                    连接设置写入所选配置文件，令牌和启动参数可能以明文保存
+                    写入配置文件或生成导入内容，令牌和启动参数可能以明文保存
                   </small>
                 </label>
                 <label className={mode === "shared" ? "chosen" : ""}>
@@ -308,6 +346,40 @@ export function ConnectDialog({
                 ) && <span className="muted">已有接入</span>}
               </label>
             ))}
+            {operation === "upsert" &&
+              !binding &&
+              clients
+                .filter((client) => client.management === "manual")
+                .map((client) => (
+                  <label className="target" key={client.id}>
+                    <input
+                      type="checkbox"
+                      checked={targets.includes(`import:${client.id}`)}
+                      disabled={!client.configurable}
+                      onChange={(event) =>
+                        setTargets((previous) =>
+                          event.target.checked
+                            ? [...previous, `import:${client.id}`]
+                            : previous.filter(
+                                (id) => id !== `import:${client.id}`,
+                              ),
+                        )
+                      }
+                    />
+                    <span className={`agent-avatar ${client.id}`}>
+                      {client.label[0]}
+                    </span>
+                    <div>
+                      <strong>{client.label} · 客户端导入</strong>
+                      <small>
+                        {client.id === "qwenwork"
+                          ? "生成可粘贴的 JSON 配置"
+                          : "生成自定义连接器的填写字段"}
+                        ，可离线准备
+                      </small>
+                    </div>
+                  </label>
+                ))}
           </>
         )}
         {plans.map((plan) => (
@@ -363,6 +435,9 @@ export function ConnectDialog({
             </p>
           </div>
         ))}
+        {imports.map((value) => (
+          <ImportConfigCard key={value.agent} value={value} />
+        ))}
         {error && (
           <div className="warning-banner" role="alert">
             {error}
@@ -370,26 +445,34 @@ export function ConnectDialog({
         )}
       </div>
       <footer className="modal-footer">
-        {plans.length > 0 && !results && (
+        {hasPreview && !results && (
           <button
             className="button"
             disabled={pending}
-            onClick={() => setPlans([])}
+            onClick={() => {
+              setPlans([]);
+              setImports([]);
+            }}
           >
             返回调整
           </button>
         )}
         <button className="button" onClick={onClose}>
-          {results ? "完成" : "取消"}
+          {results || (imports.length > 0 && !plans.length) ? "完成" : "取消"}
         </button>
-        {!results && (
+        {!results && (!hasPreview || plans.length > 0) && (
           <button
             className="button primary"
             disabled={pending || !targets.length}
             onClick={() => void (plans.length ? apply() : preview())}
           >
             {pending && <Loader2 size={15} className="spin" />}
-            {plans.length ? "应用配置" : "预览变更"}
+            {plans.length
+              ? "应用配置"
+              : targets.length > 0 &&
+                  targets.every((id) => id.startsWith("import:"))
+                ? "生成导入配置"
+                : "预览变更"}
           </button>
         )}
       </footer>

@@ -1165,6 +1165,49 @@ dd {
 .modal.wide {
   width: 650px;
 }
+.agent-avatar.workbuddy {
+  background: #e4edf9;
+  color: #285ba6;
+}
+.agent-avatar.qwenwork {
+  background: #eee9fb;
+  color: #6650a1;
+}
+.agent-avatar.doubaowork {
+  background: #e0f0f2;
+  color: #276e7b;
+}
+.import-config {
+  border: 1px solid #e0e5db;
+  border-radius: 8px;
+  padding: 16px;
+  margin-top: 18px;
+}
+.import-config > p {
+  margin: 10px 0;
+}
+.import-value {
+  margin: 12px 0;
+  min-width: 0;
+}
+.import-value .field {
+  margin-bottom: 6px;
+}
+.import-value textarea {
+  width: 100%;
+  resize: vertical;
+  font-family: monospace;
+}
+.import-value > small {
+  display: block;
+  margin-top: 5px;
+  color: #45653c;
+}
+.import-entry + .import-entry {
+  border-top: 1px solid #e0e5db;
+  padding-top: 16px;
+  margin-top: 16px;
+}
 .modal > header {
   padding: 20px 24px;
   border-bottom: 1px solid #e5eadd;

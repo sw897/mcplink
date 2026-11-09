@@ -34,7 +34,7 @@
     "vite": "^7.3.7",
     "yaml": "2.9.1"
   },
-  "description": "Desktop MCP configuration manager and shared gateway for eight AI Agent clients",
+  "description": "Desktop MCP configuration manager and shared gateway with eleven AI client integrations",
   "license": "MIT",
   "repository": {
     "type": "git",

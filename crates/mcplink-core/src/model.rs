@@ -29,6 +29,9 @@ pub enum Agent {
     Deepseek,
     Openclaw,
     Kimicode,
+    Workbuddy,
+    Qwenwork,
+    Doubaowork,
     #[serde(other)]
     Removed,
 }
@@ -44,6 +47,9 @@ impl Agent {
             Self::Deepseek => "DeepSeek Harness",
             Self::Openclaw => "OpenClaw",
             Self::Kimicode => "Kimi Code",
+            Self::Workbuddy => "WorkBuddy",
+            Self::Qwenwork => "千问办公",
+            Self::Doubaowork => "豆包工作",
             Self::Removed => "已移除客户端",
         }
     }
@@ -51,11 +57,15 @@ impl Agent {
     pub fn native_adapter(&self) -> bool {
         matches!(
             self,
-            Self::Zcode | Self::Deepseek | Self::Openclaw | Self::Kimicode
+            Self::Zcode | Self::Deepseek | Self::Openclaw | Self::Kimicode | Self::Workbuddy
         )
     }
 
-    pub fn supported() -> [Self; 8] {
+    pub fn manual_import(&self) -> bool {
+        matches!(self, Self::Qwenwork | Self::Doubaowork)
+    }
+
+    pub fn supported() -> [Self; 11] {
         [
             Self::Codex,
             Self::Hermes,
@@ -65,6 +75,9 @@ impl Agent {
             Self::Deepseek,
             Self::Openclaw,
             Self::Kimicode,
+            Self::Workbuddy,
+            Self::Qwenwork,
+            Self::Doubaowork,
         ]
     }
 }

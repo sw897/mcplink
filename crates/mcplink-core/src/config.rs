@@ -184,6 +184,9 @@ pub fn source_from_params(params: &Value, sources: &[Source]) -> Result<Source> 
     if agent == Agent::Removed {
         bail!("此客户端不在支持名单中");
     }
+    if agent.manual_import() {
+        bail!("此客户端通过界面导入，请使用 connections export-config 生成配置");
+    }
     if agent.native_adapter() {
         return crate::agent_config::source_from_params(agent, params, sources);
     }

@@ -104,9 +104,12 @@ jobs:
       - name: Isolated current OpenCode format acceptance
         timeout-minutes: 5
         run: python -u tests/e2e/opencode_sources.py --record artifacts/e2e/ci-opencode
-      - name: Isolated eight-Agent configuration and shared proxy acceptance
+      - name: Isolated native Agent configuration and shared proxy acceptance
         timeout-minutes: 5
         run: python -u tests/e2e/agent_discovery.py --record artifacts/e2e/ci-agents
+      - name: Office clients and offline connector import acceptance
+        timeout-minutes: 5
+        run: python -u tests/e2e/office_agents.py --record artifacts/e2e/ci-office-agents
       - name: Isolated tool invocation acceptance
         timeout-minutes: 5
         run: python -u tests/e2e/tool_calls.py --record artifacts/e2e/ci-tools
@@ -152,6 +155,7 @@ jobs:
             artifacts/e2e/ci-claude-writable/report.json
             artifacts/e2e/ci-opencode/report.json
             artifacts/e2e/ci-agents/report.json
+            artifacts/e2e/ci-office-agents/report.json
             artifacts/e2e/ci-tools/report.json
             artifacts/e2e/ci-generated/report.json
             artifacts/e2e/ci-remote/report.json

@@ -26,6 +26,9 @@ fn names(agent: &Agent) -> (&'static str, &'static str, &'static str, &'static s
         ),
         Agent::Openclaw => ("OpenClaw", "OpenClaw.exe", "OpenClaw.app", "openclaw"),
         Agent::Kimicode => ("Kimi Code", "Kimi Code.exe", "Kimi Code.app", "kimi"),
+        Agent::Workbuddy => ("WorkBuddy", "WorkBuddy.exe", "WorkBuddy.app", ""),
+        Agent::Qwenwork => ("QwenWork", "QwenWork.exe", "QwenWork.app", ""),
+        Agent::Doubaowork => ("Doubao", "Doubao.exe", "Doubao.app", ""),
         Agent::Removed => unreachable!(),
     }
 }
@@ -46,13 +49,23 @@ fn executable(path: &Path) -> bool {
 }
 
 pub fn valid_launcher(agent: &Agent, path: &Path) -> bool {
+    if *agent == Agent::Workbuddy
+        && cfg!(target_os = "macos")
+        && path.is_absolute()
+        && path.file_name().is_some_and(|name| name == "WorkBuddy.app")
+    {
+        return mac_app_installed(path);
+    }
     if *agent == Agent::Removed || !path.is_absolute() || !executable(path) {
         return false;
     }
-    let (_, _, _, cli) = names(agent);
+    let (_, windows_exe, _, cli) = names(agent);
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return false;
     };
+    if cli.is_empty() {
+        return cfg!(windows) && name.eq_ignore_ascii_case(windows_exe);
+    }
     if cfg!(windows) {
         ["exe", "cmd", "bat"]
             .iter()
@@ -92,6 +105,21 @@ fn installed(agent: &Agent, store: &crate::store::Store) -> Result<bool> {
     } else {
         false
     };
+    // Chinese app bundle names are also used by the desktop distributions.
+    if cfg!(target_os = "macos") {
+        let alias = match agent {
+            Agent::Qwenwork => Some("千问办公.app"),
+            Agent::Doubaowork => Some("豆包.app"),
+            _ => None,
+        };
+        if let Some(alias) = alias {
+            installed |= (!isolated && mac_app_installed(&Path::new("/Applications").join(alias)))
+                || mac_app_installed(&home.join("Applications").join(alias));
+        }
+    }
+    if cfg!(windows) && *agent == Agent::Doubaowork {
+        installed |= local.join("Doubao/Application/Doubao.exe").is_file();
+    }
     // Inspect launcher files, never execute programs during inventory.
     let mut launchers = vec![
         home.join(".local/bin"),
@@ -127,15 +155,16 @@ fn installed(agent: &Agent, store: &crate::store::Store) -> Result<bool> {
             std::env::split_paths(&paths).filter(|path| !isolated || path.starts_with(&home)),
         );
     }
-    installed |= launchers.iter().any(|path| {
-        if cfg!(windows) {
-            ["exe", "cmd", "bat"]
-                .iter()
-                .any(|extension| path.join(format!("{cli}.{extension}")).is_file())
-        } else {
-            executable(&path.join(cli))
-        }
-    });
+    installed |= !cli.is_empty()
+        && launchers.iter().any(|path| {
+            if cfg!(windows) {
+                ["exe", "cmd", "bat"]
+                    .iter()
+                    .any(|extension| path.join(format!("{cli}.{extension}")).is_file())
+            } else {
+                executable(&path.join(cli))
+            }
+        });
     #[cfg(windows)]
     if !isolated && *agent == Agent::Codex && !installed {
         installed = codex_package_installed();
@@ -259,26 +288,31 @@ pub fn inventory(sources: &[Source], store: &crate::store::Store) -> Result<Valu
     let home = config::user_home()?;
     let mut clients = Vec::new();
     for agent in Agent::supported() {
-        let profile = match agent {
-            Agent::Codex => std::env::var_os("CODEX_HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home.join(".codex")),
-            Agent::Hermes => std::env::var_os("HERMES_HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home.join(".hermes")),
-            Agent::Claude => config::claude_home()?,
-            Agent::Opencode => crate::opencode::directory()?,
-            _ => agent_config::directory(&agent)?,
+        let profile = if agent.manual_import() {
+            None
+        } else {
+            Some(match agent {
+                Agent::Codex => std::env::var_os("CODEX_HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| home.join(".codex")),
+                Agent::Hermes => std::env::var_os("HERMES_HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| home.join(".hermes")),
+                Agent::Claude => config::claude_home()?,
+                Agent::Opencode => crate::opencode::directory()?,
+                _ => agent_config::directory(&agent)?,
+            })
         };
         let installed = installed(&agent, store)?;
         let detected = installed
-            || profile.is_dir()
+            || profile.as_ref().is_some_and(|path| path.is_dir())
             || sources
                 .iter()
                 .any(|source| source.agent == agent && source.path.is_file());
         clients.push(
             json!({"id":agent,"label":agent.label(),"detected":detected,"installed":installed,
-            "configurable":installed,"profilePath":profile,"management":"writable"}),
+            "configurable":installed || agent.manual_import(),"profilePath":profile,
+            "management":if agent.manual_import(){"manual"}else{"writable"}}),
         );
     }
     Ok(Value::Array(clients))

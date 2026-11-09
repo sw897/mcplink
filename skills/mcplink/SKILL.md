@@ -13,7 +13,7 @@ description: 通过 mcplink CLI 盘点和管理 MCP 来源、连接、认证与�
 
 先运行 `mcplink schema` 获取当前命令、参数和 stdin 契约；用 `mcplink status` 获取实际连接、绑定、配置来源和认证状态。`schema` 离线可用。以运行结果中的 ID 为准，不猜连接 ID 或项目来源。
 
-API 9 的支持名单固定为 Codex、Hermes、Claude Code、OpenCode、ZCode、DeepSeek Harness、OpenClaw、Kimi Code；八类都支持原生配置管理及 MCP 共享代理。未安装时显示但不可配置，安装后刷新；配置目录残留不算已安装。`status.agents.configurable` 随 `installed` 切换，后台在登记来源、预览、应用及恢复时复核安装状态。`detected` 也可能仅表示配置残留。插件、托管配置、DeepSeek 基础组合及 ZCode 共享回退文件仍按来源权限维护，不能用其他 Agent 类型绕过只读。实际命令和来源 ID 以当前 `schema`、`status` 为准。
+API 15 支持九类原生文件客户端 Codex、Hermes、Claude Code、OpenCode、ZCode、DeepSeek Harness、OpenClaw、Kimi Code、WorkBuddy，以及千问办公/豆包工作的客户端导入。原生文件客户端未安装时不可写入，安装后刷新；配置目录残留不算已安装。千问办公/豆包工作标记为 `management:manual`，可离线生成导入配置，`configurable:true` 不代表已安装或已接入。后台在登记原生来源、预览、应用及恢复时复核安装状态。插件、托管配置、DeepSeek 基础组合及 ZCode 共享回退文件仍按来源权限维护，不能用其他 Agent 类型绕过只读。实际命令和来源 ID 以当前 `schema`、`status` 为准。
 
 - 默认 stdout 是单个 JSON：成功为 `{"ok":...}`，失败为 `{"error":{"code":"...","message":"..."}}`，部分结果位于 `result`。
 - 退出码：`0` 成功，`1` 操作失败或未就绪，`2` 参数或 stdin 无效。`--help`、`--version` 输出普通文本；`bridge` 的 stdout 是 MCP 协议。
@@ -26,6 +26,8 @@ API 9 的支持名单固定为 Codex、Hermes、Claude Code、OpenCode、ZCode�
 - Claude Code 自动盘点用户 `.claude.json` 与已启用用户插件默认 `.mcp.json`。用户来源可通过配置事务写入；插件来源带 `readOnly:true`，可以导入、检查和复用连接，原文件由插件维护。以每个来源返回的权限为准，不直接改写插件缓存。
 
 ## 盘点和接入
+
+WorkBuddy 读写用户及显式项目 `.workbuddy/mcp.json`，启停与信任在原客户端维护。千问办公用 `connections export-config --agent qwenwork --connection CONNECTION_ID` 生成 `.ok.config` JSON，豆包工作用 `--agent doubaowork` 生成 `.ok.entries` 表单字段。默认共享模式，先 probe 成功；不会写客户端或建立绑定。明确需要直连时传 `--mode direct`，此时输出含完整凭据，只交给目标客户端导入，不打印到聊天或报告。复制/生成成功不代表客户端加载或调用通过。
 
 ```sh
 mcplink sources list

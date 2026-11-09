@@ -1,4 +1,4 @@
-"""Exercise all eight supported Agent formats and actual shared MCP commands."""
+"""Exercise native Agent formats, import-only inventory and actual shared MCP commands."""
 import argparse
 from datetime import datetime, timezone
 import hashlib
@@ -15,8 +15,10 @@ import traceback
 
 from run import BINARY, FIXTURE, ROOT, Harness, McpClient
 
-SUPPORTED = {"codex", "hermes", "claude", "opencode", "zcode", "deepseek", "openclaw", "kimicode"}
-REMOVED = {"trae", "traecn", "workbuddy", "vscode"}
+NATIVE = {"codex", "hermes", "claude", "opencode", "zcode", "deepseek", "openclaw", "kimicode", "workbuddy"}
+MANUAL = {"qwenwork", "doubaowork"}
+SUPPORTED = NATIVE | MANUAL
+REMOVED = {"trae", "traecn", "vscode"}
 
 
 def main():
@@ -34,8 +36,8 @@ def main():
     def snapshot():
         value = harness.rpc("snapshot")
         assert {a["id"] for a in value["agents"]} == SUPPORTED
-        assert all(a["management"] == "writable" for a in value["agents"])
-        assert all(a["configurable"] == a["installed"] for a in value["agents"])
+        assert all(a["management"] == ("manual" if a["id"] in MANUAL else "writable") for a in value["agents"])
+        assert all(a["configurable"] == (a["installed"] or a["id"] in MANUAL) for a in value["agents"])
         return value
 
     def native_entry(source, name):
@@ -62,17 +64,18 @@ def main():
         assert not any(Path(s["path"]).exists() for s in initial["sources"] if s["agent"] in {"openclaw", "kimicode", "zcode", "deepseek"})
         assert not next(a for a in initial["agents"] if a["id"] == "kimicode")["detected"]
         assert not next(a for a in initial["agents"] if a["id"] == "openclaw")["detected"]
-        assert {s["agent"] for s in initial["sources"] if not s["readOnly"]} == SUPPORTED
-        assert not any(a["installed"] or a["configurable"] for a in initial["agents"])
-        for agent in SUPPORTED:
+        assert {s["agent"] for s in initial["sources"] if not s["readOnly"]} == NATIVE
+        assert not any(a["installed"] or a["configurable"] for a in initial["agents"] if a["id"] in NATIVE)
+        assert all(a["configurable"] and a["profilePath"] is None for a in initial["agents"] if a["id"] in MANUAL)
+        for agent in NATIVE:
             assert "未安装" in harness.rpc("sources.add", {"agent":agent}, error=True)
         local = harness.rpc("connections.import", {"sourceId":"codex:user", "name":"local_notes"})["id"]
         for source in initial["sources"]:
             assert "未安装" in harness.rpc("changes.preview", {"connectionId":local,"targetSourceIds":[source["id"]]}, error=True)
         assert not any(Path(s["path"]).exists() for s in initial["sources"] if s["agent"] in {"openclaw", "kimicode", "zcode", "deepseek"})
-        passed("all eight supported clients remain visible but cannot register or configure targets when uninstalled, even with residual profiles")
+        passed("native clients remain visible but cannot write when uninstalled; manual import clients can prepare configuration offline")
         harness.install_clients()
-        assert all(a["installed"] and a["configurable"] for a in snapshot()["agents"])
+        assert all(a["installed"] and a["configurable"] for a in snapshot()["agents"] if a["id"] in NATIVE)
         passed("refreshing after installation enables configuration without creating native config files")
 
         # Retired clients and old Kimi CLI directories must not become active integrations.
@@ -108,11 +111,11 @@ def main():
         assert before_preview == {s["id"]: Path(s["path"]).read_bytes() if Path(s["path"]).exists() else None for s in sources}
         applied = harness.rpc("changes.apply", {"planId":plan["planId"]})
         assert all(r["status"] == "applied" for r in applied["results"]), applied
-        passed("one read-only preview and transactional batch applies shared native MCP entries to all eight formats and DSH profiles")
+        passed("one read-only preview and transactional batch applies shared native MCP entries to nine formats and DSH profiles")
 
         shared = snapshot()
         bindings = [b for b in shared["bindings"] if b.get("connectionId") == office]
-        assert {b["agent"] for b in bindings} == SUPPORTED
+        assert {b["agent"] for b in bindings} == NATIVE
         assert all(b["mode"] == "shared" and not b["changed"] for b in bindings), bindings
         for source in sources:
             assert "synthetic-fixture-authorization" not in Path(source["path"]).read_text(encoding="utf-8")
@@ -125,10 +128,10 @@ def main():
         passed("JSON5 comments, provider fields and unrelated dynamic Cordis YAML survive shared writes without credential literals")
 
         # Native enable semantics are per-client; Claude owns its project preference toggles.
-        togglable = [s for s in sources if s["agent"] != "claude"]
+        togglable = [s for s in sources if s["agent"] not in {"claude", "workbuddy"}]
         harness.changes(office, [s["id"] for s in togglable], action="disable")
         disabled = snapshot()
-        assert all(not b["enabled"] for b in disabled["bindings"] if b.get("connectionId") == office and b["agent"] != "claude")
+        assert all(not b["enabled"] for b in disabled["bindings"] if b.get("connectionId") == office and b["agent"] not in {"claude", "workbuddy"})
         harness.changes(office, [s["id"] for s in togglable], action="enable")
         assert all(b["enabled"] for b in snapshot()["bindings"] if b.get("connectionId") == office)
         claude = next(s for s in sources if s["agent"] == "claude")
@@ -271,6 +274,13 @@ def main():
             assert requests == [], "keep-native was sent to a daemon that does not recognize it"
             harness.rpc("connections.delete", {"id":office,"keepNative":False}, error=True)
             assert requests == ["/rpc"], "ordinary deletion should still reach an API 13 daemon"
+            requests.clear()
+            OldBackend.management_api = 14
+            assert "旧后台" in harness.rpc("snapshot", error=True)
+            assert "旧后台" in harness.rpc("sources.add", {"agent":"workbuddy"}, error=True)
+            assert "旧后台" in harness.rpc("connections.export_config", {"targetAgent":"qwenwork","connectionIds":[office],"mode":"direct"}, error=True)
+            assert "旧后台" in harness.rpc("changes.preview", {"connectionId":office,"targetSourceIds":["native:workbuddy:fixture"]}, error=True)
+            assert requests == [], "office integration operations reached an API 14 daemon"
         finally:
             runtime_path.write_bytes(original_runtime)
             old_backend.shutdown()
@@ -278,6 +288,7 @@ def main():
             thread.join(timeout=5)
         passed("API 8 backends reject client configuration operations before bypassing installation-state checks")
         passed("API 13 blocks keep-native before dispatch and accepts ordinary deletion requests")
+        passed("API 14 blocks office inventory, WorkBuddy configuration and manual exports before dispatch")
 
         assert retired.read_text(encoding="utf-8").startswith('{"servers"')
         assert old_kimi.read_text(encoding="utf-8").startswith('{"mcpServers"')

@@ -31,7 +31,7 @@ export function SourceDialog({
             await rpc("sources.add", {
               agent,
               scope: scope === "readonly" ? null : scope,
-              path: scoped && agent === "claude" ? null : path || null,
+              path: scoped && agent !== "opencode" ? null : path || null,
               project: scoped ? project : null,
             });
             await onSaved();
@@ -52,9 +52,9 @@ export function SourceDialog({
             {agent === "claude" && (
               <option value="local">Local · 个人项目配置</option>
             )}
-            {["claude", "opencode", "zcode", "kimicode"].includes(agent) && (
-              <option value="project">Project · 项目配置</option>
-            )}
+            {["claude", "opencode", "zcode", "kimicode", "workbuddy"].includes(
+              agent,
+            ) && <option value="project">Project · 项目配置</option>}
             {agent === "claude" && (
               <option value="readonly">其他 JSON · 只读盘点</option>
             )}
@@ -134,7 +134,9 @@ export function SourceDialog({
               ? "User 与 Local 使用 .claude.json 的不同位置；Local 按 Git 项目根目录定位。Project 使用所选目录的 .mcp.json，客户端审批及信任由 Claude Code 维护。插件与托管来源保持只读。"
               : agent === "deepseek"
                 ? "按 profile 管理 cordis.patch.yml 中的 MCP 插件，可选择 desktop、web 或其他实际 profile。共享代理写入原生 stdio 入口。"
-                : "使用当前原生 MCP 格式，支持配置管理及共享代理。文件仅在应用预览后的变更时写入。"}
+                : agent === "workbuddy"
+                  ? "用户与项目配置均为 .workbuddy/mcp.json。可预览写入、移除及恢复；启停与信任请在 WorkBuddy 中维护。"
+                  : "使用当前原生 MCP 格式，支持配置管理及共享代理。文件仅在应用预览后的变更时写入。"}
         </p>
         {error && (
           <div className="warning-banner" role="alert">
