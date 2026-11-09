@@ -159,10 +159,8 @@ fn main() {
                 background::quit(app);
             }
             #[cfg(target_os = "macos")]
-            tauri::RunEvent::Reopen { .. } => {
-                if !background::is_quitting(app) {
-                    background::show(app);
-                }
+            tauri::RunEvent::Reopen { .. } if !background::is_quitting(app) => {
+                background::show(app);
             }
             _ => {}
         }

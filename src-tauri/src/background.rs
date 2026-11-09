@@ -340,7 +340,7 @@ pub fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         app.autolaunch().is_enabled()?,
         None::<&str>,
     )?;
-    let quit = MenuItem::with_id(
+    let quit_item = MenuItem::with_id(
         app,
         "tray.quit_all",
         "退出 mcplink（停止共享）",
@@ -366,7 +366,7 @@ pub fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             &autostart,
             &separator2,
             &keep,
-            &quit,
+            &quit_item,
         ],
     )?;
     app.manage(Background {
@@ -374,7 +374,7 @@ pub fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         pause,
         autostart,
         health,
-        quit,
+        quit: quit_item,
         keep,
         state: AtomicU8::new(0),
         action: tokio::sync::Mutex::new(()),
