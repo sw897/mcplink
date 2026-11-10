@@ -7,6 +7,7 @@ from pathlib import Path
 import secrets
 import subprocess
 import threading
+import time
 import tomllib
 
 from run import BINARY, Harness, ROOT
@@ -37,7 +38,9 @@ def main():
                     or self.headers.get("X-Fixture") != secret):
                 return self.send_error(403)
             request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            if request.get("method") not in {"snapshot","connections.detail","connections.save","connections.export_config","changes.preview","changes.apply","sources.add","connections.source_detail","connections.import","connections.detach","connections.probe","changes.preview_restore","changes.restore","credentials.disconnect","changes.history"}:
+            if request.get("method") == "gateway.save" and request.get("params", {}).get("title") == "异步关闭入口":
+                time.sleep(1.5)
+            if request.get("method") not in {"snapshot","connections.detail","connections.save","connections.export_config","changes.preview","changes.apply","sources.add","connections.source_detail","connections.import","connections.detach","connections.probe","changes.preview_restore","changes.restore","credentials.disconnect","changes.history","gateway.save"}:
                 return self.send_error(403)
             if request["method"] == "sources.add" and request.get("params") != {"agent":"codex","path":str(extra)}:
                 return self.send_error(403)
@@ -122,6 +125,8 @@ if (location.origin === ORIGIN) {
         audit("connect")
         browser("screenshot",str(record/"connect-min.png"))
         checks.append("minimum-size dialog keeps focus and preview button visible")
+        wait_for("document.querySelector('dialog input[name=mode]:checked')?.value !== 'direct' && document.querySelector('dialog .mode-choices label.chosen')?.innerText.includes('单服务入口')")
+        browser("click","dialog .mode-choices label:first-child")
         browser("find","first","dialog label.target input","click")
         browser("find","role","button","click","--name","预览变更")
         browser("wait","--text","核对配置变更")
@@ -171,7 +176,7 @@ if (location.origin === ORIGIN) {
 
         button("研发文档 详情")
         button("管理")
-        wait_for("document.querySelector('dialog .target input:checked')?.closest('label').innerText.includes('Hermes') && document.querySelector('dialog input[name=mode]:checked')?.parentElement.innerText.includes('共享')")
+        wait_for("document.querySelector('dialog .target input:checked')?.closest('label').innerText.includes('Hermes') && document.querySelector('dialog input[name=mode]:checked')?.parentElement.innerText.includes('单服务入口')")
         browser("screenshot",str(record/"manage-binding.png"))
         browser("press","Escape")
         button("研发文档 详情")
@@ -251,6 +256,7 @@ if (location.origin === ORIGIN) {
             wait_for("document.querySelector('.agent-unavailable')?.innerText.includes('导入结果需在客户端确认') && !document.querySelector('.agent-source-details')")
             button(f"生成 办公接入验收 的 {client} 配置")
             wait_for("document.querySelectorAll('dialog .target input:checked').length === 1 && document.querySelector('dialog .target input:checked')?.closest('label').innerText.includes(" + json.dumps(client) + ")")
+            browser("click","dialog .mode-choices label:first-child")
             button("生成导入配置")
             browser("wait","--text",f"{client} · 待客户端导入")
             wait_for("document.querySelector('dialog .modal-body').scrollTop === 0")
@@ -301,6 +307,7 @@ if (location.origin === ORIGIN) {
         assert row > 0
         browser("click", f".agent-service-row:nth-child({row}) .cell-add")
         wait_for("document.querySelectorAll('dialog .target input:checked').length === 1 && !document.querySelector('dialog .target input:checked').closest('label').innerText.includes('客户端导入')")
+        browser("click", "dialog .mode-choices label:first-child")
         button("预览变更")
         browser("wait", "--text", "核对配置变更")
         button("应用配置")
@@ -335,6 +342,7 @@ if (location.origin === ORIGIN) {
         assert row > 0
         browser("click", f".agent-service-row:nth-child({row}) .cell-add")
         wait_for("document.querySelectorAll('dialog .target input:checked').length === 1 && !document.querySelector('dialog .target input:checked').closest('label').innerText.includes('客户端导入')")
+        browser("click", "dialog .mode-choices label:first-child")
         button("预览变更")
         browser("wait", "--text", "核对配置变更")
         button("应用配置")
@@ -349,9 +357,163 @@ if (location.origin === ORIGIN) {
         assert json.loads(browser("eval", "!document.querySelector('dialog input[placeholder=\"完整 JSON 文件路径\"]')"))
         button("关闭")
         checks.append("installed Pi applies strict native HTTP through preview and explains its built-in MCP and project trust requirements")
+        wait_for("!!document.querySelector('dialog[aria-label=配置来源]')")
+        button("关闭")
+        wait_for("!document.querySelector('dialog[open]')")
+
+        browser("click", "nav button:first-child")
+        button("办公接入验收 详情")
+        button("编辑")
+        wait_for("document.querySelector('dialog .modal-body')?.scrollHeight > document.querySelector('dialog .modal-body')?.clientHeight")
+        browser("eval", "window.scrollTo(0, (document.documentElement.scrollHeight-innerHeight)/2)")
+        wait_for("window.scrollY > 100 && window.scrollY < document.documentElement.scrollHeight-innerHeight-100")
+
+        def modal_wheel(delta, inside=False):
+            point = json.loads(browser("eval", "(()=>{const r=document.querySelector('dialog .modal-body').getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()")) if inside else {"x":8,"y":300}
+            before = json.loads(browser("eval", "window.scrollY"))
+            browser("mouse", "move", str(round(point["x"])), str(round(point["y"])))
+            browser("mouse", "wheel", str(delta))
+            browser("eval", "new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve(true))))")
+            after = json.loads(browser("eval", "window.scrollY"))
+            result.setdefault("scroll_observations", []).append({"inside":inside,"delta":delta,"before":before,"after":after})
+            assert abs(after-before) <= 1, ("modal scrolled the background", before, after)
+
+        modal_wheel(300)
+        modal_wheel(200, inside=True)
+        wait_for("document.querySelector('dialog .modal-body').scrollTop > 0")
+        browser("eval", "document.querySelector('dialog .modal-body').scrollTop=1e6")
+        modal_wheel(600, inside=True)
+        browser("eval", "document.querySelector('dialog .modal-body').scrollTop=0")
+        modal_wheel(-600, inside=True)
+        browser("screenshot", str(record/"modal-scroll-contained.png"))
+        button("关闭")
+        wait_for("!document.querySelector('dialog[open]')")
+        browser("eval", "window.scrollTo(0, (document.documentElement.scrollHeight-innerHeight)/2)")
+        unlocked = json.loads(browser("eval", "window.scrollY"))
+        browser("mouse", "move", "900", "300")
+        browser("mouse", "wheel", "200")
+        wait_for("window.scrollY > " + str(unlocked+50))
+        checks.append("modal blocks backdrop and edge scroll chaining while its body scrolls, and closing unlocks the page")
+
+        # A retained binding is not proof that its native configuration still exists.
+        status_id = harness.rpc("connections.save", {"name":"binding_state","title":"接入状态验收",
+            "definition":{"url":harness.url}})["id"]
+        harness.changes(status_id, ["hermes:user"])
+        hermes_path = harness.home / ".hermes/config.yaml"
+        configured = hermes_path.read_text()
+        assert "  binding_state:" in configured
+
+        def service_state(expression):
+            browser("click", "nav button:first-child")
+            button("刷新本机配置")
+            wait_for("[...document.querySelectorAll('.service-card')].some(card=>card.querySelector('.service-name strong')?.textContent==='接入状态验收' && (" + expression + "))")
+
+        def account_state(expression):
+            button("账号")
+            wait_for("[...document.querySelectorAll('.account-card')].some(card=>card.querySelector('.account-heading h2')?.textContent==='接入状态验收' && (" + expression + "))")
+
+        linked_account = "[...card.querySelectorAll('dl > div')].find(row=>row.querySelector('dt')?.textContent==='关联 Agent')?.querySelector('dd')?.textContent"
+        service_state("card.querySelector('.agent-tag')?.textContent.includes('Hermes')")
+        account_state(linked_account + " === 'Hermes'")
+        hermes_path.write_text(configured.replace("  binding_state:", "  moved_binding_state:", 1))
+        assert any(b.get("connectionId")==status_id and b.get("missing") for b in harness.rpc("snapshot")["bindings"])
+        service_state("card.innerText.includes('尚未接入 Agent')")
+        account_state(linked_account + " === '尚未接入'")
+        wait_for("[...document.querySelectorAll('.account-card')].some(card=>card.querySelector('.account-heading h2')?.textContent==='接入状态验收' && card.querySelector('.binding-warning')?.innerText.includes('Hermes · 配置缺失'))")
+        audit("binding-missing")
+        browser("scrollintoview", 'button[aria-label="接入状态验收：Hermes · 配置缺失"]')
+        browser("screenshot", str(record/"account-binding-missing.png"))
+        service_state("card.querySelector('.binding-warning')?.innerText.includes('Hermes · 配置缺失') && !card.querySelector('.agent-tag')")
+        browser("scrollintoview", 'button[aria-label="接入状态验收：Hermes · 配置缺失"]')
+        browser("screenshot", str(record/"binding-missing.png"))
+        browser("find", "role", "button", "click", "--name", "接入状态验收：Hermes · 配置缺失")
+        wait_for("document.querySelector('dialog')?.innerText.includes('配置条目缺失，可清理绑定')")
+        browser("press", "Escape")
+        checks.append("a removed native entry is excluded from both service and account summaries, with a repair link")
+
+        browser("find", "role", "button", "click", "--name", "接入状态验收：Hermes · 配置缺失")
+        button("管理")
+        wait_for("document.querySelector('dialog select')?.value==='upsert' && document.querySelector('dialog .target')?.innerText.includes('配置缺失') && !document.querySelector('dialog .target')?.innerText.includes('已有接入')")
+        button("预览变更")
+        browser("wait", "--text", "核对配置变更")
+        button("应用配置")
+        browser("wait", "--text", "接入结果")
+        button("完成")
+        service_state("!card.querySelector('.binding-warning') && card.querySelector('.agent-tag')?.innerText.includes('Hermes')")
+        account_state(linked_account + " === 'Hermes' && !card.querySelector('.binding-warning')")
+        checks.append("managing a missing binding defaults to reattachment and preview/apply repairs both summaries")
+        hermes_path.write_text(configured.replace("  binding_state:", "  moved_binding_state:", 1))
+
+        harness.changes(status_id, ["codex:user"])
+        service_state("card.querySelector('.agent-tag')?.innerText.includes('Codex') && !card.querySelector('.agent-tag')?.innerText.includes('Hermes') && card.querySelector('.binding-warning')?.innerText.includes('Hermes · 配置缺失')")
+        account_state(linked_account + " === 'Codex'")
+        hermes_path.write_text("mcp_servers: [broken\n")
+        service_state("card.querySelector('.binding-warning')?.innerText.includes('Hermes · 来源无法读取') && card.querySelector('.agent-tag')?.innerText.includes('Codex')")
+        account_state(linked_account + " === 'Codex' && card.querySelector('.binding-warning')?.innerText.includes('Hermes · 来源无法读取')")
+        checks.append("remaining native bindings stay visible while missing and unreadable sources are reported separately")
+
+        hermes_path.write_text(configured)
+        harness.changes(status_id, ["hermes:user"], action="disable")
+        service_state("!card.querySelector('.binding-warning') && [...card.querySelectorAll('.agent-tag')].some(tag=>tag.innerText.includes('Hermes') && tag.innerText.includes('已停用'))")
+        account_state(linked_account + "?.includes('Hermes') && !card.querySelector('.binding-warning')")
+        audit("binding-status")
+        browser("screenshot", str(record/"binding-restored.png"))
+        harness.changes(status_id, ["hermes:user", "codex:user"], action="remove")
+        harness.rpc("connections.delete", {"id":status_id})
+        checks.append("restored disabled configurations remain associated without a stale missing warning")
+        for name, title in [("gateway_alpha", "聚合服务甲"), ("gateway_beta", "聚合服务乙")]:
+            harness.rpc("connections.save", {"name":name,"title":title,"definition":{"url":harness.url,"headers":{"Authorization":"synthetic-fixture-authorization"}}})
+        button("刷新本机配置")
+        button("统一入口")
+        browser("click", ".header-actions button.primary")
+        browser("find", "label", "入口名称", "fill", "桌面聚合入口")
+        browser("find", "label", "聚合服务甲", "click")
+        browser("find", "label", "聚合服务乙", "click")
+        audit("gateway-selection")
+        button("保存服务选择")
+        wait_for("document.querySelector('dialog')?.innerText.includes('入口中的服务') && document.querySelectorAll('dialog .binding-detail').length === 2")
+        browser("press", "Escape")
+        wait_for("document.querySelector('article h2')?.textContent === '桌面聚合入口'")
+        button("接给 Agent")
+        wait_for("document.querySelectorAll('dialog .mode-choices input').length === 1 && document.querySelector('dialog .mode-choices')?.innerText.includes('统一入口')")
+        browser("find", "text", "Hermes · 用户配置", "click")
+        button("预览变更")
+        browser("wait", "--text", "核对配置变更")
+        button("应用配置")
+        browser("wait", "--text", "接入结果")
+        button("完成")
+        native_before = hermes_path.read_bytes()
+        button("服务选择")
+        browser("find", "label", "聚合服务乙", "click")
+        button("保存服务选择")
+        wait_for("document.querySelector('dialog')?.innerText.includes('入口中的服务') && document.querySelectorAll('dialog .binding-detail').length === 2")
+        browser("press", "Escape")
+        wait_for("!document.querySelector('dialog[open]')")
+        assert hermes_path.read_bytes() == native_before
+        wait_for("document.querySelector('article')?.innerText.includes('1 项托管服务')")
+        browser("screenshot", str(record/"gateway-entry.png"))
+        audit("gateways")
+        button("账号")
+        wait_for("![...document.querySelectorAll('article h2')].some(h=>h.textContent === '桌面聚合入口') && [...document.querySelectorAll('article')].some(a=>a.querySelector('h2')?.textContent === '聚合服务甲' && a.innerText.includes('Hermes'))")
+        browser("click", "nav button:first-child")
+        wait_for("![...document.querySelectorAll('.service-name')].some(b=>b.innerText.includes('桌面聚合入口'))")
+        checks.append("desktop creates an aggregate entry, configures Hermes once, updates its service view without rewriting native config and attributes shared accounts correctly")
+        button("统一入口")
+        browser("click", ".header-actions button.primary")
+        browser("find", "label", "入口名称", "fill", "异步关闭入口")
+        button("保存服务选择")
+        browser("press", "Escape")
+        wait_for("document.querySelectorAll('.account-card').length === 2 && !document.querySelector('dialog[open]')")
+        checks.append("closing an aggregate editor during an in-flight save refreshes the entry without reopening a dialog")
         result["conclusion"]="PASS"
     finally:
         try:
+            if result["conclusion"] != "PASS":
+                try:
+                    (record/"failure-snapshot.txt").write_text(browser("snapshot"))
+                    browser("screenshot", str(record/"failure.png"))
+                except subprocess.SubprocessError:
+                    pass
             browser("close")
         finally:
             server.shutdown()

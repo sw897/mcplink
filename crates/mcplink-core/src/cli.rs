@@ -254,6 +254,9 @@ enum ChangeCommand {
         mode: String,
         #[arg(long, default_value = "upsert", value_parser = ["upsert", "disable", "enable", "remove"])]
         action: String,
+        /// 预览替换同一来源中所选服务的单服务共享入口，保留原生直连
+        #[arg(long)]
+        replace_shared: bool,
     },
     /// 应用指定预览；逐目标返回结果，任一失败退出 1
     Apply { plan_id: String },
@@ -270,6 +273,13 @@ enum ChangeCommand {
 
 #[derive(Subcommand)]
 enum GatewayCommand {
+    /// 查看已保存的聚合入口及其服务选择
+    List,
+    /// 保存聚合入口；只引用现有连接，不创建或复制账号授权
+    Save {
+        #[arg(long, required = true)]
+        stdin: bool,
+    },
     Status,
     Pause,
     Resume,
@@ -322,6 +332,7 @@ fn schema() -> Value {
                 "definition":{"command":"string (stdio)","args":"string[]","env":"object<string,string>","cwd":"string","url":"string (HTTP)","headers":"object<string,string>","enabled":"boolean (default true)","oauth":"boolean","clientId":"string or null","clientSecret":"string or null; masked on output","oauthScopes":"string[] (empty uses server suggestions)","oauthCallbackPort":"integer 1–65535 or null (automatic)","includeTools":"string[]","excludeTools":"string[]","includeSpecified":"boolean (true to restrict even when includeTools is empty)","timeout":"integer seconds","startupTimeout":"integer seconds","resourcesDisabled":"boolean","promptsDisabled":"boolean"},
                 "semantics":"Edit the normalized definition from connections show. Masked credentials stay with their origin. Changing origin suspends access. Metadata edits preserve connection state."},
             "credentials update":{"required":["value"],"optional":["header (default Authorization)"],"semantics":"Value stored verbatim, no Bearer prefix added"},
+            "gateway save":{"required":["connectionIds"],"optional":["id","editVersion","title"],"semantics":"Create an aggregate entry or replace its service selection. Updates require the returned editVersion. Empty selection exposes nothing. Members must be existing upstream connection IDs; authentication stays with those connections."},
             "credentials oauth-config":{"optional":{"clientId":"string or null","clientSecret":"string, retained mask or null","scopes":"string[]; empty uses server suggestions","callbackPort":"integer 1–65535 or null"},"semantics":"Partial update. Omitted fields retain values; null clears optional fields. Does not start login or switch Token mode; changes invalidate an existing OAuth grant. Secrets use stdin and the system credential store; direct native export is unavailable for managed OAuth parameters."},
             "mcp request":{"required":["method"],"optional":["params"]},
             "call":{"encoding":"tool arguments JSON object, preserved without string coercion","schema":"upstream inputSchema; drafts 4/6/7/2019-09/2020-12, default 2020-12; external retrieval disabled; format is annotation","invalidArgumentsExitCode":2},
@@ -573,9 +584,10 @@ async fn execute(command: Command, data: PathBuf) -> Result<Value, Failure> {
                 target,
                 mode,
                 action,
+                replace_shared,
             } => (
                 "changes.preview",
-                json!({"connectionIds":connection,"targetSourceIds":target,"mode":mode,"action":action}),
+                json!({"connectionIds":connection,"targetSourceIds":target,"mode":mode,"action":action,"replaceShared":replace_shared}),
                 None,
                 false,
             ),
@@ -594,6 +606,13 @@ async fn execute(command: Command, data: PathBuf) -> Result<Value, Failure> {
             }
         },
         Command::Gateway { command } => match command {
+            GatewayCommand::List => ("gateway.list", json!({}), None, false),
+            GatewayCommand::Save { .. } => (
+                "gateway.save",
+                stdin_json().await.map_err(Failure::input)?,
+                None,
+                false,
+            ),
             GatewayCommand::Status => ("gateway.status", json!({}), None, false),
             GatewayCommand::Pause => ("gateway.pause", json!({}), None, false),
             GatewayCommand::Resume => ("gateway.resume", json!({}), None, false),

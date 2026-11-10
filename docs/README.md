@@ -1,11 +1,12 @@
 # 项目文档
 
 - [English README](../README.md) · [中文项目说明与使用](../README.zh-CN.md)。
+- [产品定位](product.md)：多 MCP Server 统一接入、MCP 转 CLI 的目标、当前进度与验收标准。
 - [当前构建说明](release-notes.md)：功能、安装及交付清单。
-- [Agent CLI](agent-cli.md)：无 UI 管理、命令契约和操作流程。
+- [MCP 转 CLI 与管理接口](agent-cli.md)：工具调用、命令生成、JSON 契约和管理流程。
 - [Agent 配置适配](agent-adapters.md)：Claude Code 作用域与各客户端格式、权限。
 - [Agent 接入管理](agent-discovery.md)：完整客户端矩阵、配置作用域与操作流程。
-- [架构](architecture.md)：当前分层与数据流。
+- [架构](architecture.md)：单服务、聚合入口与 CLI 的认证和调用数据流。
 - [支持范围](compatibility.md)：平台、协议、认证及配置限制。
 - [后台运行](macos-background.md)：macOS 菜单栏、登录启动和退出；另见 [Windows 托盘与后台](windows-background.md)。
 - [端到端验证](../tests/e2e/README.md)：合成场景、可选原生客户端与跨平台测试入口。

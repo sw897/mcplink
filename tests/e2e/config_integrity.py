@@ -15,6 +15,75 @@ from agent_cli import AgentCli
 from run import BINARY
 
 
+def verify_missing_binding(h):
+    native = h.home / ".hermes/config.yaml"
+    original = native.read_bytes()
+    connection = h.cli("connections", "save", "--stdin", value={"name":"repair_docs", "definition":{
+        "url":h.url, "headers":{"Authorization":"synthetic-fixture-authorization"}}})["id"]
+    h.cli("connections", "probe", connection)
+
+    def preview(mode):
+        return h.cli("changes", "preview", "--connection", connection, "--target", "hermes:user", "--mode", mode)
+
+    for mode in ("direct", "shared"):
+        h.changes(connection, ["hermes:user"], mode=mode)
+        configured = native.read_text()
+        assert "  repair_docs:" in configured
+        renamed = configured.replace("  repair_docs:", f"  externally_renamed_{mode}:", 1)
+        native.write_text(renamed)
+        assert any(b.get("connectionId")==connection and b.get("missing") for b in h.rpc("snapshot")["bindings"])
+        plan = preview(mode)
+        assert plan["changes"][0]["kind"] == "add" and plan["changes"][0]["name"] == "repair_docs"
+        concurrent = renamed + "\n# external edit after preview\n"
+        native.write_text(concurrent)
+        failed = h.cli("changes", "apply", plan["planId"], exit_status=1)
+        assert failed["result"]["results"][0]["status"] == "failed" and native.read_text()==concurrent
+        applied = h.cli("changes", "apply", preview(mode)["planId"])["results"][0]
+        assert applied["status"] == "applied"
+        snapshot = h.rpc("snapshot")
+        binding = next(b for b in snapshot["bindings"] if b.get("connectionId")==connection)
+        assert not binding.get("missing") and not binding["changed"] and binding["mode"]==mode
+        assert any(b["name"]==f"externally_renamed_{mode}" and b.get("connectionId") is None for b in snapshot["bindings"])
+        if mode == "shared":
+            assert "result" in h.bridge(connection, "restored-shared-binding").call("tools/list")
+        h.passed(f"explicit {mode} reattachment recreates only the missing entry and rejects edits after preview")
+
+    configured = native.read_text()
+    aliased = configured.replace("  repair_docs:", "  bound_alias:", 1)
+    native.write_text(aliased)
+    assert h.cli("connections", "import", "--source", "hermes:user", "--name", "bound_alias")["id"] == connection
+    native.write_text(aliased.replace("  bound_alias:", "  retained_alias:", 1))
+    params = {"connectionId":connection,"targetSourceIds":["hermes:user"],"mode":"shared",
+              "bindingTarget":{"sourceId":"hermes:user","name":"bound_alias"}}
+    plan = h.rpc("changes.preview", params)
+    assert plan["changes"][0]["name"] == "bound_alias"
+    assert h.cli("changes", "apply", plan["planId"])["results"][0]["status"] == "applied"
+    assert "  bound_alias:" in native.read_text() and "  repair_docs:" not in native.read_text()
+    cleanup = h.rpc("changes.preview", {**params,"action":"remove"})
+    h.cli("changes", "apply", cleanup["planId"])
+    native.write_text(configured)
+    native.unlink()
+    assert h.cli("changes", "apply", preview("shared")["planId"])["results"][0]["status"] == "applied"
+    recreated = next(b for b in h.rpc("snapshot")["bindings"] if b.get("connectionId")==connection)
+    assert native.exists() and recreated["name"]=="repair_docs" and not recreated.get("missing")
+    native.write_text(configured)
+    h.passed("explicit reattachment retains the selected binding alias and can recreate a missing file")
+
+    configured = native.read_text()
+    changed = json.dumps({"mcp_servers":{"repair_docs":{"command":"/synthetic/changed-cli","args":["--changed"]}}})
+    native.write_text(changed)
+    error = h.cli("changes", "preview", "--connection", connection, "--target", "hermes:user", exit_status=1)
+    assert "外部修改" in error["error"]["message"] and native.read_text()==changed
+    native.write_text("mcp_servers: [broken\n")
+    h.cli("changes", "preview", "--connection", connection, "--target", "hermes:user", exit_status=1)
+    assert native.read_text()=="mcp_servers: [broken\n"
+    native.write_text(configured)
+    h.changes(connection, ["hermes:user"], action="remove")
+    h.cli("connections", "delete", connection)
+    native.write_bytes(original)
+    h.passed("reattachment still rejects externally changed existing entries and unreadable sources")
+
+
 def verify_origin(h):
     received = []
     class Endpoint(http.server.BaseHTTPRequestHandler):
@@ -51,6 +120,7 @@ def verify_origin(h):
 
 
 def verify(h):
+    verify_missing_binding(h)
     verify_origin(h)
     native = h.home / ".codex/config.toml"
 
@@ -198,11 +268,13 @@ def verify(h):
     h.passed("registered launchers are rechecked and nvm is discovered on Unix; symlink swaps refuse writes")
 
     h.cli("gateway", "stop")
-    fault("PRAGMA user_version=2")
+    with sqlite3.connect(h.data / "mcplink.sqlite3") as db:
+        future_schema = db.execute("PRAGMA user_version").fetchone()[0] + 1
+    fault(f"PRAGMA user_version={future_schema}")
     refused = subprocess.run([str(BINARY),"daemon"], env=h.environment, capture_output=True, timeout=10)
     assert refused.returncode != 0
     with sqlite3.connect(h.data / "mcplink.sqlite3") as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert db.execute("PRAGMA user_version").fetchone()[0] == future_schema
     h.passed("opening a newer database fails without downgrading its schema marker")
 
 

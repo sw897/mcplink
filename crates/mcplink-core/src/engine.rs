@@ -139,8 +139,17 @@ impl Engine {
             .set(&reference, &serde_json::to_string(definition)?)?;
         connection.definition_ref = reference;
         connection.revision += 1;
-        connection.transport = definition.transport().into();
-        connection.endpoint = definition.summary();
+        connection.transport = if connection.members.is_some() {
+            "aggregate"
+        } else {
+            definition.transport()
+        }
+        .into();
+        connection.endpoint = connection
+            .members
+            .as_ref()
+            .map(|members| format!("{} 项托管服务", members.len()))
+            .unwrap_or_else(|| definition.summary());
         let write = match binding {
             Some(binding) => self.store.save_bound_connection(connection, binding),
             None => self.store.save_connection(connection),
@@ -332,6 +341,7 @@ impl Engine {
         }
         let id = uuid::Uuid::new_v4().to_string();
         let mut connection = Connection {
+            members: None,
             id: id.clone(),
             name: name.into(),
             title: name.into(),
@@ -416,6 +426,9 @@ impl Engine {
             .and_then(Value::as_str)
             .map(|id| self.store.connection(id))
             .transpose()?;
+        if existing.as_ref().is_some_and(|c| c.members.is_some()) {
+            bail!("请通过统一入口管理服务选择，不能将聚合入口改为上游服务");
+        }
         let draft = p
             .get("sourceId")
             .and_then(Value::as_str)
@@ -526,6 +539,7 @@ impl Engine {
         }
         config::validate(&definition)?;
         let mut connection = existing.unwrap_or_else(|| Connection {
+            members: None,
             id: uuid::Uuid::new_v4().to_string(),
             name: name.into(),
             title: name.into(),
@@ -634,9 +648,13 @@ impl Engine {
         for id in ids {
             let connection = self.store.connection(&id)?;
             let definition = self.definition(&connection)?;
+            if action == "upsert" && mode == "direct" && connection.members.is_some() {
+                bail!("聚合入口必须通过 mcplink 接入；原生直连请选择单个上游服务");
+            }
             if action == "upsert"
                 && mode == "shared"
-                && (!connection.active || connection.status != "ready")
+                && (!connection.active
+                    || (connection.members.is_none() && connection.status != "ready"))
             {
                 bail!("请先检查共享连接并完成账号认证");
             }
@@ -654,10 +672,64 @@ impl Engine {
                 {
                     bail!("目标配置为符号链接，请添加真实配置文件作为来源");
                 }
-                let text = match virtual_files.get(&source.path) {
+                let mut text = match virtual_files.get(&source.path) {
                     Some(text) => text.clone(),
                     None => config::read(&source)?.0,
                 };
+                if p.get("replaceShared").and_then(Value::as_bool) == Some(true) {
+                    if action != "upsert" || mode != "shared" || connection.members.is_none() {
+                        bail!("仅聚合入口接入支持替换单服务共享配置");
+                    }
+                    for previous in bindings.iter().filter(|b| {
+                        b.source_id == source.id
+                            && b.mode == "shared"
+                            && connection.members.as_ref().is_some_and(|members| {
+                                members.iter().any(|m| m.connection_id == b.connection_id)
+                            })
+                    }) {
+                        let document = config::parse(&source, &text)?;
+                        let before = document
+                            .pointer("/mcp_servers")
+                            .and_then(|s| s.get(&previous.name))
+                            .cloned();
+                        if config::fingerprint(before.as_ref()) != previous.fingerprint
+                            && before.is_some()
+                        {
+                            bail!("待替换的单服务入口有外部修改，请先核对配置");
+                        }
+                        if !touched.insert((
+                            source.path.clone(),
+                            source.scope.clone(),
+                            source.project.clone(),
+                            config::name_key(&previous.name),
+                        )) {
+                            bail!("替换单服务入口时存在重复目标");
+                        }
+                        let rendered = if before.is_some() {
+                            config::render(&source, &text, &previous.name, None)?
+                        } else {
+                            text.clone()
+                        };
+                        changes.push(Change {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            connection_id: previous.connection_id.clone(),
+                            source_id: source.id.clone(),
+                            name: previous.name.clone(),
+                            mode: "shared".into(),
+                            action: "remove".into(),
+                            expected_hash: digest(text.as_bytes()),
+                            revision: self.store.connection(&previous.connection_id)?.revision,
+                            previous_binding: Some(previous.clone()),
+                            entry_version: Some(
+                                self.store.entry_version(&source.id, &previous.name)?,
+                            ),
+                            restore_unmanaged: false,
+                            before,
+                            after: None,
+                        });
+                        text = rendered;
+                    }
+                }
                 let document = config::parse(&source, &text)?;
                 let binding = bindings.iter().find(|b| {
                     b.connection_id == connection.id
@@ -694,7 +766,7 @@ impl Engine {
                 }
                 if let Some(binding) = binding {
                     if config::fingerprint(before.as_ref()) != binding.fingerprint
-                        && !(action == "remove" && before.is_none())
+                        && !(before.is_none() && matches!(action, "upsert" | "remove"))
                     {
                         bail!(
                             "{} 的条目有外部修改，请先采用来源更新或核对配置",
@@ -866,11 +938,14 @@ impl Engine {
             if !connection.active {
                 bail!("连接已断开，请先重新连接")
             }
+            if mode == "direct" && connection.members.is_some() {
+                bail!("聚合入口必须通过 mcplink 接入，不能导出为上游直连配置");
+            }
             if !names.insert(config::name_key(&connection.name)) {
                 bail!("导入服务名称重复，请分开导出或先修改接入名称")
             }
             let def = if mode == "shared" {
-                if connection.status != "ready" {
+                if connection.members.is_none() && connection.status != "ready" {
                     bail!("请先检查共享连接并完成账号认证")
                 }
                 serde_json::from_value(
@@ -1189,6 +1264,13 @@ impl Engine {
     }
 
     fn begin_connection_deletion(&self, id: &str, keep_native: bool) -> Result<ConnectionDeletion> {
+        if self.store.connections()?.iter().any(|c| {
+            c.members
+                .as_ref()
+                .is_some_and(|members| members.iter().any(|m| m.connection_id == id))
+        }) {
+            bail!("此服务仍被统一入口使用，请先从入口的服务选择中移除");
+        }
         if self
             .store
             .pending_operations()?
@@ -1254,7 +1336,26 @@ impl Engine {
         if *self.shutdown.borrow() && !matches!(method, "gateway.status" | "gateway.stop") {
             bail!("共享后台正在退出，请在退出完成后重新连接");
         }
+        if (method.starts_with("credentials.") || method.starts_with("oauth."))
+            && p.get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| self.store.connection(id).is_ok_and(|c| c.members.is_some()))
+        {
+            bail!("统一入口不保存账号授权，请在上游服务的账号中维护认证");
+        }
         match method {
+            "gateway.list" => Ok(json!(
+                self.store
+                    .connections()?
+                    .iter()
+                    .filter(|c| c.members.is_some())
+                    .map(Connection::public_value)
+                    .collect::<Vec<_>>()
+            )),
+            "gateway.save" => {
+                let _guard = self.mutation.lock().await;
+                crate::gateway::save(self, &p)
+            }
             "snapshot" => self.snapshot(),
             "changes.reconcile" => {
                 let _guard = self.mutation.lock().await;
@@ -1417,9 +1518,12 @@ impl Engine {
             }
             "connections.detail" => {
                 let connection = self.store.connection(required(&p, "id")?)?;
-                Ok(
-                    json!({"connection":connection.public_value(),"definition":connection.editable_definition(&self.definition(&connection)?)}),
-                )
+                let definition = if connection.members.is_some() {
+                    Value::Null
+                } else {
+                    connection.editable_definition(&self.definition(&connection)?)
+                };
+                Ok(json!({"connection":connection.public_value(),"definition":definition}))
             }
             "connections.delete" => {
                 let _guard = self.mutation.lock().await;
@@ -1593,6 +1697,13 @@ impl Engine {
                 if self.paused.load(Ordering::SeqCst) {
                     bail!("共享后台已暂停，请在 mcplink 恢复");
                 }
+                let connection = self.store.connection(required(&p, "id")?)?;
+                if connection.members.is_some() {
+                    if !connection.active {
+                        bail!("统一入口已停用");
+                    }
+                    return Ok(crate::gateway::description());
+                }
                 let peer = self.pool.peer(self.clone(), required(&p, "id")?).await?;
                 let mut info =
                     serde_json::to_value(peer.peer_info().context("上游未返回服务信息")?)?;
@@ -1636,7 +1747,11 @@ impl Engine {
     async fn probe(self: &Arc<Self>, id: &str) -> Result<Value> {
         let expected_revision = self.store.connection(id)?.revision;
         let temporary = McpPool::default();
-        let shared = self
+        let shared = self.store.connections()?.iter().any(|c| {
+            c.members
+                .as_ref()
+                .is_some_and(|members| members.iter().any(|m| m.connection_id == id))
+        }) || self
             .store
             .bindings()?
             .iter()
@@ -1646,9 +1761,9 @@ impl Engine {
         } else {
             &temporary
         };
-        let result = crate::invocation::discover_with_pool(self.clone(), id, pool)
+        let result = crate::invocation::discover_report(self.clone(), id, pool)
             .await
-            .map(|(_, tools)| json!({"tools":tools}));
+            .map(|(_, tools, errors)| json!({"tools":tools,"upstreamErrors":errors}));
         temporary.shutdown().await?;
         let _mutation = self.mutation.lock().await;
         let mut connection = self.store.connection(id)?;
@@ -1671,10 +1786,15 @@ impl Engine {
                     .unwrap_or_default();
                 connection.status = "ready".into();
                 connection.tool_count = Some(tools.len());
-                connection.last_error = None;
+                connection.last_error = value["upstreamErrors"]
+                    .as_array()
+                    .filter(|errors| !errors.is_empty())
+                    .map(|errors| {
+                        format!("{} 项上游暂不可用，请检查入口服务与账号授权", errors.len())
+                    });
                 self.store.save_connection(&connection)?;
                 Ok(
-                    json!({"connection":connection.public_value(),"tools":tools,"schemaHash":digest(&serde_json::to_vec(&value)?) }),
+                    json!({"connection":connection.public_value(),"tools":tools,"upstreamErrors":value["upstreamErrors"],"schemaHash":digest(&serde_json::to_vec(&value)?) }),
                 )
             }
             Err(error) => {

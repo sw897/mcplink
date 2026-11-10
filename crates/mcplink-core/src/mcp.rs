@@ -133,6 +133,9 @@ impl McpPool {
 
     pub async fn peer(&self, engine: Arc<Engine>, id: &str) -> Result<Peer<RoleClient>> {
         let connection = engine.store.connection(id)?;
+        if connection.members.is_some() {
+            bail!("聚合入口通过托管服务路由，不能作为上游建立会话");
+        }
         if !connection.active {
             bail!("连接已断开，请在账号页重新连接");
         }
@@ -362,6 +365,9 @@ impl McpPool {
                 code: crate::invocation::ToolErrorCode::ConnectionChanged,
                 details: Value::Null
             });
+        }
+        if connection.members.is_some() {
+            return crate::gateway::request(engine, &connection, request).await;
         }
         let definition = engine.definition(&connection)?;
         if method.starts_with("resources/") && definition.resources_disabled

@@ -48,6 +48,7 @@ import {
 import { Status, ModalNotice, Modal } from "./Modal";
 import { SourceDialog } from "./SourceDialog";
 import { ConnectDialog, ChangeDiff } from "./ConnectDialog";
+import { GatewayDialog } from "./GatewayDialog";
 import { importInstructions } from "./ImportConfigCard";
 import { Editor, CredentialDialog } from "./ConnectionEditor";
 import "./style.css";
@@ -55,9 +56,9 @@ import "./style.css";
 const toolKey = (connection: Connection) =>
   JSON.stringify([connection.id, connection.revision, connection.checkedAt]);
 function App() {
-  const [page, setPage] = useState<"services" | "accounts" | "agents">(
-    "services",
-  );
+  const [page, setPage] = useState<
+    "services" | "gateways" | "accounts" | "agents"
+  >("services");
   const [data, setData] = useState<Snapshot>();
   const [desktop, setDesktop] = useState<DesktopStatus>();
   const [activeAgent, setActiveAgent] = useState<Agent>("codex");
@@ -236,9 +237,11 @@ function App() {
       setNotice({
         text:
           result.connection.status === "ready"
-            ? `已连接，发现 ${result.tools.length} 个工具`
+            ? result.connection.lastError ||
+              `已连接，发现 ${result.tools.length} 个工具`
             : result.connection.lastError || "上游返回错误，请查看连接详情",
-        error: result.connection.status !== "ready",
+        error:
+          result.connection.status !== "ready" || !!result.connection.lastError,
       });
       setDialog({ kind: "detail", connection: result.connection });
     }
@@ -254,6 +257,37 @@ function App() {
       (binding) =>
         binding.connectionId === connection.id || binding.id === connection.id,
     ) || [];
+  const viaGateways = (connection: Connection) =>
+    data?.connections.filter((entry) =>
+      entry.members?.some((member) => member.connectionId === connection.id),
+    ) || [];
+  const presentBindings = (connection: Connection) =>
+    [
+      ...ownBindings(connection),
+      ...viaGateways(connection).flatMap(ownBindings),
+    ].filter((binding) => !binding.missing);
+  const bindingWarning = (connection: Connection) => {
+    const warnings = [
+      ...new Set(
+        ownBindings(connection)
+          .filter((binding) => binding.missing)
+          .map(
+            (binding) =>
+              `${agentLabel(binding.agent)} · ${binding.unavailable ? "来源无法读取" : "配置缺失"}`,
+          ),
+      ),
+    ].join("、");
+    return warnings ? (
+      <button
+        className="text-button binding-warning"
+        aria-label={`${connection.title}：${warnings}`}
+        onClick={() => setDialog({ kind: "detail", connection })}
+      >
+        <CircleHelp size={14} />
+        <span>{warnings}</span>
+      </button>
+    ) : null;
+  };
   const list =
     data?.connections.filter((connection) => {
       const matches =
@@ -261,11 +295,12 @@ function App() {
           .toLowerCase()
           .includes(query.toLowerCase());
       return (
+        !connection.members &&
         matches &&
         (filter === "all" ||
           filter === connection.transport ||
           (filter === "shared" &&
-            ownBindings(connection).some(
+            presentBindings(connection).some(
               (binding) => binding.mode === "shared",
             )))
       );
@@ -290,8 +325,8 @@ function App() {
     data?.connections.filter(
       (connection) =>
         !agentOnlyConfigured ||
-        ownBindings(connection).some(
-          (binding) => binding.agent === currentAgent?.id && !binding.missing,
+        presentBindings(connection).some(
+          (binding) => binding.agent === currentAgent?.id,
         ),
     ) || [];
   const chooseAgent = (agent: Agent) => {
@@ -343,6 +378,24 @@ function App() {
       (binding) => binding.agent === agent,
     );
     if (!bindings.length) {
+      const entry = viaGateways(connection).find((entry) =>
+        ownBindings(entry).some(
+          (binding) => binding.agent === agent && !binding.missing,
+        ),
+      );
+      if (entry)
+        return (
+          <button
+            className="binding"
+            onClick={() => setDialog({ kind: "detail", connection: entry })}
+          >
+            <span>
+              <Check size={14} />
+              已配置
+            </span>
+            <small>经统一入口</small>
+          </button>
+        );
       const available = sourcesFor(agent);
       const missing = available.length === 0;
       const writable = available.some((source) => !source.readOnly);
@@ -420,6 +473,7 @@ function App() {
           {(
             [
               { id: "services", label: "MCP 服务", icon: Server },
+              { id: "gateways", label: "统一入口", icon: Link2 },
               { id: "accounts", label: "账号", icon: KeyRound },
               { id: "agents", label: "Agent", icon: Users },
             ] as const
@@ -435,7 +489,7 @@ function App() {
               <item.icon size={18} />
               {item.label}
               {item.id === "services" && data && (
-                <span>{data.connections.length}</span>
+                <span>{data.connections.filter((c) => !c.members).length}</span>
               )}
             </button>
           ))}
@@ -495,16 +549,20 @@ function App() {
             <h1>
               {page === "services"
                 ? "MCP 服务"
-                : page === "accounts"
-                  ? "账号"
-                  : "Agent"}
+                : page === "gateways"
+                  ? "统一入口"
+                  : page === "accounts"
+                    ? "账号"
+                    : "Agent"}
             </h1>
             <p className="subtitle">
               {page === "services"
-                ? "查看已有连接，接给你常用的 Agent。"
-                : page === "accounts"
-                  ? "查看认证由谁维护，以及哪些 Agent 正在使用。"
-                  : "选择客户端，查看配置位置与 MCP 服务接入。"}
+                ? "添加服务与托管账号，供 MCP 入口和 CLI 使用。"
+                : page === "gateways"
+                  ? "每个 Agent 配置一个入口，使用所选的多个 MCP 服务。"
+                  : page === "accounts"
+                    ? "查看认证由谁维护，以及哪些 Agent 正在使用。"
+                    : "选择客户端，查看配置位置与 MCP 服务接入。"}
             </p>
           </div>
           <div className="header-actions">
@@ -520,10 +578,12 @@ function App() {
             </button>
             <button
               className="button primary"
-              onClick={() => setDialog({ kind: "editor" })}
+              onClick={() =>
+                setDialog({ kind: page === "gateways" ? "gateway" : "editor" })
+              }
             >
               <Plus size={16} />
-              添加 MCP
+              {page === "gateways" ? "创建统一入口" : "添加 MCP"}
             </button>
           </div>
         </header>
@@ -679,9 +739,8 @@ function App() {
                   )}
                   {list.map((connection) => {
                     const linkedAgents = localAgents.filter((client) =>
-                      ownBindings(connection).some(
-                        (binding) =>
-                          binding.agent === client.id && !binding.missing,
+                      presentBindings(connection).some(
+                        (binding) => binding.agent === client.id,
                       ),
                     );
                     return (
@@ -744,7 +803,7 @@ function App() {
                           <div
                             className="linked-agents"
                             role="group"
-                            aria-label="已接入 Agent"
+                            aria-label="Agent 接入状态"
                           >
                             {linkedAgents.length ? (
                               linkedAgents.map((client) => (
@@ -763,16 +822,15 @@ function App() {
                                   <small>
                                     {!client.installed
                                       ? "未安装"
-                                      : ownBindings(connection).some(
+                                      : presentBindings(connection).some(
                                             (binding) =>
                                               binding.agent === client.id &&
                                               binding.enabled,
                                           )
-                                        ? ownBindings(connection).some(
+                                        ? presentBindings(connection).some(
                                             (binding) =>
                                               binding.agent === client.id &&
                                               binding.enabled &&
-                                              !binding.missing &&
                                               binding.mode === "shared",
                                           )
                                           ? "共享"
@@ -784,6 +842,7 @@ function App() {
                             ) : (
                               <span className="muted">尚未接入 Agent</span>
                             )}
+                            {bindingWarning(connection)}
                           </div>
                           <button
                             className="button small"
@@ -834,13 +893,96 @@ function App() {
                 </footer>
               </>
             )}
+            {page === "gateways" && (
+              <div className="account-list">
+                {data.connections
+                  .filter((c) => c.members)
+                  .map((entry) => (
+                    <article className="account-card" key={entry.id}>
+                      <div className="account-heading">
+                        <span className="service-icon http">
+                          <Link2 size={21} />
+                        </span>
+                        <div>
+                          <h2>{entry.title}</h2>
+                          <p>
+                            {entry.members!.length} 项托管服务 · 配置名称
+                            mcplink
+                          </p>
+                        </div>
+                      </div>
+                      <p>
+                        {entry
+                          .members!.map(
+                            (m) =>
+                              data.connections.find(
+                                (c) => c.id === m.connectionId,
+                              )?.title || "服务已移除",
+                          )
+                          .join("、") || "尚未选择服务"}
+                      </p>
+                      <p className="muted">
+                        {[
+                          ...new Set(
+                            presentBindings(entry).map((b) =>
+                              agentLabel(b.agent),
+                            ),
+                          ),
+                        ].join("、") || "尚未接给 Agent"}{" "}
+                        · 使用上游托管认证
+                      </p>
+                      <div className="card-actions">
+                        <button
+                          className="button small primary"
+                          onClick={() => connect([entry])}
+                        >
+                          接给 Agent
+                        </button>
+                        <button
+                          className="button small"
+                          onClick={() =>
+                            setDialog({ kind: "gateway", connection: entry })
+                          }
+                        >
+                          服务选择
+                        </button>
+                        <button
+                          className="button small"
+                          onClick={() =>
+                            setDialog({ kind: "detail", connection: entry })
+                          }
+                        >
+                          详情与绑定
+                        </button>
+                      </div>
+                    </article>
+                  ))}
+                {!data.connections.some((c) => c.members) && (
+                  <div className="empty">
+                    <Link2 size={30} />
+                    <h2>用一个入口接入多个服务</h2>
+                    <p>
+                      先添加托管服务，再创建统一入口并接给
+                      Agent。单服务入口、统一入口与 CLI 共用服务账号授权。
+                    </p>
+                    <button
+                      className="button primary"
+                      onClick={() => setDialog({ kind: "gateway" })}
+                    >
+                      创建统一入口
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
             {page === "accounts" && (
               <div className="account-list">
                 {data.connections
                   .filter(
                     (connection) =>
-                      connection.authKind !== "none" ||
-                      connection.transport === "http",
+                      !connection.members &&
+                      (connection.authKind !== "none" ||
+                        connection.transport === "http"),
                   )
                   .map((connection) => (
                     <article className="account-card" key={connection.id}>
@@ -849,7 +991,7 @@ function App() {
                           <KeyRound size={21} />
                         </span>
                         <div>
-                          <h3>{connection.title}</h3>
+                          <h2>{connection.title}</h2>
                           <p>{connection.accountLabel || "账号信息待确认"}</p>
                         </div>
                         <Status value={connection.status} />
@@ -872,13 +1014,21 @@ function App() {
                           <dd>
                             {[
                               ...new Set(
-                                ownBindings(connection).map((binding) =>
+                                presentBindings(connection).map((binding) =>
                                   agentLabel(binding.agent),
                                 ),
                               ),
                             ].join("、") || "尚未接入"}
                           </dd>
                         </div>
+                        {ownBindings(connection).some(
+                          (binding) => binding.missing,
+                        ) && (
+                          <div>
+                            <dt>待修复接入</dt>
+                            <dd>{bindingWarning(connection)}</dd>
+                          </div>
+                        )}
                         <div>
                           <dt>最近核验</dt>
                           <dd>{time(connection.checkedAt)}</dd>
@@ -961,12 +1111,13 @@ function App() {
                   ))}
                 {!data.connections.some(
                   (connection) =>
-                    connection.authKind !== "none" ||
-                    connection.transport === "http",
+                    !connection.members &&
+                    (connection.authKind !== "none" ||
+                      connection.transport === "http"),
                 ) && (
                   <div className="empty">
                     <KeyRound size={30} />
-                    <h3>账号会随服务一起出现</h3>
+                    <h2>账号会随服务一起出现</h2>
                     <p>添加需要认证的 HTTP MCP，或从已有配置纳入管理。</p>
                   </div>
                 )}
@@ -1546,9 +1697,11 @@ function App() {
               <div>
                 <dt>类型</dt>
                 <dd>
-                  {dialog.connection.transport === "http"
-                    ? "HTTP MCP"
-                    : "本地进程 · STDIO"}
+                  {dialog.connection.members
+                    ? "多服务聚合入口"
+                    : dialog.connection.transport === "http"
+                      ? "HTTP MCP"
+                      : "本地进程 · STDIO"}
                 </dd>
               </div>
               <div>
@@ -1586,10 +1739,17 @@ function App() {
                 className="button"
                 disabled={!!busy}
                 onClick={() =>
-                  setDialog({ kind: "editor", connection: dialog.connection })
+                  setDialog({
+                    kind: dialog.connection.members ? "gateway" : "editor",
+                    connection: dialog.connection,
+                  })
                 }
               >
-                {dialog.connection.detected ? "编辑并纳入托管" : "编辑"}
+                {dialog.connection.members
+                  ? "服务选择"
+                  : dialog.connection.detected
+                    ? "编辑并纳入托管"
+                    : "编辑"}
               </button>
               {dialog.connection.detected && (
                 <button
@@ -1623,6 +1783,25 @@ function App() {
                 </button>
               )}
             </div>
+            {!!dialog.connection.members?.length && (
+              <>
+                <h3 className="section-label">入口中的服务</h3>
+                {dialog.connection.members.map((member) => (
+                  <div className="binding-detail" key={member.connectionId}>
+                    <div>
+                      <strong>
+                        {data?.connections.find(
+                          (c) => c.id === member.connectionId,
+                        )?.title || "服务已移除"}
+                      </strong>
+                      <small>
+                        工具前缀 {member.namespace}__ · 复用托管账号
+                      </small>
+                    </div>
+                  </div>
+                ))}
+              </>
+            )}
             <h3 className="section-label">Agent 接入</h3>
             {ownBindings(dialog.connection).map((binding) => (
               <div
@@ -1643,9 +1822,9 @@ function App() {
                       : "直连"}{" "}
                     · {binding.enabled ? "启用" : "停用"}
                     {binding.unavailable
-                      ? " · 来源不可读取，可解除绑定"
+                      ? " · 来源无法读取，可解除绑定"
                       : binding.missing
-                        ? " · 来源已移除，可清理绑定"
+                        ? " · 配置条目缺失，可清理绑定"
                         : binding.changed
                           ? " · 外部配置有变化"
                           : binding.needsUpdate
@@ -1912,7 +2091,7 @@ function App() {
             dialog.connection
               ? [
                   ...new Set(
-                    ownBindings(dialog.connection)
+                    presentBindings(dialog.connection)
                       .filter((b) => b.mode === "shared" && !b.missing)
                       .map((b) => agentLabel(b.agent)),
                   ),
@@ -1923,6 +2102,21 @@ function App() {
           onDone={async () => {
             await load();
             setDialog(undefined);
+          }}
+        />
+      )}
+      {dialog?.kind === "gateway" && (
+        <GatewayDialog
+          connection={dialog.connection}
+          connections={data?.connections || []}
+          onClose={() => setDialog(undefined)}
+          onDone={async (entry) => {
+            await load();
+            setDialog((previous) =>
+              previous === dialog
+                ? { kind: "detail", connection: entry }
+                : previous,
+            );
           }}
         />
       )}

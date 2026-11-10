@@ -4,6 +4,7 @@ pub mod config;
 mod discovery;
 mod dsh_config;
 pub mod engine;
+pub mod gateway;
 pub mod generated;
 pub mod invocation;
 mod json_config;

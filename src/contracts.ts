@@ -73,6 +73,8 @@ export type Connection = {
   lastError?: string;
   detected?: boolean;
   sourceId?: string;
+  members?: { connectionId: string; namespace: string }[];
+  editVersion?: string;
 };
 export type Source = {
   id: string;
@@ -180,6 +182,7 @@ export type Dialog =
   | { kind: "history" }
   | { kind: "background" }
   | { kind: "editor"; connection?: Connection }
+  | { kind: "gateway"; connection?: Connection }
   | {
       kind: "connect";
       connections: Connection[];

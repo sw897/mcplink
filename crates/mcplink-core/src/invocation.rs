@@ -75,11 +75,22 @@ pub(crate) async fn discover_with_pool(
     id: &str,
     pool: &crate::mcp::McpPool,
 ) -> Result<(u64, Vec<Value>)> {
-    let revision = engine.store.connection(id)?.revision;
+    let (revision, tools, _) = discover_report(engine, id, pool).await?;
+    Ok((revision, tools))
+}
+
+pub(crate) async fn discover_report(
+    engine: Arc<Engine>,
+    id: &str,
+    pool: &crate::mcp::McpPool,
+) -> Result<(u64, Vec<Value>, Vec<Value>)> {
+    let connection = engine.store.connection(id)?;
+    let revision = connection.revision;
     let mut tools = Vec::new();
     let mut names = HashSet::new();
     let mut cursors = HashSet::new();
     let mut params = json!({});
+    let mut errors = Vec::new();
     for _ in 0..100 {
         let page = pool
             .request(
@@ -90,6 +101,20 @@ pub(crate) async fn discover_with_pool(
             .await?;
         if engine.store.connection(id)?.revision != revision {
             bail!(ToolFailure::new(ToolErrorCode::ConnectionChanged));
+        }
+        if connection.members.is_some()
+            && let Some(upstreams) = page
+                .pointer("/_meta/mcplink/upstreamErrors")
+                .and_then(Value::as_array)
+        {
+            for upstream in upstreams {
+                if !errors
+                    .iter()
+                    .any(|error: &Value| error["connectionId"] == upstream["connectionId"])
+                {
+                    errors.push(upstream.clone());
+                }
+            }
         }
         let rows = page
             .get("tools")
@@ -106,7 +131,7 @@ pub(crate) async fn discover_with_pool(
             tools.push(tool.clone());
         }
         match page.get("nextCursor") {
-            None | Some(Value::Null) => return Ok((revision, tools)),
+            None | Some(Value::Null) => return Ok((revision, tools, errors)),
             Some(Value::String(cursor)) if cursors.insert(cursor.clone()) => {
                 params = json!({"cursor":cursor});
             }
@@ -178,12 +203,18 @@ pub async fn call(
     if engine.store.connection(id)?.revision != revision {
         bail!(ToolFailure::new(ToolErrorCode::ConnectionChanged));
     }
+    let mut params = json!({"name":name,"arguments":arguments});
+    if engine.store.connection(id)?.members.is_some()
+        && let Some(upstream_revision) = descriptor.pointer("/tool/_meta/mcplink/upstreamRevision")
+    {
+        params["_meta"] = json!({"mcplink":{"expectedUpstreamRevision":upstream_revision,"expectedSchemaHash":hash}});
+    }
     let output = engine
         .pool
         .request_at_revision(
             engine.clone(),
             id,
-            json!({"method":"tools/call","params":{"name":name,"arguments":arguments}}),
+            json!({"method":"tools/call","params":params}),
             Some(revision),
         )
         .await?;

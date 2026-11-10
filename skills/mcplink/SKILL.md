@@ -1,6 +1,6 @@
 ---
 name: mcplink
-description: 通过 mcplink CLI 盘点和管理 MCP 来源、连接、认证与共享接入，预览、应用及恢复配置变更，并按授权校验和调用工具。
+description: 通过 mcplink CLI 管理单服务与聚合入口、托管认证和配置事务，生成工具 CLI，并按授权校验和调用工具。
 ---
 
 # mcplink 管理
@@ -46,7 +46,7 @@ mcplink connections tools CONNECTION_ID
 
 新增或编辑连接用 `connections save --stdin`。输入为完整的规范化连接对象；编辑时以 `connections show` 的 `definition` 为起点，保留仍需沿用的字段和掩码，连同 `id`、`name` 等元数据提交。原生 `http_headers`、`enabled_tools` 等字段须转换为 `schema` 中的规范字段。保存连接本身不写 Agent 配置。
 
-直连使用 Agent 原生连接能力；共享通过 mcplink Bridge 复用托管凭据。依用户要求选择；共享前必须 `probe` 成功。给目标 Agent 接入、停用、启用或移除时统一使用配置事务：
+单服务入口通过 mcplink Bridge 引用一个托管服务；聚合入口引用多个托管服务，Agent 中只配置一个名为 `mcplink` 的条目。两者与 CLI 共用成员连接 ID 对应的认证。原生直连作为可选方式保留，由 Agent 自行连接和维护认证。单服务共享前先 `probe` 成功；聚合入口中的故障服务通过清单 `_meta.mcplink.upstreamErrors` 报告，健康服务仍可使用。给目标 Agent 接入、停用、启用或移除时统一使用配置事务：
 
 ```sh
 mcplink changes preview --connection CONNECTION_ID --target hermes:user --mode shared
@@ -57,13 +57,19 @@ mcplink changes restore OPERATION_ID
 
 `--connection` 和 `--target` 可重复以批量操作；`--action` 支持 `upsert`、`disable`、`enable`、`remove`。先检查预览里的目标路径、名称、方式和动作，再按用户已有授权应用，不因采用 CLI 额外要求一次确认。预览 10 分钟有效，原生文件或连接修订变化后需重新预览。部分失败时核对 `result.results`，仅处理未完成目标，不盲目重放整批。写入后报告对应 Agent 需要重新加载 MCP 或开启新会话。
 
+若 `schema` 包含 `gateway save`，使用 stdin 对象 `{"title":"入口名称","connectionIds":["实际服务连接 ID"]}` 创建聚合入口，返回入口 `id`、`members`、`editVersion`。`gateway list` 查看入口。为不同 Agent 提供不同服务时分别创建入口；成员可以引用同一个账号。入口不单独认证，不能嵌套入口。编辑时传 `id`、原 `editVersion` 和完整 `connectionIds`，省略 title 保留名称；保存后选择立即生效，空数组表示不提供任何服务，不表示全部服务。
+
+把返回的入口 ID 作为 `changes preview --connection ENTRY_ID --target SOURCE_ID --mode shared` 的目标。聚合入口不支持 direct。明确需要迁移已有单服务共享条目时加 `--replace-shared`，只替换同一来源中属于入口成员的托管共享条目，保留直连，逐项核对预览与恢复记录。默认不移除已有条目，客户端确认导入的目标需手工核对原有配置。
+
+聚合工具名从 `connections tools ENTRY_ID` 实际发现，不猜服务前缀；可用于 `call` 和 `cli generate`。单服务入口保留原始名称。服务选择更新不重写原生配置，需让客户端刷新或重载清单。删除入口不删除上游账号；删除被入口引用的服务前先从入口移除。
+
 `changed:true` 表示原生条目有外部修改，核对后可用 `connections adopt --source SOURCE_ID --name NAME` 采用直连来源。`needsUpdate:true` 表示托管连接已更新而直连条目尚未同步，重新预览并应用。共享条目不作为上游来源采用。
 
 ## 认证与排查
 
 `credentials update CONNECTION_ID --stdin` 接受 `{"value":"上游要求的原样凭据","header":"Authorization"}`，默认 header 为 Authorization，不自动加 Bearer。凭据由可信本机来源经 stdin 传入；不要放在命令参数、Shell 历史、聊天回复、临时文件或报告里。`connections save` 中的 headers/env 同样走 stdin。管理输出保留掩码，不尝试读回秘密。
 
-共享连接更新一次凭据即可供其绑定复用；直连绑定需另行通过预览／应用同步。更新后重新 `probe`。`credentials disconnect CONNECTION_ID` 断开托管认证；它不会清除原生客户端已保存的直连凭据。
+同一本机数据目录内，同一服务、账号和授权范围的托管连接，认证一次供单服务入口、多个聚合入口与 CLI 复用。更新一次凭据共同生效；直连绑定需另行通过预览／应用同步，不承诺共用托管 OAuth 登录态。更新后重新 `probe`。`credentials disconnect CONNECTION_ID` 停止该连接的托管调用；它不会清除原生客户端已保存的直连凭据。不同服务、账号、数据目录或设备分别维护授权，撤销或无法续期时重新认证。
 
 OAuth 用 `credentials login CONNECTION_ID` 返回 URL，CLI 不打开浏览器；若上游要求用户交互，交给用户完成，随后检查连接。系统凭据库首次访问也可能需要用户在系统安全窗口授权，不能承诺绕过。
 

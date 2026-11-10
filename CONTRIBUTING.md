@@ -1,6 +1,8 @@
 # 参与开发
 
-mcplink 使用 React/TypeScript、Tauri 和 Rust。请先阅读 [README](README.md)、[架构](docs/architecture.md)及[兼容范围](docs/compatibility.md)。
+mcplink 使用 React/TypeScript、Tauri 和 Rust。请先阅读 [README](README.md)、[产品定位](docs/product.md)、[架构](docs/architecture.md)及[兼容范围](docs/compatibility.md)。
+
+功能围绕多 MCP Server 统一接入与 MCP 转 CLI 展开。单后台、多个独立 Bridge 或批量写入客户端配置不作为单入口聚合的验收结果；新增能力应按产品定义从实际客户端或 CLI 验证。文档须明确区分目标与当前实现，不提前声明尚不存在的命令或接入能力。
 
 ## 开发环境
 

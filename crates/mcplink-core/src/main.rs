@@ -124,7 +124,7 @@ async fn bridge(data: PathBuf, connection: String) -> Result<()> {
         capabilities["prompts"] = json!({});
     }
     info.capabilities = serde_json::from_value(capabilities)?;
-    info.protocol_version = ProtocolVersion::default();
+    info.protocol_version = ProtocolVersion::V_2025_11_25;
     let bridge = Bridge {
         client,
         id: connection,

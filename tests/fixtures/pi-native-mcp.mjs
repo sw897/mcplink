@@ -3,7 +3,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const [packageDir, agentDir, cwd, trusted] = process.argv.slice(2);
+const [packageDir, agentDir, cwd, trusted, selectedTools] = process.argv.slice(2);
+const toolNames = selectedTools ? JSON.parse(selectedTools) : ["read_document"];
 const base = join(packageDir, "dist/extensions/mcp");
 const { loadMcpConfig } = await import(pathToFileURL(join(base, "config.js")));
 const { McpServerConnection, createDefaultTransport, McpOAuthCredentialStore } =
@@ -22,12 +23,16 @@ for (const entry of loaded.servers) {
     onTools() {},
   });
   try {
-    await connection.getClient();
-    const result = await connection.callTool("read_document", { id: "weekly-fixture" }, {});
-    if (result.isError) throw new Error(JSON.stringify(result));
-    const value = JSON.parse(result.content[0].text);
-    if (value.workspace !== "fixture-workspace") throw new Error("Unexpected synthetic document");
-    reports.push({ name: entry.name, scope: entry.scope, state: connection.state, toolCall: "PASS" });
+    const client = await connection.getClient();
+    const listed = await client.listTools();
+    for (const tool of toolNames) {
+      if (!listed.some(item => item.name === tool)) throw new Error("Selected tool was not discovered");
+      const result = await connection.callTool(tool, { id: "weekly-fixture" }, {});
+      if (result.isError) throw new Error(JSON.stringify(result));
+      const value = JSON.parse(result.content[0].text);
+      if (value.workspace !== "fixture-workspace") throw new Error("Unexpected synthetic document");
+    }
+    reports.push({ name: entry.name, scope: entry.scope, state: connection.state, toolCall: "PASS", toolNames, discoveredTools: listed.length });
   } finally {
     await connection.close();
   }

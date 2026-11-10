@@ -1,6 +1,6 @@
 # Agent 配置适配
 
-本文面向配置适配的使用与维护。完整客户端及作用域见[兼容矩阵](agent-discovery.md)。原生文件适配需要 management API 17，桌面、CLI 和后台应使用同一构建；实际命令以 `mcplink schema` 为准。
+本文面向配置适配的使用与维护。完整客户端及作用域见[兼容矩阵](agent-discovery.md)。原生文件适配基线为 management API 17，聚合入口与当前桌面快照要求 API 18；桌面、CLI 和后台应使用同一构建，实际命令以 `mcplink schema` 为准。
 
 OpenCode 使用官方现行的 2.x `mcp.servers` / `disabled` 配置结构，前后台须使用同一构建。
 

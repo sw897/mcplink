@@ -1,17 +1,29 @@
 # mcplink 架构
 
-mcplink 管理个人电脑的 MCP 接入。服务、账号、Agent 三个视图与管理 CLI 使用同一份连接关系。业务 Skill 由外部 Git 流程管理；软件只内置并可复制安装自身的管理 Skill，不提供通用 Skill 安装器、不切换模型，也不实现办公平台业务连接器。
+mcplink 围绕多 MCP Server 统一接入与 MCP 转 CLI 构建。两种入口应使用同一套服务、认证和调用策略；桌面用于管理它们。目标与验收标准见[产品定位](product.md)。
 
-## 组件与调用
+## 接入结构
+
+每个 Agent 可以使用一个 `mcplink` 聚合入口，由本机后台提供所选多个上游服务；单服务入口和终端 CLI 通过同一调用核心使用成员连接。上游定义、认证和入口服务选择由 mcplink 维护，增删服务不要求新增客户端 MCP 条目。原生直连保留为独立选项，由客户端维护调用和授权。
+
+聚合入口在连接表中以 `transport: aggregate` 保存成员连接 ID 和稳定命名空间，使用既有连接修订、配置绑定、预览和恢复事务。入口不拥有上游账号，不能嵌套另一个入口。不同入口可选择不同成员，多个入口也可引用同一个服务账号。
+
+`gateway.rs` 合并 tools、resources、prompts 清单，为名称及资源 URI 增加命名空间，并将调用派发给成员连接。各成员通过同一 `McpPool` 和 Vault 维护会话及 OAuth 刷新。清单有界分页；成员并行发现，单个故障通过 `_meta.mcplink.upstreamErrors` 报告，其他服务继续提供清单。工具调用固定成员、入口修订及发现时的工具契约，失败不自动重发。
+
+当前不宣告清单变更通知；客户端需要刷新清单，必要时重载 MCP。入口服务选择保存后立即生效，不重写已绑定的 Agent 配置；原生配置迁移仍需预览和应用。
+
+业务 Skill 由外部分发流程管理；软件只内置自身的管理 Skill。Skill 分发、模型切换及办公平台业务功能不作为产品核心。
+
+## 当前组件与调用
 
 - **桌面**：Tauri 2 + React/TypeScript，提供服务盘点、连接编辑、账号维护、按 Agent 查看接入、变更预览和恢复。客户端操作由安装状态和来源能力决定；打开接入窗口不纳管服务，来源导入需明确操作。
 - **管理核心**：Rust `mcplink-core`，维护规范连接、SQLite 元数据、系统凭据库和配置操作日志。客户端适配器处理 TOML、YAML、JSON/JSONC/JSON5 及配置生成，复用同一规范连接和 Bridge。需要在客户端确认的内容不生成虚假的绑定或原生变更记录。完整能力见[Agent 接入](agent-discovery.md)。
 - **Agent 配置来源**：每个来源保留作用域、路径、服务表及权限。编辑复用预览、哈希检查、备份和逐条恢复事务，保留未涉及设置及客户端格式；插件与托管来源保持只读。客户端审批、信任、登录缓存和插件升级由原客户端维护。具体边界见[配置适配](agent-adapters.md)。
-- **Agent CLI**：`mcplink schema/status/sources/connections/credentials/changes/gateway/mcp`，JSON 输出和 stdin 输入；复用后台 RPC，带语义失败退出码，预览／应用仍走同一配置事务。`skill show/install` 从二进制导出或安装管理 Skill，无需后台。详见 [Agent CLI](agent-cli.md)。
+- **工具 CLI 与管理接口**：`call` 调用精确 MCP 工具，`cli generate/inspect/rebind/run` 提供不含凭据的轻量命令入口；管理命令维护服务与配置。两者复用后台 RPC、认证及工具策略，使用 JSON 输出、stdin 和明确退出码。`skill show/install` 从二进制导出或安装管理 Skill，无需后台。详见 [CLI 指南](agent-cli.md)。
 - **后台**：独立 `mcplink daemon`，每个数据目录单实例。Windows 关闭窗口后收起到托盘，左键显示窗口，右键可暂停共享、设置登录自启或退出托盘。登录自启使用当前用户启动项和 `--background`，窗口从创建起隐藏；重复启动复用现有桌面实例。托盘每 10 秒检查后台并按需恢复；退出托盘后代理继续运行，由后续调用按需恢复，不安装 Windows 系统服务。
-- **共享入口**：每个 Agent 为每项共享服务启动独立 STDIO Bridge。Bridge 经带本地认证的 loopback HTTP 调用后台。后台用 rmcp 连接上游 STDIO 或 Streamable HTTP。
+- **MCP 入口**：Agent 为单服务或聚合入口启动 STDIO Bridge，通过带本地认证的 loopback HTTP 调用后台。Bridge 引用普通连接 ID 时提供单个上游，引用聚合连接 ID 时提供所选多个上游。后台用 rmcp 连接上游 STDIO 或 Streamable HTTP。
 
-本地工具和原生多客户端服务可直接写入 Agent 配置。需要共用认证的服务使用 Bridge，原生配置只保留程序路径、连接 ID 和数据目录。每项服务保留独立接入名，不聚合成一个重命名全部工具的入口。
+托管入口只在原生配置中保留程序路径、入口或服务连接 ID 和数据目录。聚合入口统一使用 `mcplink` 接入名称，工具/提示名称采用成员命名空间，资源 URI 以 `mcplink://命名空间/` 前缀保留上游 URI 与模板变量。单服务入口继续保留上游能力名称。
 
 后台每项连接复用一个上游会话；多个客户端的请求由协议 ID 分流。SDK 管理握手、分页游标和 MCP 结果。转发 tools、resources、prompts 的普通请求；不宣告没有实现的 tasks、sampling、elicitation 或订阅能力。Hermes 的工具白名单、glob 和资源/提示开关由共享路径保留；不能等价转换的直连配置拒绝写入，并给出改用共享接入的提示。
 
@@ -23,7 +35,9 @@ Windows 托盘和 macOS 菜单栏共用后台生命周期：关窗隐藏，普�
 
 ## 配置与数据
 
-原生配置是客户端配置现状的来源。SQLite 保存连接摘要、来源、绑定、修订号和操作状态，启用 WAL、外键与 schema 版本。完整上游定义及变更计划可能包含 Secret，放在系统凭据库；SQLite 仅保存引用。用户标签不冒充上游确认的账号身份。
+原生配置是客户端配置现状的来源。SQLite 保存连接摘要、入口成员、来源、绑定、修订号和操作状态，启用 WAL、外键与 schema 版本。完整上游定义及变更计划可能包含 Secret，放在系统凭据库；SQLite 仅保存凭据引用。当前数据库语义版本为 2，旧程序拒绝打开，聚合管理要求 management API 18。桌面、CLI 和后台需要一起升级。用户标签不冒充上游确认的账号身份。
+
+入口选择更新要求 `editVersion`，只保存已有连接引用，不复制凭据。删除入口不删除成员账号，删除成员前须先移出所有入口。明确选择 `replaceShared` 的迁移预览会逐条移除同一来源中所选成员的单服务共享绑定，并添加聚合条目；原生直连及未选择的条目保留。应用与恢复沿用文件哈希和条目归属保护。
 
 写入步骤为：预览并绑定连接修订和文件哈希 → 获取配置写锁并重新核对 → 持久化变更意图和备份 → 原子替换文件 → 更新绑定和操作状态。批量操作按同一文件中的前序结果计算后续哈希；各目标分别报告结果。外部编辑或预览后账号更新都使旧预览失效。
 
@@ -37,8 +51,10 @@ HTTP 令牌按上游要求原样保存，不自动添加 Bearer。标准 OAuth �
 
 每份 OAuth grant 使用同一刷新锁。共享同一 OAuth 会话的 Bridge 和 CLI 按序发送普通 HTTP POST，避免刷新使仍在途的请求令牌失效。上游打开 SSE 响应流后即可发送下一个请求。更新、断开和回调按连接修订校验，旧授权无法覆盖新状态。断开停止新调用并删除托管令牌/grant；已派发调用的副作用不会被撤销。原客户端保存的直连凭据仍由相应客户端维护。
 
+单服务 Bridge、聚合 Bridge 与 CLI 以同一成员连接 ID 取得授权。认证复用限于同一数据目录中的同一服务账号及授权范围；不跨数据目录或设备复制登录态。入口服务选择是本机调用视图，不是面向不可信进程的账号隔离机制。
+
 本地管理 HTTP 仅绑定 127.0.0.1，校验 Host、拒绝浏览器 Origin，并要求本地 Vault 中的随机认证值。端口持久化，冲突时报告错误，不静默换端口。共享上游仅接受 HTTPS 或 loopback HTTP，不跟随 HTTP 重定向。
 
 ## 代码入口
 
-`config.rs` 适配原生格式；`engine.rs` 处理管理操作、变更与恢复；`mcp.rs` 管理上游会话和认证；`runtime.rs` 提供后台与管理客户端；`cli.rs` 提供具名 CLI、机器契约和 Skill 安装；`main.rs` 提供程序入口与 Bridge；`src/main.tsx` 是桌面功能入口；连接编辑、配置来源和接入预览分别位于 src/ConnectionEditor.tsx、src/SourceDialog.tsx 和 src/ConnectDialog.tsx。
+`config.rs` 适配原生格式；`engine.rs` 处理管理操作、变更与恢复；`gateway.rs` 管理聚合入口和路由；`mcp.rs` 管理上游会话和认证；`runtime.rs` 提供后台与管理客户端；`cli.rs` 提供具名 CLI、机器契约和 Skill 安装；`main.rs` 提供程序入口与 Bridge；`src/main.tsx` 是桌面功能入口；入口服务选择位于 `src/GatewayDialog.tsx`，连接编辑、配置来源和接入预览分别位于 src/ConnectionEditor.tsx、src/SourceDialog.tsx 和 src/ConnectDialog.tsx。

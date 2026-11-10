@@ -1,8 +1,12 @@
-# Agent 无 UI 管理
+# MCP 转 CLI 与管理接口
+
+MCP 转 CLI 是 mcplink 的核心能力之一：从工具 Schema 发现参数，通过 `call` 直接调用，或用 `cli generate` 为选定工具生成具名命令入口，供终端、脚本和 Agent 使用。复杂参数保留 JSON 类型，凭据由运行时维护。
+
+单服务入口、聚合入口和工具 CLI 引用同一份托管连接及认证。CLI 可调用服务的原始工具名，也可调用聚合入口发现的命名空间工具名。产品定义见[产品定位](product.md)。本文中的命令均描述现有实现。
 
 `mcplink` CLI 与桌面使用同一个管理核心、后台、系统凭据库和配置事务。命令不启动桌面或浏览器；后台在首次管理调用时按需启动。`schema` 和 `skill` 离线可用。
 
-客户端与来源支持范围见[Agent 兼容矩阵](agent-discovery.md)。原生文件写入需要客户端已安装，当前原生配置操作要求 management API 17；桌面、CLI 和后台应使用同一构建。管理 Skill 的复制安装目标另见下文。
+客户端与来源支持范围见[Agent 兼容矩阵](agent-discovery.md)。原生文件写入需要客户端已安装，当前聚合管理与桌面快照要求 management API 18；桌面、CLI 和后台应使用同一构建。管理 Skill 的复制安装目标另见下文。
 
 ## 安装与发现
 
@@ -68,6 +72,7 @@ Cargo 默认将程序放入 `~/.cargo/bin`，该目录需在 PATH 中。也可�
 | `changes reconcile` | 核对已写入但尚未完成记账的记录，返回仍待核对的数量，不重写配置文件。 |
 | `changes history [--before CURSOR]` / `changes restore OPERATION_ID` | 每页最多 25 条，用末项 cursor 读取更早记录；按操作 ID 恢复。 |
 | `gateway status` / `gateway pause` / `gateway resume` / `gateway stop` | 查看或切换共享状态，或等待当前后台清理退出。 |
+| `gateway list` / `gateway save --stdin` | 查看或保存聚合入口的成员服务引用；不复制账号授权。 |
 | `mcp describe ID` / `mcp request ID --stdin` | 查看上游能力，或派发一条协议请求，不自动重试。 |
 | `connections tools ID --tool TOOL` | 发现指定工具，返回 Schema、描述和 `schemaHash`。 |
 | `call ID TOOL --stdin [--schema-hash HASH]` | 校验参数后调用精确工具，不自动重试。 |
@@ -88,6 +93,30 @@ Claude Code 支持可写 user，以及显式添加的 local/project 作用域；
 编辑已有连接时，取 `connections show ID` 返回的 `definition`，连同其中的 `editVersion` 提交。带路径或参数的地址使用保留标记，启动参数按原编号显示为 `••••••••[1]` 等引用。可以移动引用、删除参数或填写新值。后台按读取时的连接与版本还原，版本过期须重新读取。完整的新定义可以直接通过 stdin 传入。
 
 标准输入必须是一条 UTF-8 JSON 对象，最多 8 MiB，传完后关闭管道。凭据及可能含凭据的完整定义经 stdin 传入，不使用 argv、Shell 字面量、临时凭据文件或日志。
+
+## 统一入口与托管认证
+
+先添加或导入上游连接，完成各自认证。以实际返回的托管连接 ID 创建入口：
+
+```sh
+mcplink gateway save --stdin <<'JSON'
+{"title":"工作工具","connectionIds":["CONNECTION_A_ID","CONNECTION_B_ID"]}
+JSON
+mcplink gateway list
+mcplink changes preview --connection ENTRY_ID --target hermes:user --mode shared
+mcplink changes apply PLAN_ID
+mcplink connections tools ENTRY_ID
+```
+
+返回的入口含 `id`、`members`、`editVersion`，原生接入名称固定为 `mcplink`。`connections show ENTRY_ID` 返回入口元数据及 `definition:null`，服务选择通过 `gateway save` 更新。为不同 Agent 保存不同入口时，成员可引用相同服务账号。入口不再单独登录：单服务 Bridge、聚合 Bridge 与 CLI 都使用成员连接的 Token 或 OAuth grant。认证复用范围是同一本机数据目录内的同一服务、账号和授权范围；凭据更新、断开及 OAuth 刷新共同生效。
+
+修改入口时传入 `id`、返回的 `editVersion` 及完整 `connectionIds`，省略 `title` 时保留名称。服务选择立即生效；空数组提供空清单，不表示全部服务。旧编辑版本被拒绝，客户端需要刷新或重载清单。入口本身不保存上游认证，删除入口不删除成员账号；被入口引用的连接须先移出入口才能删除。
+
+迁移已有单服务共享配置时，可在上面的预览命令中增加 `--replace-shared`，移除同一目标来源中属于入口成员的已有共享条目，再添加聚合条目。默认不移除；原生直连保留，外部修改与并发仍受保护，恢复按每个原生条目执行。手工导入目标不支持这一自动替换，需要在客户端核对原有条目。
+
+聚合工具名以 `connections tools ENTRY_ID` 实际发现结果为准，不猜前缀。可对该入口执行 `call ENTRY_ID TOOL --stdin` 或 `cli generate ENTRY_ID ... --tool TOOL`，使用同样的参数校验与凭据。资源 URI 和提示名称同样有命名空间。故障上游在 MCP 清单的 `_meta.mcplink.upstreamErrors` 中报告，健康上游继续提供能力。
+
+原生直连使用 `--mode direct`，由 Agent 自行连接并维护认证，不承诺共用托管 OAuth 登录态。聚合入口只允许 `--mode shared`，需要直连时选择具体上游连接。
 
 ## 通用工具调用
 
@@ -211,6 +240,8 @@ connection_id = response["ok"]["id"]
 先盘点、导入或保存连接；共享接入前完成 `probe`。核对预览中的真实目标路径、动作和接入方式，再按用户授权应用。写入完成后对应 Agent 仍需重新加载 MCP 或开启新会话。
 
 `changed:true` 表示原生条目有外部修改；核对后可采用直连来源。`needsUpdate:true` 表示托管凭据或定义已更新但直连配置未同步，需另行预览／应用。共享连接会复用更新后的托管凭据。
+
+`missing:true` 表示已登记的绑定没有扫描到对应原生条目，不计入当前接入。若来源可读取，可以明确选择 `--action upsert` 预览并重新创建原接入名称，或选择 `--action remove` 清理绑定记录。`unavailable:true` 表示来源无法读取，应先核对来源；仍存在但内容已变化的条目继续受覆盖保护。重新接入同样检查预览后的文件与绑定变化。
 
 过期预览或并发修改不会被覆盖；部分失败时根据 `result.results` 核对已完成目标，为待处理目标重新预览。通信中断时结果可能已经写入，先查历史及当前状态，不自动重放。
 

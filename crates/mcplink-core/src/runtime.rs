@@ -63,7 +63,7 @@ async fn health(State(state): State<ServerState>, headers: HeaderMap) -> impl In
     (
         StatusCode::OK,
         Json(
-            json!({"application":"mcplink","instance":state.info.instance,"version":env!("CARGO_PKG_VERSION"),"managementApi":17}),
+            json!({"application":"mcplink","instance":state.info.instance,"version":env!("CARGO_PKG_VERSION"),"managementApi":18}),
         ),
     )
 }
@@ -378,6 +378,11 @@ impl Client {
     }
 
     pub async fn call(&self, method: &str, params: Value) -> Result<Value> {
+        if self.management_api < 18
+            && matches!(method, "gateway.list" | "gateway.save" | "snapshot")
+        {
+            bail!("旧后台不支持统一入口，请退出并重启后台");
+        }
         if self.management_api < 17
             && (matches!(method, "snapshot" | "changes.apply" | "changes.restore")
                 || (matches!(method, "sources.add" | "agents.launcher")

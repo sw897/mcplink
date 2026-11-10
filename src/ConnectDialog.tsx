@@ -96,10 +96,12 @@ export function ConnectDialog({
     );
     return available.length === 1 ? [available[0].id] : [];
   });
-  const [mode, setMode] = useState(binding?.mode || "direct");
-  const [operation, setOperation] = useState(
-    binding?.missing ? "remove" : "upsert",
+  const aggregate = connections.some((c) => c.members);
+  const [mode, setMode] = useState(
+    aggregate ? "shared" : binding?.mode || "shared",
   );
+  const [replaceShared, setReplaceShared] = useState(false);
+  const [operation, setOperation] = useState("upsert");
   const [plans, setPlans] = useState<Plan[]>([]);
   const [imports, setImports] = useState<ImportConfig[]>([]);
   const hasPreview = plans.length > 0 || imports.length > 0;
@@ -116,6 +118,20 @@ export function ConnectDialog({
   const isAvailable = (source: Source) =>
     !source.readOnly &&
     clients.some((client) => client.id === source.agent && client.configurable);
+  const targetStatus = (source: Source) => {
+    const existing = bindings.filter(
+      (item) =>
+        item.sourceId === source.id &&
+        connections.some((connection) => connection.id === item.connectionId) &&
+        (!binding || item.name === binding.name),
+    );
+    if (existing.some((item) => item.unavailable)) return "来源无法读取";
+    if (existing.some((item) => item.missing))
+      return existing.some((item) => !item.missing)
+        ? "部分配置缺失"
+        : "配置缺失";
+    return existing.length ? "已有接入" : "";
+  };
   const visibleSources = useMemo(
     () =>
       sources
@@ -188,6 +204,7 @@ export function ConnectDialog({
               : undefined,
             mode,
             action: operation,
+            replaceShared: aggregate && replaceShared && operation === "upsert",
           })
         : undefined;
       if (plan?.changes.length) setPlans([plan]);
@@ -283,18 +300,20 @@ export function ConnectDialog({
             )}
             {operation === "upsert" && (
               <div className="mode-choices">
-                <label className={mode === "direct" ? "chosen" : ""}>
-                  <input
-                    type="radio"
-                    name="mode"
-                    checked={mode === "direct"}
-                    onChange={() => setMode("direct")}
-                  />
-                  <strong>直连</strong>
-                  <small>
-                    写入配置文件或生成导入内容，令牌和启动参数可能以明文保存
-                  </small>
-                </label>
+                {!aggregate && (
+                  <label className={mode === "direct" ? "chosen" : ""}>
+                    <input
+                      type="radio"
+                      name="mode"
+                      checked={mode === "direct"}
+                      onChange={() => setMode("direct")}
+                    />
+                    <strong>原生直连</strong>
+                    <small>
+                      写入配置文件或生成导入内容，令牌和启动参数可能以明文保存
+                    </small>
+                  </label>
+                )}
                 <label className={mode === "shared" ? "chosen" : ""}>
                   <input
                     type="radio"
@@ -302,12 +321,44 @@ export function ConnectDialog({
                     checked={mode === "shared"}
                     onChange={() => setMode("shared")}
                   />
-                  <strong>通过 mcplink 共享</strong>
-                  <small>共用托管账号与上游连接</small>
+                  <strong>{aggregate ? "统一入口" : "单服务入口"}</strong>
+                  <small>
+                    {aggregate
+                      ? "一个 mcplink 配置提供所选服务，复用各服务托管认证"
+                      : "每项服务各有一个入口，与统一入口和 CLI 共用托管认证"}
+                  </small>
                 </label>
               </div>
             )}
+            {aggregate && operation === "upsert" && (
+              <label className="target">
+                <input
+                  type="checkbox"
+                  checked={replaceShared}
+                  onChange={(event) => setReplaceShared(event.target.checked)}
+                />
+                <div>
+                  <strong>替换目标配置中的单服务入口</strong>
+                  <small>
+                    仅移除同一来源中所选服务的托管共享条目；保留原生直连，并在预览中逐项列出。
+                  </small>
+                </div>
+              </label>
+            )}
             <h3 className="section-label">目标 Agent 与配置位置</h3>
+            {operation === "upsert" &&
+              bindings.some(
+                (item) =>
+                  item.missing &&
+                  targets.includes(item.sourceId) &&
+                  connections.some(
+                    (connection) => connection.id === item.connectionId,
+                  ),
+              ) && (
+                <p className="field-help">
+                  应用后将重新创建缺失的配置条目，也可选择“移除”清理绑定记录。
+                </p>
+              )}
             {!visibleSources.length && (
               <p className="muted">没有符合此操作的绑定。</p>
             )}
@@ -344,13 +395,9 @@ export function ConnectDialog({
                         : ""}
                   </small>
                 </div>
-                {bindings.some(
-                  (binding) =>
-                    binding.sourceId === source.id &&
-                    connections.some(
-                      (connection) => connection.id === binding.connectionId,
-                    ),
-                ) && <span className="muted">已有接入</span>}
+                {targetStatus(source) && (
+                  <span className="muted">{targetStatus(source)}</span>
+                )}
               </label>
             ))}
             {operation === "upsert" &&

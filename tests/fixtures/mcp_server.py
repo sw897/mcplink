@@ -54,6 +54,12 @@ def handle(request, endpoint="", origin=""):
     if method == "ping":
         return {}
     if method == "tools/list":
+        if endpoint == "/mcp-many":
+            tools = [{**TOOLS[1], "name": "bulk_" + str(i)} for i in range(130)] + [{**TOOLS[1], "name": "long_" + "x" * 120}, {**TOOLS[1], "name": "tool/特殊名称"}]
+            offset = int(params.get("cursor", "0"))
+            page = {"tools": tools[offset:offset+10]}
+            if offset + 10 < len(tools): page["nextCursor"] = str(offset + 10)
+            return page
         if endpoint in {"/mcp-tools", "/mcp-slow", "/mcp-cycle", "/mcp-duplicates", "/mcp-generated", "/mcp-generated-changed"}:
             if endpoint == "/mcp-cycle":
                 return {"tools":[],"nextCursor":"repeat"}
@@ -75,6 +81,10 @@ def handle(request, endpoint="", origin=""):
         if endpoint == "/mcp-rpc-error":
             raise ValueError("Synthetic upstream RPC failure")
         args = params.get("arguments", {})
+        if endpoint == "/mcp-links":
+            return {"content": [{"type":"resource_link","name":"Document","uri":"fixture://weekly"}, {"type":"resource","resource":{"uri":"fixture://weekly","text":DOCUMENT["text"],"mimeType":"text/plain"}}]}
+        if endpoint == "/mcp-many":
+            return {"content":[{"type":"text","text":json.dumps({**DOCUMENT,"originalTool":params["name"]})}]}
         if params.get("name") in {"inspect_payload","odd_parameters","schema_secrets"} and endpoint in {"/mcp-tools","/mcp-slow","/mcp-generated","/mcp-generated-changed"}:
             output = {"received":args,"account":"synthetic-work-account"}
         elif params.get("name") == "search_documents":
@@ -88,7 +98,7 @@ def handle(request, endpoint="", origin=""):
     if method == "resources/list":
         return {"resources": [{"uri": "fixture://weekly", "name": "Weekly fixture", "mimeType": "text/plain"}]}
     if method == "resources/templates/list":
-        return {"resourceTemplates": []}
+        return {"resourceTemplates": [{"uriTemplate": "fixture://documents/{id}", "name": "Document by ID"}]}
     if method == "resources/read":
         return {"contents": [{"uri": "fixture://weekly", "mimeType": "text/plain", "text": DOCUMENT["text"]}]}
     if method == "prompts/list":

@@ -121,6 +121,9 @@ jobs:
       - name: Isolated generated CLI acceptance
         timeout-minutes: 5
         run: python -u tests/e2e/generated_cli.py --record artifacts/e2e/ci-generated
+      - name: Aggregate routing and shared authentication acceptance
+        timeout-minutes: 5
+        run: python -u tests/e2e/aggregate_gateway.py --record artifacts/e2e/ci-aggregate --pi-package artifacts/e2e/native-pi/node_modules/@earendil-works/pi-coding-agent
       - name: Isolated remote transport acceptance
         timeout-minutes: 5
         run: python -u tests/e2e/remote_transports.py --record artifacts/e2e/ci-remote

@@ -255,6 +255,13 @@ impl Definition {
     }
 }
 
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayMember {
+    pub connection_id: String,
+    pub namespace: String,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Connection {
@@ -272,6 +279,8 @@ pub struct Connection {
     pub checked_at: Option<u64>,
     pub tool_count: Option<usize>,
     pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub members: Option<Vec<GatewayMember>>,
 }
 
 impl Connection {
@@ -289,6 +298,9 @@ impl Connection {
         let mut value = serde_json::to_value(self).unwrap_or_default();
         if let Some(map) = value.as_object_mut() {
             map.remove("definitionRef");
+            if self.members.is_some() {
+                map.insert("editVersion".into(), json!(self.edit_version()));
+            }
         }
         value
     }
