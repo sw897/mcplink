@@ -2,9 +2,7 @@
 
 `mcplink` CLI 与桌面使用同一个管理核心、后台、系统凭据库和配置事务。命令不启动桌面或浏览器；后台在首次管理调用时按需启动。`schema` 和 `skill` 离线可用。
 
-当前原生文件管理支持 `codex|hermes|claude|opencode|zcode|deepseek|openclaw|kimicode|workbuddy|qwenwork|pi` 十一类客户端，未安装时不可写入，安装后刷新，需要 management API 17。Pi 使用用户及显式项目的内置 MCP 严格 JSON；项目需在 Pi 中信任。千问办公仅管理当前用户共享 JSON；身份存储保护启用时使用客户端导入。`qwenwork` 和 `doubaowork` 都支持离线导出。原生路径与逐来源限制见[Agent 接入](agent-discovery.md)。管理 Skill 的复制安装目标另见下文。
-
-用 `mcplink connections export-config --agent qwenwork --connection CONNECTION_ID` 生成千问办公 JSON；将 `--agent` 改为 `doubaowork` 则生成豆包工作自定义连接器字段。默认共享模式，须先检查连接成功；`--connection` 可重复。显式传 `--mode direct` 才导出上游直连设置，其中包含完整 URL、明文凭据和启动参数。输出的 `.ok.config`（千问办公）或 `.ok.entries`（豆包工作）用于对应界面，不写原生文件、不建立绑定。导入步骤和能力限制见[办公客户端](agent-discovery.md#客户端导入)。
+客户端与来源支持范围见[Agent 兼容矩阵](agent-discovery.md)。原生文件写入需要客户端已安装，当前原生配置操作要求 management API 17；桌面、CLI 和后台应使用同一构建。管理 Skill 的复制安装目标另见下文。
 
 ## 安装与发现
 
@@ -43,7 +41,7 @@ Cargo 默认将程序放入 `~/.cargo/bin`，该目录需在 PATH 中。也可�
 
 `--help`、`--version` 输出普通文本。`bridge` 的 stdout 仅用于 MCP 协议，`daemon` 是前台后台进程。底层 `rpc` 保留原有成功 envelope：管理 RPC 出错现在退出 `1`，但兼容路径不重新解释嵌套的检查状态或批次结果，调用者还须核对它们；新脚本优先使用具名命令。
 
-工具错误退出码依据 MCP 的 RPC 错误或 `isError`。部分服务把业务 HTTP 错误包装在成功的工具正文中，此时 `call` 会原样返回并退出 `0`；自动化须按该服务的契约另行校验业务状态。已观察到的腾讯会议行为见[真实上游验收](real-upstreams.md#mcp-成功与业务成功)。
+工具错误退出码依据 MCP 的 RPC 错误或 `isError`。部分服务把业务 HTTP 错误包装在成功的工具正文中，此时 `call` 会原样返回并退出 `0`；自动化须按该服务的契约另行校验业务状态。
 
 `mcplink schema` 提供版本化 JSON，包括命令树、参数、允许值、stdin 对象字段、输出和退出码。每条命令也支持 `--help`。
 
@@ -59,24 +57,25 @@ Cargo 默认将程序放入 `~/.cargo/bin`，该目录需在 PATH 中。也可�
 | `connections import --source SOURCE_ID --name NAME` | 将已有原生条目纳入托管，返回托管 ID，不改写原生文件。 |
 | `connections adopt --source SOURCE_ID --name NAME` | 明确采用已绑定直连条目的外部修改。 |
 | `connections save --stdin` | 新建或完整替换托管定义，不写原生配置。 |
+| `connections export-config --agent AGENT --connection ID [--mode direct\|shared]` | 为需要客户端确认的目标生成配置，默认共享，`--connection` 可重复；不写客户端或建立绑定。直连输出包含完整凭据。 |
 | `connections probe ID` / `connections tools ID` | 连接上游、检查认证并返回工具 Schema；非 `ready` 退出 `1`。 |
 | `connections delete ID [--keep-native]` | 默认只删除无绑定连接。使用 `--keep-native` 时，所有已登记的绑定都须为直连，且原生条目仍存在、内容与登记时一致。成功后移除托管连接及其凭据，保留原生文件。 |
 | `credentials update ID --stdin` / `credentials disconnect ID` | 更新原样 HTTP 凭据，或断开托管认证。 |
 | `credentials login ID` | 返回 OAuth URL 和过期时间，不打开浏览器。 |
-| `credentials oauth-config ID --stdin` | 源码开发能力：配置预注册 OAuth 应用、scope 与回调端口，不启动登录。 |
+| `credentials oauth-config ID --stdin` | 配置预注册 OAuth 应用、scope 与回调端口，不启动登录。 |
 | `changes preview --connection ID --target SOURCE_ID [--mode direct\|shared] [--action ACTION]` | 生成 10 分钟有效的脱敏计划，不写原生配置。两个标志都可重复。 |
 | `changes apply PLAN_ID` | 应用指定计划，检查修订与文件哈希，逐目标报告结果。 |
 | `changes reconcile` | 核对已写入但尚未完成记账的记录，返回仍待核对的数量，不重写配置文件。 |
 | `changes history [--before CURSOR]` / `changes restore OPERATION_ID` | 每页最多 25 条，用末项 cursor 读取更早记录；按操作 ID 恢复。 |
 | `gateway status` / `gateway pause` / `gateway resume` / `gateway stop` | 查看或切换共享状态，或等待当前后台清理退出。 |
 | `mcp describe ID` / `mcp request ID --stdin` | 查看上游能力，或派发一条协议请求，不自动重试。 |
-| `connections tools ID --tool TOOL` | 源码开发能力：发现指定工具，返回 Schema、描述和 `schemaHash`。 |
-| `call ID TOOL --stdin [--schema-hash HASH]` | 源码开发能力：校验参数后调用精确工具，不自动重试。 |
-| `cli generate ID --name NAME --output NEW_DIRECTORY --tool TOOL ...` | 源码开发能力：为明确选定的工具生成轻量入口。 |
+| `connections tools ID --tool TOOL` | 发现指定工具，返回 Schema、描述和 `schemaHash`。 |
+| `call ID TOOL --stdin [--schema-hash HASH]` | 校验参数后调用精确工具，不自动重试。 |
+| `cli generate ID --name NAME --output NEW_DIRECTORY --tool TOOL ...` | 为明确选定的工具生成轻量入口。 |
 | `cli inspect MANIFEST` / `cli rebind MANIFEST --connection ID` | 离线检查清单，或核对契约后显式重新绑定当前数据目录中的连接。 |
 | `skill show` / `skill install --agent AGENT` | 导出或安装 mcplink 自身管理 Skill。 |
 
-`AGENT` 为 `codex`、`hermes`、`claude`、`opencode`、`zcode`、`deepseek`、`openclaw`、`kimicode`。`ACTION` 为 `upsert`、`disable`、`enable`、`remove`。目标使用来源 ID（如 `hermes:user`），连接使用导入或保存返回的托管 ID。
+`AGENT` 的可选值按具体命令由 `schema` 列出；来源添加、配置生成与 Skill 安装的目标范围分别定义。`ACTION` 为 `upsert`、`disable`、`enable`、`remove`。目标使用返回的来源 ID，连接使用导入或保存返回的托管 ID。
 
 原生条目已经是本机 mcplink Bridge 时，`connections import` 会关联其指向的已有托管 ID，登记为共享绑定，不另建上游连接或改写原生文件。识别要求绝对路径、标准 Bridge 参数、相同构建和管理数据目录；其他运行环境或未知连接会被拒绝，保留原配置供核对。
 
@@ -165,7 +164,7 @@ mcplink cli rebind ./notes-cli/notes.mcplink.json --connection LOCAL_CONNECTION_
 
 配置本身保留当前 Token/OAuth 模式。更改已有 OAuth 的端点、应用身份、机密、scope 或回调配置会使旧 grant 失效，须重新授权。授权发现、注册或回调监听准备失败时保留原认证；返回授权 URL 后进入新的授权会话。含托管 OAuth 参数的连接使用共享入口，不能直接转换为原生 Agent 配置。
 
-GitHub 远程 MCP 不提供 DCR，授权码流程要求预注册应用及客户端认证。GitHub App 的业务权限来自应用注册，scope 按应用支持情况选择；不要把资源端建议的 scope 当作应用已获权限。真实 Token 与 OAuth 验证范围分别见[兼容说明](compatibility.md)。
+不支持 DCR 的上游需要预注册应用及其要求的客户端认证。业务权限来自上游与应用注册，scope 按实际契约选择，不能把资源端建议的 scope 当作已获权限。协议和认证限制见[兼容说明](compatibility.md)。
 
 ## 其他 stdin 对象
 
@@ -229,3 +228,5 @@ python3 tests/e2e/generated_cli.py --record artifacts/e2e/generated-cli/local-ru
 ```
 
 测试使用隔离配置、合成 MCP/OAuth 与 fixture Vault，不修改日常 Agent 配置。报告记录命令、退出码、断言和二进制／Skill 哈希，输出到忽略的 `artifacts/` 目录。默认测试不要求真实账号或模型登录；`run.py --native-agents` 可额外检查已安装的原生客户端命令。
+
+完整测试入口与可选原生参数见[端到端验证](../tests/e2e/README.md)。

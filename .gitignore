@@ -13,6 +13,7 @@
 /.hermes/
 /.mcp.json
 /docs/project-notes/
+/tests/e2e/*-failure-modes.md
 *.p8
 *.p12
 *.pfx

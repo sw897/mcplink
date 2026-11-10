@@ -1,6 +1,6 @@
 # Agent 配置适配
 
-以下说明当前实现的配置适配范围。先检查当前二进制的 `schema`，前后台须使用同一构建。当前支持十一类 Agent 的原生文件管理，需要 management API 17；Pi 使用内置 MCP，千问办公的共享 JSON 原生可写，身份隔离或迁移存储回退到客户端导入，豆包工作使用客户端导入。千问/豆包的导出仍可离线准备。格式、权限及实机边界见[Agent 接入管理](agent-discovery.md)、[Pi Agent](pi-agent.md)与[办公客户端调查](office-native-investigation.md)；原生配置应用、客户端加载、业务工具调用分别验收。
+本文面向配置适配的使用与维护。完整客户端及作用域见[兼容矩阵](agent-discovery.md)。原生文件适配需要 management API 17，桌面、CLI 和后台应使用同一构建；实际命令以 `mcplink schema` 为准。
 
 OpenCode 使用官方现行的 2.x `mcp.servers` / `disabled` 配置结构，前后台须使用同一构建。
 
@@ -51,10 +51,30 @@ OpenCode 字面 `${…}` 与托管层的变量语法冲突，目前拒绝导入�
 
 共享条目使用当前格式编码 Bridge 的命令数组及 `environment`，只保存托管 ID 和本地配置引用。凭据更新或后台重启后已有条目继续使用同一连接。直连不能保留工具筛选等约束时要求共享，不扩大允许工具集合。新托管定义的秒级超时转换为对应毫秒字段；原生超时导入的限制仍适用。
 
-## 验证范围
+## 其他原生格式
 
-隔离 CLI 场景覆盖预览、应用、单条恢复、同文件不同作用域、并发编辑、损坏/重复 JSON、JSONC、当前格式的启停、空配置、旧格式拒绝、环境引用、共享凭据更新及后台重启。失败方式见[验收清单](../tests/e2e/agent-adapters-failure-modes.md)。
+| 客户端 | 字段与转换边界 |
+| --- | --- |
+| Codex | TOML `mcp_servers`；保留原表与未知设置，inline table 只盘点不直接编辑。 |
+| Hermes | YAML `mcp_servers`；原生工具 glob、白名单及资源/提示词开关不能等价直连时使用共享入口。 |
+| ZCode | JSON `mcp.servers`、`enable`；非空共享回退来源保持只读，避免新表遮蔽原服务。 |
+| DeepSeek Harness | 按 profile 修改 Cordis patch 中的 MCP client 插件或 manager 服务；保留无关 YAML 和动态表达式，不执行 `!!js`。 |
+| OpenClaw | JSON5 `mcp.servers`、`enabled`；不使用旧 mcporter 格式，拒绝保留名称。 |
+| Kimi Code | `KIMI_CODE_HOME` 下的 `mcp.json`、`mcpServers` 和 `enabled`；项目来源显式登记。 |
+| WorkBuddy | 严格 JSON `mcpServers`；`timeout` 小于 1000 的正整数按秒，其余按毫秒。导出要求启动与请求超时一致，并写为毫秒；原生启停、信任及工具策略不写进服务条目。带工具限制的连接使用共享入口。 |
+| 千问办公 | 当前用户共享 JSON 的 `mcpServers`，保留根偏好与 `cliConnectors`，拒绝跨表同名。身份隔离或迁移存储不写旧 JSON，不能把 SDK 路径当作桌面配置。 |
+| Pi Agent | 内置 MCP 严格 JSON，允许 UTF-8 BOM；保留 `description`、`exposure` 和 `toolExposure`，不修改项目信任。 |
 
-OpenCode 当前原生验收入口使用 `MCPLINK_E2E_OPENCODE` 指定的客户端，本机为 2.2.6。脚本隔离配置与数据目录，持续运行原生服务并等待 MCP 实际连接，避免首次异步查询空列表造成误判。Claude Code 原生验收使用 2.1.319。原生连接检查不代表模型侧业务工具调用；历史平台记录和真实账号范围见[兼容说明](compatibility.md)。
+Pi 的用户目录支持绝对 `PI_CODING_AGENT_DIR` 或 `~/` 路径，默认 `~/.pi/agent`。适配契约核对于官方 `@earendil-works/pi-coding-agent` 1.5.1；旧包及替代内置 MCP 的第三方扩展不据此视为兼容。服务名仅允许英文字母、数字、连字符及下划线，并拒绝连字符/下划线的命名空间冲突。
 
-官方契约核对于 2026-11-08：[Claude Code MCP](https://code.claude.com/docs/en/mcp)、[OpenCode MCP](https://opencode.ai/docs/mcp-servers/)、[OpenCode 配置](https://opencode.ai/docs/config/)。实现和验收固定客户端版本，后续版本变化须重新验证。
+Pi 项目中仅含启用或暴露偏好的条目不是完整上游，不能导入为连接。动态凭据命令、变量替换、相对工作目录、原生认证和进度超时不能等价托管时明确拒绝；`hidden` 或逐工具暴露限制不能作为无限制上游导入。托管工具限制和认证参数需要共享入口。配置写入后由用户在 Pi 中信任项目并 `/reload`。
+
+需要客户端确认的目标通过同一规范连接生成配置，不能由序列化结果推断已加载，也不能建立虚假的原生绑定。配置文件、加密存储或运行时接口只有在具备明确管理契约时才能纳入文件事务。
+
+## 验证
+
+隔离 CLI 场景覆盖预览、应用、单条恢复、同文件不同作用域、并发编辑、损坏/重复 JSON、JSONC、当前格式的启停、空配置、旧格式拒绝、环境引用、共享凭据更新及后台重启。执行方式见[端到端验证](../tests/e2e/README.md)。
+
+可选原生验收使用明确指定的客户端与隔离配置，等待实际 MCP 连接并调用工具。原生连接检查、模型账号调用和文件事务分别核对，不能互相替代。自动化固定版本及平台入口由 CI 工作流维护。
+
+格式依据：[Claude Code MCP](https://code.claude.com/docs/en/mcp)、[OpenCode 配置](https://opencode.ai/docs/config/)、[ZCode MCP](https://zcode.z.ai/en/docs/mcp-services)、[OpenClaw MCP](https://docs.openclaw.ai/tools/mcp)、[Kimi Code MCP](https://www.kimi.com/code/docs/en/kimi-code-cli/customization/mcp.html)、[WorkBuddy MCP](https://www.workbuddy.ai/docs/workbuddy/From-Beginner-to-Expert-Guide/Function-Description/MCP-Guide)、[千问办公连接器](https://docs.qwenwork.cn/features/connectors)、[Pi MCP](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/mcp.md)。客户端升级后需重新核对契约和运行时行为。

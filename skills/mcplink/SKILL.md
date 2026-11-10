@@ -13,7 +13,7 @@ description: 通过 mcplink CLI 盘点和管理 MCP 来源、连接、认证与�
 
 先运行 `mcplink schema` 获取当前命令、参数和 stdin 契约；用 `mcplink status` 获取实际连接、绑定、配置来源和认证状态。`schema` 离线可用。以运行结果中的 ID 为准，不猜连接 ID 或项目来源。
 
-API 15 支持九类原生文件客户端 Codex、Hermes、Claude Code、OpenCode、ZCode、DeepSeek Harness、OpenClaw、Kimi Code、WorkBuddy，以及千问办公/豆包工作的客户端导入。原生文件客户端未安装时不可写入，安装后刷新；配置目录残留不算已安装。千问办公/豆包工作标记为 `management:manual`，可离线生成导入配置，`configurable:true` 不代表已安装或已接入。后台在登记原生来源、预览、应用及恢复时复核安装状态。插件、托管配置、DeepSeek 基础组合及 ZCode 共享回退文件仍按来源权限维护，不能用其他 Agent 类型绕过只读。实际命令和来源 ID 以当前 `schema`、`status` 为准。
+支持的客户端、安装状态和管理能力以当前 `schema`、`status` 为准，桌面、CLI 与后台使用同一构建。原生文件客户端未安装时不可写入，配置目录残留不算已安装。需要在客户端确认的配置只生成内容，不代表已安装或已接入。后台在登记原生来源、预览、应用及恢复时复核安装状态与来源权限，不能用其他 Agent 类型或路径绕过只读。
 
 - 默认 stdout 是单个 JSON：成功为 `{"ok":...}`，失败为 `{"error":{"code":"...","message":"..."}}`，部分结果位于 `result`。
 - 退出码：`0` 成功，`1` 操作失败或未就绪，`2` 参数或 stdin 无效。`--help`、`--version` 输出普通文本；`bridge` 的 stdout 是 MCP 协议。
@@ -27,7 +27,7 @@ API 15 支持九类原生文件客户端 Codex、Hermes、Claude Code、OpenCode
 
 ## 盘点和接入
 
-WorkBuddy 读写用户及显式项目 `.workbuddy/mcp.json`，启停与信任在原客户端维护。千问办公用 `connections export-config --agent qwenwork --connection CONNECTION_ID` 生成 `.ok.config` JSON，豆包工作用 `--agent doubaowork` 生成 `.ok.entries` 表单字段。默认共享模式，先 probe 成功；不会写客户端或建立绑定。明确需要直连时传 `--mode direct`，此时输出含完整凭据，只交给目标客户端导入，不打印到聊天或报告。复制/生成成功不代表客户端加载或调用通过。
+先盘点连接与来源，按具体目标支持的操作完成接入。原生来源通过配置事务维护；需要客户端确认的目标使用当前 Schema 中的 `connections export-config` 生成内容。共享前先检查连接成功；明确需要直连时传 `--mode direct`，此时内容可能含完整凭据，只交给目标客户端，不打印到聊天或报告。配置写入、复制及生成成功都不代表客户端已加载或调用通过。
 
 ```sh
 mcplink sources list
@@ -42,7 +42,7 @@ mcplink connections tools CONNECTION_ID
 
 若 schema 提供 `--scope`，Claude Code 可写 user 来源；`sources add --agent claude --scope local|project --project /absolute/project` 显式添加项目作用域。Local 按 Git 项目根目录定位 `.claude.json` 的项目键，Project 使用所选目录 `.mcp.json`。只写目标服务，不修改信任、审批或项目启停偏好；插件、托管及其他未明确作用域的 JSON 保持只读。原生启停在 Claude Code `/mcp` 维护，不能向服务条目添加 `enabled`。
 
-若 schema 支持 `opencode`，可用 `sources add --agent opencode --path /absolute/opencode.jsonc`；项目来源另加 `--scope project --project /absolute/project`。只支持当前 `mcp.servers.<name>` / `disabled` 格式；空文件或没有 MCP 设置的文件直接按空服务表读取，无需版本参数。旧版服务表和 `enabled` 字段会被拒绝。相关配置操作需要同一构建的 API 6 后台。JSONC 注释及未涉及设置保持原样。原生专用 OAuth、文件变量、超时或协议选项不能等价导入时保留原客户端配置，另建明确的托管连接；不读取原生登录缓存。文件写入、原生加载和工具调用分别核验。
+若 schema 支持 `opencode`，可用 `sources add --agent opencode --path /absolute/opencode.jsonc`；项目来源另加 `--scope project --project /absolute/project`。只支持当前 `mcp.servers.<name>` / `disabled` 格式；空文件或没有 MCP 设置的文件直接按空服务表读取，无需版本参数。旧版服务表和 `enabled` 字段会被拒绝。JSONC 注释及未涉及设置保持原样。原生专用 OAuth、文件变量、超时或协议选项不能等价导入时保留原客户端配置，另建明确的托管连接；不读取原生登录缓存。文件写入、原生加载和工具调用分别核验。
 
 新增或编辑连接用 `connections save --stdin`。输入为完整的规范化连接对象；编辑时以 `connections show` 的 `definition` 为起点，保留仍需沿用的字段和掩码，连同 `id`、`name` 等元数据提交。原生 `http_headers`、`enabled_tools` 等字段须转换为 `schema` 中的规范字段。保存连接本身不写 Agent 配置。
 

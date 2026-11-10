@@ -1,6 +1,6 @@
 # 依赖与许可
 
-mcplink 自有代码使用 MIT。具体依赖解析由 Cargo.lock 与 package-lock.json 固定；分发应保留第三方许可。首版主要直接依赖如下。
+mcplink 自有代码使用 MIT。具体依赖解析由 Cargo.lock 与 package-lock.json 固定；分发应保留第三方许可。主要直接依赖如下。
 
 | 依赖 | 锁定版本 | 用途 | 许可 |
 | --- | --- | --- | --- |

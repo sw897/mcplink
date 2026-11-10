@@ -1,30 +1,30 @@
 # mcplink · Preview / 预览构建说明
 
-mcplink is a local desktop MCP manager and shared gateway for Codex, Hermes, Claude Code, OpenCode, ZCode, DeepSeek Harness, OpenClaw, Kimi Code, WorkBuddy, QwenWork, and Pi Agent, with connector import generation for QwenWork and Doubao Work.
+mcplink is a desktop MCP manager and local gateway for macOS and Windows. Manage services, account authorization, and AI agent connections from the desktop, JSON CLI, or bundled management Skill.
 
 ## Features
 
-- Discover local MCP configurations and connect services to installed agents through native direct access or the shared gateway.
-- Maintain managed connections and account authorization, with credentials in the system credential store.
+- Discover MCP configuration sources, services, and installed agents.
+- Create or import connections, inspect tools, and maintain managed authorization.
+- Connect services through direct access or a shared gateway with system credential storage and tool filtering.
 - Preview configuration edits, detect concurrent changes, back up files, and restore individual operations.
-- Manage WorkBuddy and Pi user/project MCP files and QwenWork shared JSON profiles. Pi uses built-in MCP and retains client-owned exposure settings. QwenWork identity storage falls back to client import; QwenWork JSON and Doubao Work HTTP/STDIO import fields remain available offline. Generated imports do not confirm client loading or create native bindings. Requires management API 17.
-- Use the desktop, JSON CLI, or bundled management Skill. Invoke tools or generate command-line entry points for selected tools.
-- Use the macOS menu bar or Windows tray for background controls, login startup, persistent pause, and exit cleanup.
+- Invoke MCP tools or generate command-line entry points using the same managed connections.
+- Control background sharing, login startup, pause state, and exit behavior from the menu bar or tray.
+
+Supported clients and operation limits are listed in the [Agent compatibility matrix](https://github.com/sw897/mcplink/blob/main/docs/agent-discovery.md).
 
 ## Install and verify
 
-Keep the application or standalone CLI in a permanent location before configuring shared entries. On macOS, copy the app to `/Applications`; on Windows, run the NSIS installer. Reload the agent's MCP configuration after applying changes and make an actual tool call.
+Keep the application or standalone CLI in a permanent location before configuring shared entries. On macOS, copy the app to `/Applications`; on Windows, run the NSIS installer. Complete the client setup as prompted, reload MCP, and make an actual tool call.
 
-The files supplied with each build record its source revision, SHA-256 checksums, signing status, and acceptance results. Check `SHA256SUMS`, `release-manifest.json`, and `verification.json` alongside the artifacts. Isolated MCP/OAuth checks use synthetic services; each real upstream has its own authorization and business-call acceptance scope.
-
-See the [project guide](https://github.com/sw897/mcplink/blob/main/README.md), [supported scope](https://github.com/sw897/mcplink/blob/main/docs/compatibility.md), and [release guide](https://github.com/sw897/mcplink/blob/main/docs/release.md).
+Check the source revision, SHA-256 checksums, signing status, and acceptance results supplied with the build. Packaging and signing options are described in the [release guide](https://github.com/sw897/mcplink/blob/main/docs/release.md).
 
 ## 中文说明
 
-mcplink 在一个桌面应用里管理本机 MCP 服务、账号授权和十二类 Agent 的接入。十一类支持原生文件管理，包括 WorkBuddy、Pi 用户及项目配置和千问办公共享 JSON；Pi 使用内置 MCP 的严格 JSON 并保留工具暴露设置，千问的身份存储回退到导入，豆包工作生成自定义连接器字段。当前管理 API 为 17。导入后需在客户端验证工具调用；原生写入后也需重新加载。每项连接可按客户端支持情况选择原生直连或共享网关，共享凭据在系统凭据库中维护。
+mcplink 是面向 macOS 和 Windows 的桌面 MCP 管理器与本地共享网关。桌面、JSON CLI 和内置管理 Skill 共用连接、账号授权与配置事务。
 
-配置先预览再应用，写入前检查文件变化，支持备份和逐条恢复。桌面与 JSON CLI 共用管理核心，可通过内置管理 Skill 操作连接，也可直接调用工具或生成轻量命令入口。
+可以盘点配置来源和服务，新建或导入连接，检查工具，选择直连或共享接入。配置变更支持预览、并发检查、备份与逐条恢复；共享网关通过系统凭据库维护授权和工具筛选。
 
-macOS 菜单栏和 Windows 托盘支持后台运行、登录启动及暂停共享。完整退出等待共享服务清理，仅退出界面可保留代理；暂停状态在重启后保留。
+菜单栏和托盘支持登录启动、暂停共享及退出控制。具体客户端的接入能力见[兼容矩阵](https://github.com/sw897/mcplink/blob/main/docs/agent-discovery.md)。安装后将程序保留在固定位置，按提示完成客户端设置并实际调用工具验证。
 
-安装和共享接入前，将程序放在固定位置。安装包的源码、校验值、签名状态及验收结果以随附清单为准。使用说明见[中文 README](https://github.com/sw897/mcplink/blob/main/README.zh-CN.md)。
+安装包的源码版本、校验值、签名状态和验收结果以随附清单为准。使用说明见[项目指南](https://github.com/sw897/mcplink/blob/main/README.zh-CN.md)。
