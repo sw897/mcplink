@@ -1,6 +1,6 @@
 # Agent 配置适配
 
-以下说明当前实现的配置适配范围。先检查当前二进制的 `schema`，前后台须使用同一构建。当前支持九类 Agent 的原生文件管理，以及千问办公/豆包工作的客户端导入配置，需要 management API 15，格式、导入步骤及权限见[Agent 接入管理](agent-discovery.md)。未安装时不可写入原生文件，客户端导入可离线准备；原生配置应用、客户端加载、业务工具调用分别验收。
+以下说明当前实现的配置适配范围。先检查当前二进制的 `schema`，前后台须使用同一构建。当前支持十一类 Agent 的原生文件管理，需要 management API 17；Pi 使用内置 MCP，千问办公的共享 JSON 原生可写，身份隔离或迁移存储回退到客户端导入，豆包工作使用客户端导入。千问/豆包的导出仍可离线准备。格式、权限及实机边界见[Agent 接入管理](agent-discovery.md)、[Pi Agent](pi-agent.md)与[办公客户端调查](office-native-investigation.md)；原生配置应用、客户端加载、业务工具调用分别验收。
 
 OpenCode 使用官方现行的 2.x `mcp.servers` / `disabled` 配置结构，前后台须使用同一构建。
 

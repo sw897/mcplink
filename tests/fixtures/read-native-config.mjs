@@ -16,7 +16,7 @@ if (agent === "hermes") {
   entry = row.config;
   if (entry.transport !== "stdio") throw new Error("Expected native stdio transport");
 } else {
-  const raw = JSON5.parse(text);
+  const raw = agent === "pi" ? JSON.parse(text.replace(/^\uFEFF/, "")) : ["qwenwork", "workbuddy"].includes(agent) ? JSON.parse(text) : JSON5.parse(text);
   entry = ["zcode", "openclaw", "opencode"].includes(agent) ? raw.mcp.servers[name] : raw.mcpServers[name];
   if (agent === "opencode") {
     if (entry.type !== "local" || entry.disabled) throw new Error("Invalid OpenCode local entry");

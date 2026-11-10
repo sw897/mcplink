@@ -39,11 +39,19 @@ mcplink 是面向个人的桌面 MCP（Model Context Protocol）接入管理器�
 
 ## 支持的 Agent
 
-mcplink 支持 Codex、Hermes、Claude Code、OpenCode、ZCode、DeepSeek Harness、OpenClaw、Kimi Code、WorkBuddy、千问办公和豆包工作。
+mcplink 支持十二类客户端，其中十一类支持原生文件管理。原生配置和客户端导入均可按各自的支持范围选择直连或共享。
+
+| 客户端 | 配置支持 |
+| --- | --- |
+| Codex、Hermes、Claude Code、OpenCode、ZCode、DeepSeek Harness、OpenClaw、Kimi Code | 原生用户配置；支持的项目或 profile 来源需显式添加。 |
+| WorkBuddy | 原生用户及项目配置；信任、启停和工具策略在 WorkBuddy 中维护。见[桌面与系统钥匙串验收](docs/workbuddy-verification.md)。 |
+| 千问办公 | 原生共享 JSON 存储；身份隔离或迁移存储回退到客户端导入，也可离线准备 JSON 导入。见[办公客户端验收](docs/office-native-investigation.md)。 |
+| Pi Agent | 内置 MCP 用户及项目配置，支持启停和恢复；项目信任与工具暴露设置由 Pi 维护。见[Pi 接入与验收](docs/pi-agent.md)。 |
+| 豆包工作 | 离线生成 HTTP/STDIO 连接器字段，在客户端完成导入。见[办公客户端验收](docs/office-native-investigation.md)。 |
 
 mcplink 会识别客户端安装状态并盘点支持的用户配置。未安装的客户端仍显示在列表中，安装并刷新后即可写入原生文件。项目或其他 profile 的配置需显式添加；插件和系统托管等只读来源保留只读权限。
 
-新增 WorkBuddy 原生文件管理，支持用户及显式项目 `.workbuddy/mcp.json` 的预览、写入、移除和恢复。千问办公可生成连接器导入 JSON，豆包工作可生成 HTTP/STDIO 连接器的填写字段，均支持直连或共享模式。生成配置不会建立绑定或确认客户端已接入，需要在对应客户端完成导入并验证工具调用；本机未安装也可准备导入配置。
+生成导入内容不会建立绑定或确认客户端已接入；原生写入后也需重新加载客户端并验证工具调用。实机加载、MCP 运行时调用和模型账号回合的验收范围分别记录。
 
 各客户端的配置格式、导入步骤、可写来源和原生启停方式见[Agent 接入管理](docs/agent-discovery.md)及[配置适配](docs/agent-adapters.md)。
 
@@ -52,7 +60,7 @@ mcplink 会识别客户端安装状态并盘点支持的用户配置。未安装
 1. 按[源码构建](#从源码运行)运行或打包 mcplink，并将应用或独立 CLI 放在长期保留的位置。共享配置会引用它的程序路径。
 2. 打开应用，查看本机服务和已安装的 Agent；按需添加项目或 profile 的真实配置文件。
 3. 导入已有连接，或填写 STDIO 启动命令、远程 MCP 地址来新建连接。设置所需凭据或完成 OAuth 授权，再检查工具清单。
-4. 选择目标 Agent 和直连或共享方式，核对配置预览后应用。
+4. 选择目标 Agent 和直连或共享方式，核对配置预览后应用。豆包工作或使用客户端导入的千问配置，需将生成内容复制到客户端连接器页面。
 5. 按提示重新加载 Agent 的 MCP 配置，并做一次实际工具调用确认接入结果。
 
 后续可在账号与服务页面更新托管授权，在“变更与恢复”中检查和恢复操作。移动程序后，需要从新位置重新预览并应用共享配置。

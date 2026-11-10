@@ -42,7 +42,6 @@ import {
   Tool,
   Dialog,
   agentLabel,
-  manualImport,
   time,
   rpc,
 } from "./contracts";
@@ -94,8 +93,10 @@ function App() {
         next.agents.some(
           (client) =>
             !agents.includes(client.id) ||
-            (manualImport(client.id)
-              ? client.management !== "manual" || !client.configurable
+            client.supportsImport !==
+              ["qwenwork", "doubaowork"].includes(client.id) ||
+            (client.management === "manual"
+              ? !client.supportsImport || !client.configurable
               : client.management !== "writable" ||
                 client.configurable !== client.installed),
         )
@@ -273,10 +274,13 @@ function App() {
     data?.sources.filter((source) => source.agent === agent) || [];
   const localAgents = data?.agents || [];
   const isInstalled = (agent?: Agent) =>
-    localAgents.some((client) => client.id === agent && client.configurable);
+    localAgents.some((client) => client.id === agent && client.installed);
 
   const currentAgent =
     localAgents.find((client) => client.id === activeAgent) || localAgents[0];
+  const currentImportOnly =
+    currentAgent?.supportsImport &&
+    (currentAgent.management === "manual" || !currentAgent.installed);
   const currentSources = currentAgent ? sourcesFor(currentAgent.id) : [];
   const currentBindings =
     data?.bindings.filter(
@@ -319,7 +323,11 @@ function App() {
   };
 
   const bindingCell = (connection: Connection, agent: Agent) => {
-    if (manualImport(agent))
+    const client = data?.agents.find((client) => client.id === agent);
+    if (
+      client?.supportsImport &&
+      (client.management === "manual" || !client.installed)
+    )
       return (
         <button
           className="cell-add"
@@ -1028,7 +1036,7 @@ function App() {
                       </div>
                     </div>
                     <div className="agent-panel-actions">
-                      {currentAgent.management === "manual" ? (
+                      {currentImportOnly ? (
                         <span className="pill">客户端导入</span>
                       ) : (
                         <button
@@ -1042,11 +1050,14 @@ function App() {
                       )}
                     </div>
                   </header>
-                  {currentAgent.management === "manual" ? (
+                  {currentImportOnly ? (
                     <div className="agent-unavailable">
                       <ArrowRight size={19} />
                       <div>
                         <strong>选择服务，生成导入配置</strong>
+                        {currentAgent.managementReason && (
+                          <p>{currentAgent.managementReason}</p>
+                        )}
                         <p>{importInstructions(currentAgent.id)}</p>
                         <p>
                           可在安装客户端前准备配置。导入结果需在客户端确认，此处不显示已接入状态。
@@ -1070,7 +1081,7 @@ function App() {
                             try {
                               const path = await open({
                                 multiple: false,
-                                title: `选择 ${currentAgent.label} 的${currentAgent.id === "workbuddy" ? "应用程序" : " CLI 可执行文件"}`,
+                                title: `选择 ${currentAgent.label} 的${["workbuddy", "qwenwork"].includes(currentAgent.id) ? "应用程序" : " CLI 可执行文件"}`,
                               });
                               if (typeof path === "string")
                                 await action(
@@ -1083,7 +1094,7 @@ function App() {
                             }
                           }}
                         >
-                          {currentAgent.id === "workbuddy"
+                          {["workbuddy", "qwenwork"].includes(currentAgent.id)
                             ? "选择已安装的程序"
                             : "选择已安装的 CLI"}
                         </button>
@@ -1117,7 +1128,7 @@ function App() {
                   )}
                   <div className="agent-service-heading">
                     <h3>MCP 服务</h3>
-                    {currentAgent.management !== "manual" && (
+                    {!currentImportOnly && (
                       <div
                         className="agent-service-filters"
                         aria-label="按接入状态筛选"
@@ -1179,7 +1190,7 @@ function App() {
                       </div>
                     )}
                   </div>
-                  {currentAgent.management !== "manual" && (
+                  {!currentImportOnly && (
                     <details className="agent-source-details">
                       <summary>
                         配置位置<span>{currentSources.length}</span>
@@ -1226,9 +1237,10 @@ function App() {
         <Modal title="配置来源" wide onClose={() => setDialog(undefined)}>
           <div className="modal-body">
             <p className="muted">
-              九类 Agent 支持原生配置管理和 MCP 共享代理，未安装时不可写入。
-              千问办公和豆包工作通过「接给
-              Agent」生成客户端导入配置。插件、托管及共享回退来源按各自权限维护。
+              十一类 Agent 支持原生配置管理和 MCP 共享代理，未安装时不可写入。
+              千问办公适配共享 JSON
+              存储；身份隔离存储使用客户端导入。豆包工作使用客户端导入。
+              插件、托管及共享回退来源按各自权限维护。
             </p>
             {data?.sources.map((source) => (
               <div className="source-row" key={source.id}>
@@ -1252,9 +1264,9 @@ function App() {
               </div>
             ))}
             <div className="split-buttons">
-              {agents
-                .filter((agent) => !manualImport(agent))
-                .map((agent) => (
+              {data?.agents
+                .filter((client) => client.management === "writable")
+                .map(({ id: agent }) => (
                   <button
                     className="button"
                     key={agent}

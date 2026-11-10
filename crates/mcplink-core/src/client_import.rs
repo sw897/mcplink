@@ -36,7 +36,7 @@ pub fn check_portable(def: &Definition) -> Result<()> {
 }
 
 pub fn entry(def: &Definition, agent: &Agent) -> Result<Value> {
-    if !agent.manual_import() {
+    if !agent.supports_import() {
         bail!("此客户端使用原生配置预览，请选择千问办公或豆包工作导入")
     }
     config::validate(def)?;

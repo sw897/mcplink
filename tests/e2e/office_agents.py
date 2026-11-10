@@ -1,8 +1,9 @@
-"""Validate WorkBuddy native transactions and offline QwenWork/DoubaoWork imports."""
+"""Validate WorkBuddy/QwenWork native transactions and offline office-client imports."""
 import argparse
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import sqlite3
 import shutil
@@ -48,17 +49,84 @@ def main():
 
     try:
         initial = snapshot()
-        assert len(initial["agents"]) == 11
+        assert len(initial["agents"]) == 12
         assert not any(a["installed"] for a in initial["agents"])
-        assert {a["id"] for a in initial["agents"] if a["configurable"]} == {"qwenwork", "doubaowork"}
-        assert not any(s["agent"] in {"qwenwork", "doubaowork"} for s in initial["sources"])
-        for agent in ("qwenwork", "doubaowork"):
-            assert "界面导入" in harness.rpc("sources.add", {"agent":agent}, error=True)
+        assert {a["id"] for a in initial["agents"] if a["configurable"]} == {"doubaowork"}
+        assert {a["id"] for a in initial["agents"] if a["supportsImport"]} == {"qwenwork", "doubaowork"}
+        assert not any(s["agent"] == "doubaowork" for s in initial["sources"])
+        assert "界面导入" in harness.rpc("sources.add", {"agent":"doubaowork"}, error=True)
+        assert "未安装" in harness.rpc("sources.add", {"agent":"qwenwork"}, error=True)
         source = next(s for s in initial["sources"] if s["agent"] == "workbuddy")
         path = Path(source["path"])
         assert path == harness.home / ".workbuddy/mcp.json" and not path.exists()
         assert "未安装" in harness.rpc("sources.add", {"agent":"workbuddy"}, error=True)
         passed("inventory distinguishes installation, native write access and offline connector imports")
+
+        # Real distribution names, represented by presence-only fixtures. No
+        # vendor client is launched by this isolated inventory acceptance test.
+        def office_installed(agent):
+            item = next(a for a in snapshot()["agents"] if a["id"] == agent)
+            assert item["supportsImport"]
+            if agent == "doubaowork":
+                assert item["management"] == "manual" and item["configurable"]
+                assert item["profilePath"] is None
+            else:
+                assert item["management"] == "writable" and item["configurable"] == item["installed"]
+                assert Path(item["profilePath"]) == harness.home / ".qwenworkcn"
+            return item["installed"]
+
+        if sys.platform == "darwin":
+            import plistlib
+
+            def office_bundle(name, executable):
+                bundle = harness.home / "Applications" / name
+                program = bundle / "Contents/MacOS" / executable
+                program.parent.mkdir(parents=True)
+                (bundle / "Contents/Info.plist").write_bytes(plistlib.dumps({"CFBundleExecutable":executable}))
+                return bundle, program
+
+            for name in ("Doubao.app", "豆包.app"):
+                _, program = office_bundle(name, "Doubao")
+                program.touch()
+            assert not office_installed("doubaowork")
+            for agent, name, executable in (("qwenwork", "QwenWorkCN.app", "QwenWorkCN"),
+                                             ("doubaowork", "DoubaoWork.app", "DoubaoWork")):
+                bundle, program = office_bundle(name, executable)
+                assert not office_installed(agent)
+                program.touch()
+                assert office_installed(agent)
+                program.unlink()
+                assert not office_installed(agent)
+                shutil.rmtree(bundle)
+            for agent, name, executable in (("qwenwork", "QwenWork.app", "QwenWorkCN"),
+                                             ("qwenwork", "千问办公.app", "QwenWorkCN"),
+                                             ("doubaowork", "豆包工作.app", "DoubaoWork")):
+                bundle, program = office_bundle(name, executable)
+                program.touch()
+                assert office_installed(agent)
+                shutil.rmtree(bundle)
+        elif os.name == "nt":
+            local_apps = harness.home / "AppData/Local"
+            consumer = local_apps / "Doubao/Application/Doubao.exe"
+            consumer.parent.mkdir(parents=True)
+            consumer.touch()
+            other_consumer = local_apps / "Programs/Doubao/Doubao.exe"
+            other_consumer.parent.mkdir(parents=True)
+            other_consumer.touch()
+            assert not office_installed("doubaowork")
+            for agent, relative in (("qwenwork", "Programs/QwenWorkCN/QwenWorkCN.exe"),
+                                     ("doubaowork", "Programs/DoubaoWork/DoubaoWork.exe"),
+                                     ("doubaowork", "DoubaoWork/Application/DoubaoWork.exe")):
+                program = local_apps / relative
+                program.parent.mkdir(parents=True)
+                assert not office_installed(agent)
+                program.touch()
+                assert office_installed(agent)
+                program.unlink()
+                assert not office_installed(agent)
+        if sys.platform == "darwin" or os.name == "nt":
+            assert not any(s["agent"] == "doubaowork" for s in snapshot()["sources"])
+            passed("official office program names and aliases are detected; consumer Doubao, broken bundles and removed programs stay uninstalled")
 
         local = harness.rpc("connections.import", {"sourceId":"codex:user", "name":"local_notes"})["id"]
         remote = harness.rpc("connections.import", {"sourceId":"hermes:user", "name":"office_docs"})["id"]
@@ -125,6 +193,99 @@ def main():
         passed("unsupported execution limits and disconnected connections fail explicitly instead of losing semantics")
 
         harness.install_clients()
+
+        qwen = next(s for s in snapshot()["sources"] if s["agent"] == "qwenwork")
+        qwen_path = Path(qwen["path"])
+        assert qwen_path == harness.home / ".qwenworkcn/mcp.json"
+        qwen_path.parent.mkdir(parents=True)
+        qwen_original = {"keepPreference":{"value":"保留"},"cliConnectors":{"keep_cli":{"command":"never-run"}},
+            "mcpServers":{"qwen_docs":{"type":"streamable-http","url":harness.url,
+                "headers":{"Authorization":"synthetic-fixture-authorization"},"enabled":True}}}
+        qwen_path.write_text(json.dumps(qwen_original, ensure_ascii=False, indent=2), encoding="utf-8")
+        qwen_id = harness.rpc("connections.import", {"sourceId":qwen["id"],"name":"qwen_docs"})["id"]
+        assert harness.rpc("connections.probe", {"id":qwen_id})["connection"]["status"] == "ready"
+        before_qwen = qwen_path.read_bytes()
+        plan = harness.rpc("changes.preview", {"connectionId":qwen_id,"targetSourceIds":[qwen["id"]],"mode":"shared"})
+        assert qwen_path.read_bytes() == before_qwen
+        assert harness.rpc("changes.apply", {"planId":plan["planId"]})["results"][0]["status"] == "applied"
+        value = json.loads(qwen_path.read_text(encoding="utf-8"))
+        assert value["keepPreference"] == qwen_original["keepPreference"]
+        assert value["cliConnectors"] == qwen_original["cliConnectors"]
+        entry = value["mcpServers"]["qwen_docs"]
+        assert entry["type"] == "stdio" and entry["enabled"] is True
+        assert "synthetic-fixture-authorization" not in json.dumps(value)
+        client = McpClient(qwen_id, harness.environment, "qwen-native-shared", entry)
+        harness.clients.append(client)
+        assert "result" in client.call("tools/call", {"name":"read_document","arguments":{"id":"weekly-fixture"}})
+        harness.changes(qwen_id, [qwen["id"]], action="disable")
+        assert json.loads(qwen_path.read_text(encoding="utf-8"))["mcpServers"]["qwen_docs"]["enabled"] is False
+        harness.changes(qwen_id, [qwen["id"]], action="enable")
+        _, removed = harness.changes(qwen_id, [qwen["id"]], action="remove")
+        value = json.loads(qwen_path.read_text(encoding="utf-8"));value["laterPreference"] = True
+        qwen_path.write_text(json.dumps(value), encoding="utf-8")
+        assert harness.rpc("changes.restore", {"operationId":removed["results"][0]["operationId"]})["status"] == "restored"
+        assert json.loads(qwen_path.read_text(encoding="utf-8"))["laterPreference"] is True
+        passed("QwenWork strict native JSON supports shared MCP calls, enable/disable and recovery while preserving CLI connectors and preferences")
+
+        qwen_valid = qwen_path.read_text(encoding="utf-8")
+        value = json.loads(qwen_valid);value["cliConnectors"]["local_notes"] = {"command":"never-run"}
+        qwen_path.write_text(json.dumps(value), encoding="utf-8")
+        assert "同名 CLI" in harness.rpc("changes.preview", {"connectionId":local,"targetSourceIds":[qwen["id"]]}, error=True)
+        value["cliConnectors"]["qwen_docs"] = {"command":"never-run"}
+        qwen_path.write_text(json.dumps(value), encoding="utf-8")
+        assert "同名" in harness.rpc("connections.import", {"sourceId":qwen["id"],"name":"qwen_docs"}, error=True)
+        for content in ['// JSONC is not a QwenWork document\n' + qwen_valid,
+                json.dumps({"mcpServers":{"bad":{"type":"sse","url":harness.url}}}),
+                json.dumps({"mcpServers":{"bad":{"command":"fixture","cwd":str(record)}}}),
+                json.dumps({"mcpServers":{"bad":{"command":"fixture","timeout":1000}}})]:
+            qwen_path.write_text(content, encoding="utf-8")
+            harness.rpc("connections.import", {"sourceId":qwen["id"],"name":"bad"}, error=True)
+            assert qwen_path.read_text(encoding="utf-8") == content
+        qwen_path.write_text(qwen_valid, encoding="utf-8")
+        assert "仅适配当前用户" in harness.rpc("sources.add", {"agent":"qwenwork","path":str(record/"sdk-config.json")}, error=True)
+        passed("QwenWork rejects JSONC, cross-bucket collisions, SDK paths and unverified execution fields without changing the native document")
+
+        if sys.platform == "darwin":
+            qwen_profile = harness.home / "Library/Application Support/QwenWorkCN"
+        elif os.name == "nt":
+            qwen_profile = harness.home / "AppData/Roaming/QwenWorkCN"
+        else:
+            qwen_profile = harness.home / ".config/QwenWorkCN"
+        for marker in ["data/agents.identity-v2.db", "data/.local-identity-format.json", "identity-transition/v2/state.json"]:
+            pending = harness.rpc("changes.preview", {"connectionId":local,"targetSourceIds":[qwen["id"]]})
+            marker_path = qwen_profile / marker
+            marker_path.parent.mkdir(parents=True, exist_ok=True);marker_path.touch()
+            before_guard = qwen_path.read_bytes()
+            private = snapshot()
+            item = next(a for a in private["agents"] if a["id"] == "qwenwork")
+            assert item["management"] == "manual" and item["supportsImport"] and item["configurable"]
+            assert item["profilePath"] is None and "身份隔离" in item["managementReason"]
+            assert next(s for s in private["sources"] if s["id"] == qwen["id"])["readOnly"]
+            assert harness.rpc("changes.apply", {"planId":pending["planId"]})["results"][0]["status"] == "failed"
+            assert qwen_path.read_bytes() == before_guard
+            before_export = native_state()
+            assert export("qwenwork", [remote])["requiresImport"]
+            assert native_state() == before_export
+            marker_path.unlink()
+            if marker.startswith("identity-transition"):
+                shutil.rmtree(qwen_profile / "identity-transition")
+        db_path = qwen_profile / "data/agents.db"
+        with sqlite3.connect(db_path) as db:
+            db.execute("CREATE TABLE identity_connector_heads(identity_key TEXT PRIMARY KEY)")
+            db.execute("INSERT INTO identity_connector_heads VALUES ('synthetic-identity')")
+        db.close()
+        assert next(a for a in snapshot()["agents"] if a["id"] == "qwenwork")["management"] == "manual"
+        db_path.unlink()
+        assert next(a for a in snapshot()["agents"] if a["id"] == "qwenwork")["management"] == "writable"
+        _, protected_removal = harness.changes(qwen_id, [qwen["id"]], action="remove")
+        marker_path = qwen_profile / "data/agents.identity-v2.db";marker_path.touch()
+        before_guard = qwen_path.read_bytes()
+        harness.rpc("changes.restore", {"operationId":protected_removal["results"][0]["operationId"]}, error=True)
+        assert qwen_path.read_bytes() == before_guard
+        marker_path.unlink()
+        assert harness.rpc("changes.restore", {"operationId":protected_removal["results"][0]["operationId"]})["status"] == "restored"
+        passed("QwenWork identity markers or populated identity tables select manual import and block stale apply and restore without writing legacy JSON")
+
         custom = record / "custom-apps"
         custom.mkdir()
         if sys.platform == "darwin":
@@ -137,26 +298,27 @@ def main():
         assert next(a for a in snapshot()["agents"] if a["id"] == "workbuddy")["installed"]
         passed("a verified WorkBuddy desktop program at a custom location enables native configuration")
         path.parent.mkdir(parents=True)
-        original = '// keep office preference\n{"theme":"light","mcpServers":{"work_remote":' + json.dumps({
+        original = '{"theme":"light","keepOfficePreference":true,"mcpServers":{"work_remote":' + json.dumps({
             "type":"streamableHttp","url":harness.url,"headers":{"Authorization":"synthetic-fixture-authorization"},
-            "timeout":6000,"disabledTools":["search_documents"]}) + '}}\n'
+            "timeout":6000}) + '}}\n'
         path.write_text(original, encoding="utf-8")
         native = harness.rpc("connections.import", {"sourceId":source["id"],"name":"work_remote"})["id"]
         detail = harness.rpc("connections.detail", {"id":native})["definition"]
-        assert detail["startupTimeout"] == 6 and detail["timeout"] is None
-        assert detail["excludeTools"] == ["search_documents"]
+        assert detail["startupTimeout"] == 6 and detail["timeout"] == 6
+        assert detail["excludeTools"] == []
         assert harness.rpc("connections.probe", {"id":native})["connection"]["status"] == "ready"
         plan = harness.rpc("changes.preview", {"connectionId":native,"targetSourceIds":[source["id"]]})
         assert path.read_text(encoding="utf-8") == original
         assert harness.rpc("changes.apply", {"planId":plan["planId"]})["results"][0]["status"] == "applied"
-        assert "// keep office preference" in path.read_text(encoding="utf-8")
+        assert json.loads(path.read_text(encoding="utf-8"))["keepOfficePreference"] is True
         assert next(b for b in snapshot()["bindings"] if b.get("connectionId") == native)["changed"] is False
         assert "原客户端" in harness.rpc("changes.preview", {"connectionId":native,"targetSourceIds":[source["id"]],"action":"disable"}, error=True)
         _, removal = harness.changes(native, [source["id"]], action="remove")
-        path.write_text(path.read_text(encoding="utf-8") + "\n// unrelated later edit\n", encoding="utf-8")
+        later = json.loads(path.read_text(encoding="utf-8"));later["laterPreference"] = True
+        path.write_text(json.dumps(later), encoding="utf-8")
         assert harness.rpc("changes.restore", {"operationId":removal["results"][0]["operationId"]})["status"] == "restored"
-        assert "// unrelated later edit" in path.read_text(encoding="utf-8")
-        passed("WorkBuddy HTTP, millisecond connection timeout and tool blacklist round-trip with native transaction recovery")
+        assert json.loads(path.read_text(encoding="utf-8"))["laterPreference"] is True
+        passed("WorkBuddy strict JSON, native HTTP and uniform startup/request timeouts round-trip with recovery")
 
         project = record / "project with spaces"
         project.mkdir()
@@ -178,12 +340,32 @@ def main():
         bad_path = record / "workbuddy-invalid.json"
         bad_source = harness.rpc("sources.add", {"agent":"workbuddy","path":str(bad_path)})
         for definition in ({"type":"sse","url":harness.url}, {"command":"fixture","timeout":1501},
-                {"command":"fixture","runtime":{"type":"node"}}, {"command":"fixture","env":{"KEY":"${VAR}"}}):
+                {"command":"fixture","runtime":{"type":"node"}}, {"command":"fixture","env":{"KEY":"${VAR}"}},
+                {"url":harness.url,"disabledTools":["search_documents"]}):
             content = json.dumps({"mcpServers":{"bad":definition}})
             bad_path.write_text(content, encoding="utf-8")
             harness.rpc("connections.import", {"sourceId":bad_source["id"],"name":"bad"}, error=True)
             assert bad_path.read_text(encoding="utf-8") == content
-        passed("unsupported WorkBuddy transports, subsecond timeouts, runtime declarations and credential templates stay untouched")
+        content = '// JSONC is not a WorkBuddy user document\n{"mcpServers":{}}'
+        bad_path.write_text(content, encoding="utf-8")
+        harness.rpc("connections.import", {"sourceId":bad_source["id"],"name":"bad"}, error=True)
+        assert bad_path.read_text(encoding="utf-8") == content
+        bad_path.write_text(json.dumps({"mcpServers":{"legacy_seconds":{"url":harness.url,"timeout":30}}}), encoding="utf-8")
+        seconds = harness.rpc("connections.import", {"sourceId":bad_source["id"],"name":"legacy_seconds"})["id"]
+        detail = harness.rpc("connections.detail", {"id":seconds})["definition"]
+        assert detail["startupTimeout"] == detail["timeout"] == 30
+        limited = harness.rpc("connections.save", {"name":"workbuddy_limited","definition":{
+            "url":harness.url,"headers":{"Authorization":"synthetic-fixture-authorization"},
+            "excludeTools":["search_documents"]}})["id"]
+        assert "共享" in harness.rpc("changes.preview", {"connectionId":limited,"targetSourceIds":[project_source["id"]]}, error=True)
+        harness.rpc("connections.probe", {"id":limited})
+        harness.changes(limited, [project_source["id"]], mode="shared")
+        entry = json.loads(project_path.read_text())["mcpServers"]["workbuddy_limited"]
+        assert "disabledTools" not in entry
+        limited_client = McpClient(limited, harness.environment, "workbuddy-filtered-shared", entry)
+        harness.clients.append(limited_client)
+        assert [t["name"] for t in limited_client.call("tools/list")["result"]["tools"]] == ["read_document"]
+        passed("WorkBuddy rejects JSONC and ignored file filters; its legacy seconds and shared filters retain actual semantics")
 
         codex_path = harness.home / ".codex/config.toml"
         codex_path.write_text(codex_path.read_text(encoding="utf-8") + '\n[mcp_servers.native_options]\ncommand = "fixture"\nfuture_native_option = true\n', encoding="utf-8")

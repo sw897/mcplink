@@ -15,8 +15,8 @@ import traceback
 
 from run import BINARY, FIXTURE, ROOT, Harness, McpClient
 
-NATIVE = {"codex", "hermes", "claude", "opencode", "zcode", "deepseek", "openclaw", "kimicode", "workbuddy"}
-MANUAL = {"qwenwork", "doubaowork"}
+NATIVE = {"codex", "hermes", "claude", "opencode", "zcode", "deepseek", "openclaw", "kimicode", "workbuddy", "qwenwork", "pi"}
+MANUAL = {"doubaowork"}
 SUPPORTED = NATIVE | MANUAL
 REMOVED = {"trae", "traecn", "vscode"}
 
@@ -111,7 +111,7 @@ def main():
         assert before_preview == {s["id"]: Path(s["path"]).read_bytes() if Path(s["path"]).exists() else None for s in sources}
         applied = harness.rpc("changes.apply", {"planId":plan["planId"]})
         assert all(r["status"] == "applied" for r in applied["results"]), applied
-        passed("one read-only preview and transactional batch applies shared native MCP entries to nine formats and DSH profiles")
+        passed("one read-only preview and transactional batch applies shared native MCP entries to eleven clients and DSH profiles")
 
         shared = snapshot()
         bindings = [b for b in shared["bindings"] if b.get("connectionId") == office]
@@ -281,6 +281,33 @@ def main():
             assert "旧后台" in harness.rpc("connections.export_config", {"targetAgent":"qwenwork","connectionIds":[office],"mode":"direct"}, error=True)
             assert "旧后台" in harness.rpc("changes.preview", {"connectionId":office,"targetSourceIds":["native:workbuddy:fixture"]}, error=True)
             assert requests == [], "office integration operations reached an API 14 daemon"
+            OldBackend.management_api = 15
+            for method, params in [
+                ("snapshot", {}),
+                ("sources.add", {"agent":"qwenwork"}),
+                ("agents.launcher", {"agent":"qwenwork","path":"fixture"}),
+                ("connections.import", {"sourceId":"native:qwenwork:fixture","name":"fixture"}),
+                ("changes.preview", {"connectionId":office,"targetSourceIds":["native:qwenwork:fixture"]}),
+                ("changes.apply", {"planId":"stale"}),
+                ("changes.restore", {"operationId":"stale"}),
+            ]:
+                assert "旧后台" in harness.rpc(method, params, error=True)
+            assert requests == [], "Qwen native operations reached an API 15 daemon"
+            OldBackend.management_api = 16
+            for method, params in [
+                ("snapshot", {}),
+                ("sources.add", {"agent":"pi"}),
+                ("sources.add", {"agent":"workbuddy"}),
+                ("agents.launcher", {"agent":"pi","path":"fixture"}),
+                ("connections.import", {"sourceId":"native:pi:fixture","name":"fixture"}),
+                ("connections.import", {"sourceId":"native:workbuddy:fixture","name":"fixture"}),
+                ("changes.preview", {"connectionId":office,"targetSourceIds":["native:pi:fixture"]}),
+                ("changes.preview", {"connectionId":office,"targetSourceIds":["native:workbuddy:fixture"]}),
+                ("changes.apply", {"planId":"stale"}),
+                ("changes.restore", {"operationId":"stale"}),
+            ]:
+                assert "旧后台" in harness.rpc(method, params, error=True)
+            assert requests == [], "Pi native operations reached an API 16 daemon"
         finally:
             runtime_path.write_bytes(original_runtime)
             old_backend.shutdown()
@@ -289,6 +316,8 @@ def main():
         passed("API 8 backends reject client configuration operations before bypassing installation-state checks")
         passed("API 13 blocks keep-native before dispatch and accepts ordinary deletion requests")
         passed("API 14 blocks office inventory, WorkBuddy configuration and manual exports before dispatch")
+        passed("API 15 blocks Qwen native inventory, writes and recovery before dispatch")
+        passed("API 16 blocks Pi and current WorkBuddy native operations before dispatch")
 
         assert retired.read_text(encoding="utf-8").startswith('{"servers"')
         assert old_kimi.read_text(encoding="utf-8").startswith('{"mcpServers"')

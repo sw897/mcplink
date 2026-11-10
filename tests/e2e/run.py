@@ -79,14 +79,16 @@ class Harness:
         self.results = []
         self.clients = []
         self.launchers = {agent:self.home/".local/bin"/(command + (".exe" if os.name == "nt" else ""))
-            for agent,command in {"codex":"codex","hermes":"hermes","claude":"claude","opencode":"opencode","zcode":"zcode","deepseek":"dsh","openclaw":"openclaw","kimicode":"kimi"}.items()}
+            for agent,command in {"codex":"codex","hermes":"hermes","claude":"claude","opencode":"opencode","zcode":"zcode","deepseek":"dsh","openclaw":"openclaw","kimicode":"kimi","pi":"pi"}.items()}
         self.launchers["workbuddy"] = (self.home / "AppData/Local/Programs/WorkBuddy/WorkBuddy.exe" if os.name == "nt"
             else self.home / "Applications/WorkBuddy.app/Contents/MacOS/WorkBuddy")
+        self.launchers["qwenwork"] = (self.home / "AppData/Local/Programs/QwenWorkCN/QwenWorkCN.exe" if os.name == "nt"
+            else self.home / "Applications/QwenWorkCN.app/Contents/MacOS/QwenWorkCN")
         self.environment = {**os.environ, "MCPLINK_HOME": str(self.home), "MCPLINK_DATA_DIR": str(self.data), "MCPLINK_VAULT": "fixture", "CODEX_HOME": str(self.home / ".codex"), "HERMES_HOME": str(self.home / ".hermes"), "CLAUDE_CONFIG_DIR": str(self.home / ".claude"), "XDG_CONFIG_HOME":str(self.home/".config"), "XDG_DATA_HOME":str(self.home/".local/share"), "XDG_CACHE_HOME":str(self.home/".cache"), "XDG_STATE_HOME":str(self.home/".local/state"), "OPENCODE_CONFIG_DIR":str(self.home/".config/opencode"), "OPENCODE_TEST_HOME":str(self.home)}
         self.environment["PATH"] = str(self.home/".local/bin") + os.pathsep + self.environment.get("PATH", "")
         if installed_agents:
             self.install_clients()
-        for key in ["DSH_HOME", "ZCODE_HOME", "KIMI_CODE_HOME", "OPENCLAW_STATE_DIR", "OPENCLAW_CONFIG_PATH"]:
+        for key in ["DSH_HOME", "ZCODE_HOME", "KIMI_CODE_HOME", "OPENCLAW_STATE_DIR", "OPENCLAW_CONFIG_PATH", "PI_CODING_AGENT_DIR"]:
             self.environment.pop(key, None)
         for path in (self.home / ".codex", self.home / ".hermes"):
             path.mkdir(parents=True)
@@ -119,6 +121,8 @@ class Harness:
             import plistlib
             info = self.home / "Applications/WorkBuddy.app/Contents/Info.plist"
             info.write_bytes(plistlib.dumps({"CFBundleExecutable":"WorkBuddy"}))
+            info = self.home / "Applications/QwenWorkCN.app/Contents/Info.plist"
+            info.write_bytes(plistlib.dumps({"CFBundleExecutable":"QwenWorkCN"}))
 
     def rpc(self, method, params=None, error=False):
         result = subprocess.run([str(BINARY), "rpc", "--stdin"], input=json.dumps({"method": method, "params": params or {}}), env=self.environment, capture_output=True, text=True, timeout=90)
@@ -147,7 +151,7 @@ class Harness:
     def run(self):
         snapshot = self.rpc("snapshot")
         assert len(snapshot["connections"]) == 3
-        assert {s["agent"] for s in snapshot["sources"]} == {"codex","hermes","claude","opencode","zcode","deepseek","openclaw","kimicode","workbuddy"}
+        assert {s["agent"] for s in snapshot["sources"]} == {"codex","hermes","claude","opencode","zcode","deepseek","openclaw","kimicode","workbuddy","qwenwork","pi"}
         assert next(binding for binding in snapshot["bindings"] if binding["name"] == "disabled_tool")["enabled"] is False
         assert next(c for c in snapshot["connections"] if c["name"]=="disabled_tool")["authKind"]=="none"
         self.passed("scan native sources and disabled service")

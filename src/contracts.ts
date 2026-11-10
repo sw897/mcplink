@@ -11,6 +11,7 @@ export type Agent =
   | "kimicode"
   | "workbuddy"
   | "qwenwork"
+  | "pi"
   | "doubaowork";
 export const agents: Agent[] = [
   "codex",
@@ -23,6 +24,7 @@ export const agents: Agent[] = [
   "kimicode",
   "workbuddy",
   "qwenwork",
+  "pi",
   "doubaowork",
 ];
 export type LocalAgent = {
@@ -33,9 +35,9 @@ export type LocalAgent = {
   configurable: boolean;
   profilePath: string | null;
   management: "writable" | "readOnly" | "discovery" | "manual";
+  supportsImport: boolean;
+  managementReason?: string | null;
 };
-export const manualImport = (agent: Agent) =>
-  agent === "qwenwork" || agent === "doubaowork";
 export type ImportConfig = {
   agent: Agent;
   mode: string;
@@ -226,6 +228,7 @@ export const agentLabel = (agent: Agent) =>
     kimicode: "Kimi Code",
     workbuddy: "WorkBuddy",
     qwenwork: "千问办公",
+    pi: "Pi Agent",
     doubaowork: "豆包工作",
   })[agent] || agent;
 export const time = (value?: number) =>

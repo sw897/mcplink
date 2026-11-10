@@ -111,7 +111,7 @@ enum SourceCommand {
     List,
     /// 添加真实来源；Claude 按作用域定位，OpenCode 使用当前配置格式
     Add {
-        #[arg(long, value_parser = ["codex", "hermes", "claude", "opencode", "zcode", "deepseek", "openclaw", "kimicode", "workbuddy"])]
+        #[arg(long, value_parser = ["codex", "hermes", "claude", "opencode", "zcode", "deepseek", "openclaw", "kimicode", "workbuddy", "qwenwork", "pi"])]
         agent: String,
         #[arg(long)]
         path: Option<PathBuf>,

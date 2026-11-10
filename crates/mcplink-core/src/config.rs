@@ -419,6 +419,9 @@ fn claude_plugins() -> Vec<Source> {
 }
 
 pub fn read(source: &Source) -> Result<(String, Value)> {
+    if source.agent == Agent::Qwenwork {
+        crate::agent_config::assert_qwen_source(source)?;
+    }
     if let Some(error) = &source.discovery_error {
         bail!("{error}");
     }

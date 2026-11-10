@@ -27,8 +27,9 @@ fn names(agent: &Agent) -> (&'static str, &'static str, &'static str, &'static s
         Agent::Openclaw => ("OpenClaw", "OpenClaw.exe", "OpenClaw.app", "openclaw"),
         Agent::Kimicode => ("Kimi Code", "Kimi Code.exe", "Kimi Code.app", "kimi"),
         Agent::Workbuddy => ("WorkBuddy", "WorkBuddy.exe", "WorkBuddy.app", ""),
-        Agent::Qwenwork => ("QwenWork", "QwenWork.exe", "QwenWork.app", ""),
-        Agent::Doubaowork => ("Doubao", "Doubao.exe", "Doubao.app", ""),
+        Agent::Qwenwork => ("QwenWorkCN", "QwenWorkCN.exe", "QwenWorkCN.app", ""),
+        Agent::Pi => ("Pi Agent", "pi.exe", "", "pi"),
+        Agent::Doubaowork => ("DoubaoWork", "DoubaoWork.exe", "DoubaoWork.app", ""),
         Agent::Removed => unreachable!(),
     }
 }
@@ -49,10 +50,16 @@ fn executable(path: &Path) -> bool {
 }
 
 pub fn valid_launcher(agent: &Agent, path: &Path) -> bool {
-    if *agent == Agent::Workbuddy
+    if matches!(agent, Agent::Workbuddy | Agent::Qwenwork)
         && cfg!(target_os = "macos")
         && path.is_absolute()
-        && path.file_name().is_some_and(|name| name == "WorkBuddy.app")
+        && path.file_name().is_some_and(|name| {
+            if *agent == Agent::Qwenwork {
+                name == "QwenWorkCN.app" || name == "QwenWork.app" || name == "千问办公.app"
+            } else {
+                name == "WorkBuddy.app"
+            }
+        })
     {
         return mac_app_installed(path);
     }
@@ -105,20 +112,23 @@ fn installed(agent: &Agent, store: &crate::store::Store) -> Result<bool> {
     } else {
         false
     };
-    // Chinese app bundle names are also used by the desktop distributions.
+    // Keep documented QwenWork names and renamed Chinese bundles. Ordinary
+    // Doubao is a separate product and must not satisfy Doubao Work detection.
     if cfg!(target_os = "macos") {
-        let alias = match agent {
-            Agent::Qwenwork => Some("千问办公.app"),
-            Agent::Doubaowork => Some("豆包.app"),
-            _ => None,
+        let aliases: &[&str] = match agent {
+            Agent::Qwenwork => &["QwenWork.app", "千问办公.app"],
+            Agent::Doubaowork => &["豆包工作.app"],
+            _ => &[],
         };
-        if let Some(alias) = alias {
+        for alias in aliases {
             installed |= (!isolated && mac_app_installed(&Path::new("/Applications").join(alias)))
                 || mac_app_installed(&home.join("Applications").join(alias));
         }
     }
     if cfg!(windows) && *agent == Agent::Doubaowork {
-        installed |= local.join("Doubao/Application/Doubao.exe").is_file();
+        installed |= local
+            .join("DoubaoWork/Application/DoubaoWork.exe")
+            .is_file();
     }
     // Inspect launcher files, never execute programs during inventory.
     let mut launchers = vec![
@@ -288,7 +298,13 @@ pub fn inventory(sources: &[Source], store: &crate::store::Store) -> Result<Valu
     let home = config::user_home()?;
     let mut clients = Vec::new();
     for agent in Agent::supported() {
-        let profile = if agent.manual_import() {
+        let reason = if agent == Agent::Qwenwork {
+            agent_config::qwen_storage_error()?
+        } else {
+            None
+        };
+        let manual = agent.manual_import() || reason.is_some();
+        let profile = if manual {
             None
         } else {
             Some(match agent {
@@ -311,8 +327,9 @@ pub fn inventory(sources: &[Source], store: &crate::store::Store) -> Result<Valu
                 .any(|source| source.agent == agent && source.path.is_file());
         clients.push(
             json!({"id":agent,"label":agent.label(),"detected":detected,"installed":installed,
-            "configurable":installed || agent.manual_import(),"profilePath":profile,
-            "management":if agent.manual_import(){"manual"}else{"writable"}}),
+            "configurable":installed || manual,"profilePath":profile,
+            "supportsImport":agent.supports_import(),"managementReason":reason,
+            "management":if manual{"manual"}else{"writable"}}),
         );
     }
     Ok(Value::Array(clients))

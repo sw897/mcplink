@@ -9,8 +9,31 @@ use std::path::{Path, PathBuf};
 
 pub fn directory(agent: &Agent) -> Result<PathBuf> {
     let home = config::user_home()?;
-    if *agent == Agent::Workbuddy {
-        return Ok(home.join(".workbuddy"));
+    if *agent == Agent::Pi {
+        let root = std::env::var("PI_CODING_AGENT_DIR")
+            .ok()
+            .filter(|value| !value.is_empty());
+        return Ok(match root {
+            Some(value) if value == "~" => home,
+            Some(value) if value.starts_with("~/") || value.starts_with("~\\") => {
+                home.join(&value[2..])
+            }
+            Some(value) => {
+                let path = PathBuf::from(value);
+                if !path.is_absolute() {
+                    bail!("PI_CODING_AGENT_DIR 需要完整目录路径或 ~/ 路径");
+                }
+                path
+            }
+            None => home.join(".pi/agent"),
+        });
+    }
+    if matches!(agent, Agent::Workbuddy | Agent::Qwenwork) {
+        return Ok(home.join(if *agent == Agent::Qwenwork {
+            ".qwenworkcn"
+        } else {
+            ".workbuddy"
+        }));
     }
     let (variable, folder) = match agent {
         Agent::Zcode => ("ZCODE_HOME", ".zcode"),
@@ -63,9 +86,118 @@ pub fn default_path(agent: &Agent) -> Result<PathBuf> {
         Agent::Openclaw => std::env::var_os("OPENCLAW_CONFIG_PATH")
             .map(PathBuf::from)
             .unwrap_or_else(|| root.join("openclaw.json")),
-        Agent::Kimicode | Agent::Workbuddy => root.join("mcp.json"),
+        Agent::Kimicode | Agent::Workbuddy | Agent::Qwenwork | Agent::Pi => root.join("mcp.json"),
         _ => unreachable!(),
     })
+}
+
+pub fn qwen_user_data_directory() -> Result<PathBuf> {
+    let home = config::user_home()?;
+    let isolated = std::env::var_os("MCPLINK_HOME").is_some();
+    let root = if cfg!(target_os = "macos") {
+        home.join("Library/Application Support")
+    } else if cfg!(windows) {
+        if isolated {
+            home.join("AppData/Roaming")
+        } else {
+            std::env::var_os("APPDATA")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join("AppData/Roaming"))
+        }
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|path| !isolated || path.starts_with(&home))
+            .unwrap_or_else(|| home.join(".config"))
+    };
+    Ok(root.join("QwenWorkCN"))
+}
+
+pub fn qwen_storage_error() -> Result<Option<String>> {
+    let unsupported = || {
+        Some("千问办公检测到身份隔离或迁移存储，请使用客户端导入（connections export-config），不能写旧 JSON".into())
+    };
+    let profile = qwen_user_data_directory()?;
+    for root in [profile.clone(), directory(&Agent::Qwenwork)?] {
+        for marker in [
+            "data/.local-identity-format.json",
+            "data/agents.identity-v2.db",
+            "identity-transition",
+            "identity-claim",
+            "identities",
+        ] {
+            match std::fs::symlink_metadata(root.join(marker)) {
+                Ok(_) => return Ok(unsupported()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Ok(Some("无法核对千问办公存储模式，请使用客户端导入".into())),
+            }
+        }
+    }
+    // The shared database already has identity tables in 2.0.0. Only inspect
+    // whether they contain records; never read definitions, credentials or IDs.
+    let database = profile.join("data/agents.db");
+    match std::fs::symlink_metadata(&database) {
+        Ok(metadata) if !metadata.is_file() || metadata.is_symlink() => {
+            return Ok(unsupported());
+        }
+        Ok(_) => {
+            let check = || -> Result<bool> {
+                let db = rusqlite::Connection::open_with_flags(
+                    &database,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )?;
+                db.busy_timeout(std::time::Duration::from_millis(100))?;
+                for table in [
+                    "identity_connector_heads",
+                    "identity_connector_records",
+                    "identity_connector_preferences",
+                ] {
+                    let exists: bool = db.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                        [table],
+                        |row| row.get(0),
+                    )?;
+                    if exists
+                        && db.query_row(
+                            &format!("SELECT EXISTS(SELECT 1 FROM {table} LIMIT 1)"),
+                            [],
+                            |row| row.get::<_, bool>(0),
+                        )?
+                    {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            };
+            match check() {
+                Ok(true) => return Ok(unsupported()),
+                Ok(false) => {}
+                Err(_) => return Ok(Some("无法核对千问办公存储模式，请使用客户端导入".into())),
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Ok(Some("无法核对千问办公存储模式，请使用客户端导入".into())),
+    }
+    Ok(None)
+}
+
+pub fn assert_qwen_storage() -> Result<()> {
+    if let Some(error) = qwen_storage_error()? {
+        bail!("{error}");
+    }
+    Ok(())
+}
+
+pub fn assert_qwen_source(source: &Source) -> Result<()> {
+    assert_qwen_storage()?;
+    let expected = default_path(&Agent::Qwenwork)?;
+    if source.project.is_some()
+        || config::canonical_path(&source.path).unwrap_or(source.path.clone())
+            != config::canonical_path(&expected).unwrap_or(expected)
+    {
+        bail!("千问办公仅适配当前用户 .qwenworkcn/mcp.json，请勿选择 SDK、身份存储或其他配置路径")
+    }
+    Ok(())
 }
 
 pub fn default_sources() -> Result<Vec<Source>> {
@@ -75,6 +207,8 @@ pub fn default_sources() -> Result<Vec<Source>> {
         Agent::Openclaw,
         Agent::Kimicode,
         Agent::Workbuddy,
+        Agent::Qwenwork,
+        Agent::Pi,
     ] {
         result.push(source(
             agent.clone(),
@@ -136,6 +270,9 @@ fn native_has_servers(path: &Path) -> Result<bool> {
 }
 
 pub fn source_from_params(agent: Agent, params: &Value, sources: &[Source]) -> Result<Source> {
+    if agent == Agent::Qwenwork {
+        assert_qwen_storage()?;
+    }
     let scope = params["scope"].as_str().unwrap_or("user");
     if !matches!(scope, "user" | "project") {
         bail!("此客户端支持 user 或 project 来源")
@@ -152,14 +289,18 @@ pub fn source_from_params(agent: Agent, params: &Value, sources: &[Source]) -> R
         .transpose()?;
     if (scope == "project") != project.is_some()
         || (project.is_some()
-            && !matches!(agent, Agent::Zcode | Agent::Kimicode | Agent::Workbuddy))
+            && !matches!(
+                agent,
+                Agent::Zcode | Agent::Kimicode | Agent::Workbuddy | Agent::Pi
+            ))
     {
-        bail!("仅 ZCode、Kimi Code 和 WorkBuddy 支持显式项目来源，且需要项目目录")
+        bail!("仅 ZCode、Kimi Code、WorkBuddy 和 Pi Agent 支持显式项目来源，且需要项目目录")
     }
     let default = if let Some(root) = &project {
         root.join(match agent {
             Agent::Zcode => ".zcode/config.json",
             Agent::Workbuddy => ".workbuddy/mcp.json",
+            Agent::Pi => ".pi/mcp.json",
             _ => ".kimi-code/mcp.json",
         })
     } else {
@@ -174,6 +315,11 @@ pub fn source_from_params(agent: Agent, params: &Value, sources: &[Source]) -> R
         bail!("请选择完整的原生配置文件路径")
     }
     let path = config::canonical_path(&path).unwrap_or(path);
+    if agent == Agent::Qwenwork
+        && path != config::canonical_path(&expected).unwrap_or(expected.clone())
+    {
+        bail!("千问办公仅适配当前用户 .qwenworkcn/mcp.json，请勿选择 SDK、身份存储或其他配置路径")
+    }
     if project.is_some() && path != config::canonical_path(&expected).unwrap_or(expected) {
         bail!("项目配置路径与所选项目不符")
     }
@@ -210,21 +356,53 @@ fn table_path(source: &Source) -> Vec<String> {
 }
 
 pub fn parse(source: &Source, text: &str) -> Result<Value> {
+    if source.agent == Agent::Pi {
+        return crate::pi_config::parse(text);
+    }
+    if source.agent == Agent::Qwenwork {
+        assert_qwen_source(source)?;
+    }
     if source.agent == Agent::Deepseek {
         return crate::dsh_config::parse(text);
     }
     let value = if source.agent == Agent::Openclaw {
         json_config::parse_json5(text)?
     } else {
-        json_config::parse(text, true)?
+        json_config::parse(
+            text,
+            !matches!(source.agent, Agent::Qwenwork | Agent::Workbuddy),
+        )?
     };
     if value.get("$include").is_some() || value.pointer("/mcp/$include").is_some() {
         bail!("MCP 来源使用外部包含，请显式登记实际配置文件")
+    }
+    if source.agent == Agent::Qwenwork {
+        let servers = json_config::table(&value, &table_path(source))?;
+        if let Some(cli) = value.get("cliConnectors") {
+            let cli = cli.as_object().context("千问办公 cliConnectors 需要映射")?;
+            if cli.keys().any(|name| servers.get(name).is_some()) {
+                bail!("千问办公 MCP 与 CLI 连接器存在同名条目，请先在客户端处理冲突")
+            }
+        }
     }
     Ok(json!({"mcp_servers":json_config::table(&value,&table_path(source))?}))
 }
 
 pub fn render(source: &Source, text: &str, name: &str, value: Option<&Value>) -> Result<String> {
+    if source.agent == Agent::Pi {
+        return crate::pi_config::render(text, name, value);
+    }
+    if source.agent == Agent::Qwenwork {
+        assert_qwen_source(source)?;
+        if value.is_some()
+            && !text.trim().is_empty()
+            && json_config::parse(text, false)?
+                .get("cliConnectors")
+                .is_some_and(|cli| cli.get(name).is_some())
+        {
+            bail!("千问办公已有同名 CLI 连接器，请使用其他服务名称")
+        }
+    }
     if source.agent == Agent::Openclaw && name == "__proto__" {
         bail!("OpenClaw 保留此服务名称")
     }
@@ -255,23 +433,27 @@ pub fn render(source: &Source, text: &str, name: &str, value: Option<&Value>) ->
     if source.agent == Agent::Openclaw {
         json_config::render_json5(text, &table_path(source), name, value)
     } else {
-        json_config::render(text, true, &table_path(source), name, value)
+        json_config::render(
+            text,
+            !matches!(source.agent, Agent::Qwenwork | Agent::Workbuddy),
+            &table_path(source),
+            name,
+            value,
+        )
     }
 }
 
 pub fn normalize(raw: &Value, agent: &Agent, project: Option<&Path>) -> Result<Definition> {
+    if *agent == Agent::Pi {
+        return crate::pi_config::normalize(raw, project);
+    }
     let fields = raw.as_object().context("MCP 服务需要映射")?;
     let allowed = match agent {
+        Agent::Qwenwork => vec![
+            "type", "command", "args", "env", "url", "headers", "enabled",
+        ],
         Agent::Workbuddy => vec![
-            "type",
-            "command",
-            "args",
-            "env",
-            "cwd",
-            "url",
-            "headers",
-            "timeout",
-            "disabledTools",
+            "type", "command", "args", "env", "cwd", "url", "headers", "timeout",
         ],
         Agent::Zcode => vec![
             "type", "command", "args", "env", "cwd", "url", "headers", "enable",
@@ -390,11 +572,16 @@ pub fn normalize(raw: &Value, agent: &Agent, project: Option<&Path>) -> Result<D
     if *agent == Agent::Workbuddy
         && let Some(value) = map.remove("timeout")
     {
-        let millis = value.as_u64().context("原生连接超时需要正整数毫秒")?;
-        if millis == 0 || millis % 1000 != 0 {
+        let millis = value.as_u64().context("WorkBuddy 超时需要正整数")?;
+        let seconds = if millis > 0 && millis < 1000 {
+            millis
+        } else if millis > 0 && millis % 1000 == 0 {
+            millis / 1000
+        } else {
             bail!("毫秒连接超时不能等价转换为托管秒数，请显式建立共享连接")
-        }
-        map.insert("startup_timeout_sec".into(), json!(millis / 1000));
+        };
+        map.insert("startup_timeout_sec".into(), json!(seconds));
+        map.insert("tool_timeout_sec".into(), json!(seconds));
     }
     for (native, canonical) in [
         ("connectionTimeoutMs", "startup_timeout_sec"),
@@ -465,6 +652,17 @@ pub fn normalize(raw: &Value, agent: &Agent, project: Option<&Path>) -> Result<D
 
 pub fn native(def: &Definition, source: &Source) -> Result<Value> {
     config::validate(def)?;
+    if source.agent == Agent::Pi {
+        return crate::pi_config::native(def, source);
+    }
+    if source.agent == Agent::Qwenwork {
+        assert_qwen_source(source)?;
+        let mut portable = def.clone();
+        portable.enabled = true;
+        let mut value = crate::client_import::entry(&portable, &Agent::Qwenwork)?;
+        value["enabled"] = json!(def.enabled);
+        return Ok(value);
+    }
     if source.agent == Agent::Workbuddy {
         crate::client_import::check_portable(def)?;
         if def.original_agent == Some(Agent::Hermes)
@@ -497,12 +695,13 @@ pub fn native(def: &Definition, source: &Source) -> Result<Value> {
     }
     if source.agent == Agent::Workbuddy
         && (!def.enabled
-            || def.timeout.is_some()
+            || def.timeout != def.startup_timeout
             || def.include_specified
-            || !def.include_tools.is_empty())
+            || !def.include_tools.is_empty()
+            || !def.exclude_tools.is_empty())
     {
         bail!(
-            "WorkBuddy 无等价的启停、请求超时或工具白名单字段，请在原客户端维护启停，或使用共享代理保留限制"
+            "WorkBuddy 启停与工具策略在原客户端维护，启动和请求超时需一致；请使用共享代理保留不能等价直连的限制"
         )
     }
     if matches!(source.agent, Agent::Zcode | Agent::Deepseek)
@@ -541,9 +740,6 @@ pub fn native(def: &Definition, source: &Source) -> Result<Value> {
                 .filter(|v| *v > 0)
                 .context("连接超时超出范围")?;
             value["timeout"] = json!(millis);
-        }
-        if !def.exclude_tools.is_empty() {
-            value["disabledTools"] = json!(def.exclude_tools);
         }
         return Ok(value);
     }

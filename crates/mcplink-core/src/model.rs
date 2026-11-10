@@ -31,6 +31,7 @@ pub enum Agent {
     Kimicode,
     Workbuddy,
     Qwenwork,
+    Pi,
     Doubaowork,
     #[serde(other)]
     Removed,
@@ -49,6 +50,7 @@ impl Agent {
             Self::Kimicode => "Kimi Code",
             Self::Workbuddy => "WorkBuddy",
             Self::Qwenwork => "千问办公",
+            Self::Pi => "Pi Agent",
             Self::Doubaowork => "豆包工作",
             Self::Removed => "已移除客户端",
         }
@@ -57,15 +59,25 @@ impl Agent {
     pub fn native_adapter(&self) -> bool {
         matches!(
             self,
-            Self::Zcode | Self::Deepseek | Self::Openclaw | Self::Kimicode | Self::Workbuddy
+            Self::Zcode
+                | Self::Deepseek
+                | Self::Openclaw
+                | Self::Kimicode
+                | Self::Workbuddy
+                | Self::Qwenwork
+                | Self::Pi
         )
     }
 
     pub fn manual_import(&self) -> bool {
+        matches!(self, Self::Doubaowork)
+    }
+
+    pub fn supports_import(&self) -> bool {
         matches!(self, Self::Qwenwork | Self::Doubaowork)
     }
 
-    pub fn supported() -> [Self; 11] {
+    pub fn supported() -> [Self; 12] {
         [
             Self::Codex,
             Self::Hermes,
@@ -77,6 +89,7 @@ impl Agent {
             Self::Kimicode,
             Self::Workbuddy,
             Self::Qwenwork,
+            Self::Pi,
             Self::Doubaowork,
         ]
     }

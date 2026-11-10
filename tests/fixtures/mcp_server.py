@@ -47,7 +47,10 @@ def handle(request, endpoint="", origin=""):
     if method == "initialize":
         return {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}, "resources": {}, "prompts": {}}, "serverInfo": {"name": "mcplink-fixture", "version": "1.0.0"}}
     if method == "server/discover":
-        return {"protocolVersion": "2026-07-28", "capabilities": {"tools": {}, "resources": {}, "prompts": {}}, "serverInfo": {"name": "mcplink-fixture", "version": "1.0.0"}}
+        # This fixture implements legacy initialize, not the newer discovery
+        # result. Let clients negotiate the legacy protocol instead of replying
+        # with an InitializeResult under a different method name.
+        raise ValueError("Method not found")
     if method == "ping":
         return {}
     if method == "tools/list":

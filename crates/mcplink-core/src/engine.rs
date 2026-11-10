@@ -60,19 +60,28 @@ impl Engine {
         for stored in self.store.sources()? {
             if let Some(position) = sources.iter().position(|s| {
                 s.id == stored.id
-                    || (stored.agent == Agent::Workbuddy
-                        && s.agent == Agent::Workbuddy
+                    || (matches!(stored.agent, Agent::Workbuddy | Agent::Qwenwork)
+                        && s.agent == stored.agent
                         && s.path
                             == config::canonical_path(&stored.path).unwrap_or(stored.path.clone())
                         && s.project == stored.project)
             }) {
                 if (stored.agent == Agent::Opencode && stored.path == sources[position].path)
-                    || stored.agent == Agent::Workbuddy
+                    || matches!(stored.agent, Agent::Workbuddy | Agent::Qwenwork)
                 {
                     sources[position] = stored;
                 }
             } else {
                 sources.push(stored);
+            }
+        }
+        if let Some(error) = crate::agent_config::qwen_storage_error()? {
+            for source in sources
+                .iter_mut()
+                .filter(|source| source.agent == Agent::Qwenwork)
+            {
+                source.read_only = true;
+                source.discovery_error = Some(error.clone());
             }
         }
         Ok(sources)
@@ -731,6 +740,9 @@ impl Engine {
                     if action == "enable" {
                         config::set_native_enabled(&mut value, &source, true)?;
                     }
+                    if source.agent == Agent::Pi {
+                        crate::pi_config::preserve_presentation(&mut value, before.as_ref())?;
+                    }
                     Some(value)
                 };
                 let rendered = if before.is_none() && after.is_none() {
@@ -833,7 +845,7 @@ impl Engine {
     fn export_config(&self, p: &Value) -> Result<Value> {
         let agent: Agent =
             serde_json::from_value(p["targetAgent"].clone()).context("请选择导入客户端")?;
-        if !agent.manual_import() {
+        if !agent.supports_import() {
             bail!("此客户端使用原生配置预览，请选择千问办公或豆包工作导入")
         }
         let mode = required(p, "mode")?;

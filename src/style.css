@@ -1173,6 +1173,10 @@ dd {
   background: #eee9fb;
   color: #6650a1;
 }
+.agent-avatar.pi {
+  background: #e6efdf;
+  color: #426729;
+}
 .agent-avatar.doubaowork {
   background: #e0f0f2;
   color: #276e7b;

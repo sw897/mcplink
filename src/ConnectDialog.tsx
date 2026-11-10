@@ -79,7 +79,14 @@ export function ConnectDialog({
 }) {
   const [targets, setTargets] = useState<string[]>(() => {
     if (binding) return [binding.sourceId];
-    if (clients.some((c) => c.id === targetAgent && c.management === "manual"))
+    if (
+      clients.some(
+        (c) =>
+          c.id === targetAgent &&
+          c.supportsImport &&
+          (c.management === "manual" || !c.installed),
+      )
+    )
       return [`import:${targetAgent}`];
     const available = sources.filter(
       (s) =>
@@ -144,7 +151,7 @@ export function ConnectDialog({
     );
     if (operation === "upsert" && !binding)
       clients
-        .filter((c) => c.management === "manual" && c.configurable)
+        .filter((c) => c.supportsImport)
         .forEach((c) => available.add(`import:${c.id}`));
     setTargets((previous) => previous.filter((id) => available.has(id)));
     setPlans((previous) =>
@@ -161,7 +168,7 @@ export function ConnectDialog({
     try {
       const generated = [];
       for (const client of clients.filter(
-        (c) => c.management === "manual" && targets.includes(`import:${c.id}`),
+        (c) => c.supportsImport && targets.includes(`import:${c.id}`),
       )) {
         generated.push(
           await rpc<ImportConfig>("connections.export_config", {
@@ -349,13 +356,12 @@ export function ConnectDialog({
             {operation === "upsert" &&
               !binding &&
               clients
-                .filter((client) => client.management === "manual")
+                .filter((client) => client.supportsImport)
                 .map((client) => (
                   <label className="target" key={client.id}>
                     <input
                       type="checkbox"
                       checked={targets.includes(`import:${client.id}`)}
-                      disabled={!client.configurable}
                       onChange={(event) =>
                         setTargets((previous) =>
                           event.target.checked

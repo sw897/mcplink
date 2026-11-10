@@ -4,8 +4,8 @@ import { Agent, ImportConfig, agentLabel } from "./contracts";
 
 export const importInstructions = (agent: Agent) =>
   agent === "qwenwork"
-    ? "在千问办公打开「扩展 → 连接器 → +添加」，粘贴 JSON 配置并保存、启用，然后新建任务验证工具调用。"
-    : "在豆包工作打开「插件·技能·伙伴 → 插件 → +添加 → 新建自定义连接器」，选择 HTTP 或 STDIO，按下方字段填写并保存，再在任务中验证工具调用。";
+    ? "在千问办公打开「技能·扩展 → 连接器 → 添加 → 粘贴 JSON 配置」，保存并启用，然后新建任务验证工具调用。"
+    : "在豆包工作打开「插件·技能·工作台 → 插件 → 添加 → 新建自定义连接器」，选择 HTTP 或 STDIO，按下方字段填写并保存，再在任务中验证工具调用。";
 
 function CopyValue({
   label,

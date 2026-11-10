@@ -63,7 +63,7 @@ async fn health(State(state): State<ServerState>, headers: HeaderMap) -> impl In
     (
         StatusCode::OK,
         Json(
-            json!({"application":"mcplink","instance":state.info.instance,"version":env!("CARGO_PKG_VERSION"),"managementApi":15}),
+            json!({"application":"mcplink","instance":state.info.instance,"version":env!("CARGO_PKG_VERSION"),"managementApi":17}),
         ),
     )
 }
@@ -378,6 +378,43 @@ impl Client {
     }
 
     pub async fn call(&self, method: &str, params: Value) -> Result<Value> {
+        if self.management_api < 17
+            && (matches!(method, "snapshot" | "changes.apply" | "changes.restore")
+                || (matches!(method, "sources.add" | "agents.launcher")
+                    && matches!(params["agent"].as_str(), Some("pi" | "workbuddy")))
+                || (matches!(method, "connections.import" | "connections.adopt_source")
+                    && params["sourceId"].as_str().is_some_and(|id| {
+                        id.starts_with("native:pi:") || id.starts_with("native:workbuddy:")
+                    }))
+                || (method == "changes.preview"
+                    && params["targetSourceIds"].as_array().is_some_and(|ids| {
+                        ids.iter().any(|id| {
+                            id.as_str().is_some_and(|id| {
+                                id.starts_with("native:pi:") || id.starts_with("native:workbuddy:")
+                            })
+                        })
+                    })))
+        {
+            bail!("旧后台不支持当前 Pi Agent / WorkBuddy 原生配置，请退出并重启后台");
+        }
+        if self.management_api < 16
+            && (matches!(method, "snapshot" | "changes.apply" | "changes.restore")
+                || (matches!(method, "sources.add" | "agents.launcher")
+                    && params["agent"].as_str() == Some("qwenwork"))
+                || (matches!(method, "connections.import" | "connections.adopt_source")
+                    && params["sourceId"]
+                        .as_str()
+                        .is_some_and(|id| id.starts_with("native:qwenwork:")))
+                || (method == "changes.preview"
+                    && params["targetSourceIds"].as_array().is_some_and(|ids| {
+                        ids.iter().any(|id| {
+                            id.as_str()
+                                .is_some_and(|id| id.starts_with("native:qwenwork:"))
+                        })
+                    })))
+        {
+            bail!("旧后台不支持千问办公原生配置，请退出并重启后台");
+        }
         if self.management_api < 15
             && (matches!(method, "snapshot" | "connections.export_config")
                 || (method == "sources.add"

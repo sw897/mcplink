@@ -60,7 +60,7 @@ class AgentCli(Harness):
         self.passed("invalid/missing/oversized stdin and arguments fail without secret echo or panic")
 
         status = self.cli("status")
-        assert {s["agent"] for s in status["sources"]} == {"codex","hermes","claude","opencode","zcode","deepseek","openclaw","kimicode","workbuddy"} and len(status["connections"]) == 3
+        assert {s["agent"] for s in status["sources"]} == {"codex","hermes","claude","opencode","zcode","deepseek","openclaw","kimicode","workbuddy","qwenwork","pi"} and len(status["connections"]) == 3
         assert self.cli("sources", "list") == status["sources"]
         local = self.cli("connections", "import", "--source", "codex:user", "--name", "local_notes")["id"]
         assert self.cli("connections", "probe", local)["connection"]["status"] == "ready"

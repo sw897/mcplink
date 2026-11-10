@@ -17,13 +17,14 @@
 | DeepSeek Harness | profile patch 的静态 MCP client 插件和 manager `config.servers` 支持管理与共享代理；基础组合只读。 |
 | OpenClaw | 当前 JSON5 `mcp.servers`，支持配置事务与共享代理；不使用旧 mcporter 格式。 |
 | Kimi Code | 当前 `KIMI_CODE_HOME` / `~/.kimi-code/mcp.json` 及显式项目来源，支持配置事务与共享代理；不读取旧 `~/.kimi`。 |
-| WorkBuddy | 用户及显式项目 `.workbuddy/mcp.json`，支持文件事务、直连与共享；启停/信任在原客户端维护。本机未安装，已验证隔离格式与真实 Bridge，未验证原生加载。 |
-| 千问办公 | 生成官方连接器导入 JSON，支持直连/共享，可离线准备；不写客户端存储或建立绑定。原生加载待验。 |
-| 豆包工作 | 生成自定义 HTTP/STDIO 连接器字段，支持直连/共享，可离线准备；不写客户端存储或建立绑定。原生加载待验。 |
+| WorkBuddy | 用户及显式项目 `.workbuddy/mcp.json` 严格 JSON，支持文件事务、直连与共享；启停/信任和工具策略在原客户端维护。macOS 5.9.3 已验三种接入的真实模型调用；另通过系统钥匙串保存合成凭据、认证上游共享调用和重启复核。[范围与字段依据](workbuddy-verification.md)。 |
+| 千问办公 | 共享 JSON 支持原生预览、写入、启停和恢复；身份隔离或迁移时回退到导入。macOS 2.0.0 已验外部写入、重启及工具调用；导入仍可离线准备。 |
+| Pi Agent | 内置 MCP 用户及显式项目的严格 JSON，支持直连、共享、启停和恢复；保留工具暴露设置，项目信任由用户维护。已用官方 1.5.1 CLI 发现配置，并用其实际 MCP 运行时调用合成服务；未做模型账号回合。详情见 [Pi Agent](pi-agent.md)。 |
+| 豆包工作 | 生成自定义 HTTP/STDIO 连接器字段，支持直连/共享，可离线准备；不写客户端存储或建立绑定。macOS 2.36.3 已验 HTTP、共享 Bridge、重启和模型工具调用；缺少独立原生管理契约，依据见[办公客户端调查](office-native-investigation.md)。 |
 
-支持十一类客户端，包含九类原生文件和两类客户端导入，适配及限制见[Agent 接入](agent-discovery.md)和[配置适配](agent-adapters.md)；不修改客户端审批或信任，不读取原生登录缓存。文件事务、原生加载和模型侧工具调用分别记录，后者不因配置写入或连接检查通过而自动视为通过。
+支持十二类客户端，十一类支持原生文件，豆包工作使用客户端导入，千问另保留导入及身份存储回退。适配及限制见[Agent 接入](agent-discovery.md)和[配置适配](agent-adapters.md)；不修改客户端审批或信任，不读取原生登录缓存。文件事务、原生加载和模型侧工具调用分别记录，后者不因配置写入或连接检查通过而自动视为通过。
 
-此前运行核心和桌面已通过[macOS、Windows CI 基线验收](https://github.com/sw897/mcplink/actions/runs/42572006882)，覆盖原有八类 Agent 配置和共享代理、工具 CLI、合成 OAuth 上游及后台进程清理；macOS 另验收 DMG 和安装后场景。当前[双平台 CI](https://github.com/sw897/mcplink/actions/workflows/ci.yml)增加了 WorkBuddy 配置及千问办公/豆包工作导入专项，逐平台保存验收报告；每次构建结果以对应提交的 Actions 为准。原生客户端加载、真实账号调用和模型侧业务执行分别记录，不能相互替代。
+此前运行核心和桌面已通过[macOS、Windows CI 基线验收](https://github.com/sw897/mcplink/actions/runs/42572006882)，覆盖原有八类 Agent 配置和共享代理、工具 CLI、合成 OAuth 上游及后台进程清理；macOS 另验收 DMG 和安装后场景。当前[双平台 CI](https://github.com/sw897/mcplink/actions/workflows/ci.yml)配置了 WorkBuddy、千问办公/豆包工作专项及 Pi 官方 MCP 运行时验收，逐平台保存报告；新增步骤的远端结果以对应提交的 Actions 为准。原生客户端加载、真实账号调用和模型侧业务执行分别记录，不能相互替代。
 
 默认扫描已支持的用户入口。项目/profile 通过手动添加真实配置文件纳入管理，不推断尚未选择的项目或运行中会话的覆盖关系。
 

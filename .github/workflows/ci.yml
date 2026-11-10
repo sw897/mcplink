@@ -110,6 +110,11 @@ jobs:
       - name: Office clients and offline connector import acceptance
         timeout-minutes: 5
         run: python -u tests/e2e/office_agents.py --record artifacts/e2e/ci-office-agents
+      - name: Prepare pinned Pi built-in MCP runtime
+        run: npm install --prefix artifacts/e2e/native-pi --no-save --package-lock=false --ignore-scripts @earendil-works/pi-coding-agent@1.5.1
+      - name: Pi native configuration and official runtime acceptance
+        timeout-minutes: 5
+        run: python -u tests/e2e/pi_agent.py --record artifacts/e2e/ci-pi --pi-package artifacts/e2e/native-pi/node_modules/@earendil-works/pi-coding-agent
       - name: Isolated tool invocation acceptance
         timeout-minutes: 5
         run: python -u tests/e2e/tool_calls.py --record artifacts/e2e/ci-tools
@@ -156,6 +161,7 @@ jobs:
             artifacts/e2e/ci-opencode/report.json
             artifacts/e2e/ci-agents/report.json
             artifacts/e2e/ci-office-agents/report.json
+            artifacts/e2e/ci-pi/report.json
             artifacts/e2e/ci-tools/report.json
             artifacts/e2e/ci-generated/report.json
             artifacts/e2e/ci-remote/report.json

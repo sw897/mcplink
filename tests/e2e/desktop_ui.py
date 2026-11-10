@@ -228,15 +228,21 @@ if (location.origin === ORIGIN) {
 
         # New office clients: prepare imports while uninstalled, without claiming native loading.
         harness.launchers["workbuddy"].unlink()
+        harness.launchers["qwenwork"].unlink()
+        harness.launchers["pi"].unlink()
         office_url = harness.url + "?ui-office=1"
         office_id = harness.rpc("connections.save", {"name":"office_ui","title":"办公接入验收","definition":{
             "url":office_url,"headers":{"Authorization":"synthetic-fixture-authorization"}}})["id"]
         harness.rpc("connections.probe", {"id":office_id})
         button("刷新本机配置")
         button("Agent")
+        wait_for("!!document.querySelector('button[aria-label=\"查看 WorkBuddy（未安装）\"]')")
         button("查看 WorkBuddy（未安装）")
         wait_for("document.querySelector('.agent-unavailable')?.innerText.includes('未安装，暂不可配置') && document.querySelector('.agent-panel-actions button')?.disabled")
         checks.append("uninstalled WorkBuddy remains visible with native writes disabled")
+        button("查看 Pi Agent（未安装）")
+        wait_for("document.querySelector('.agent-unavailable')?.innerText.includes('未安装，暂不可配置') && document.querySelector('.agent-panel-actions button')?.disabled")
+        checks.append("uninstalled Pi stays visible with native writes disabled and a CLI selection entry")
 
         before = harness.rpc("snapshot")
         browser("set","viewport","940","620")
@@ -281,6 +287,68 @@ if (location.origin === ORIGIN) {
         assert before["bindings"] == after["bindings"] and before["history"] == after["history"]
         assert not any(b["agent"] in {"qwenwork","doubaowork"} for b in after["bindings"])
         checks.append("QwenWork JSON and DoubaoWork form values reach the clipboard adapter in direct and shared modes, with no binding or history mutation")
+
+        harness.install_clients()
+        button("刷新本机配置")
+        wait_for("!!document.querySelector('button[aria-label=\"查看 千问办公\"]')")
+        button("查看 千问办公")
+        wait_for("!!document.querySelector('.agent-metrics') && !!document.querySelector('.agent-source-details')")
+        if json.loads(browser("eval", "!!document.querySelector('.toast')")):
+            button("关闭提示")
+        browser("click", ".agent-source-details summary")
+        wait_for("document.querySelector('.agent-source-details')?.innerText.includes('.qwenworkcn')")
+        row = json.loads(browser("eval", "[...document.querySelectorAll('.agent-service-row')].findIndex(row=>row.querySelector('.service-name')?.textContent.includes('办公接入验收')) + 1"))
+        assert row > 0
+        browser("click", f".agent-service-row:nth-child({row}) .cell-add")
+        wait_for("document.querySelectorAll('dialog .target input:checked').length === 1 && !document.querySelector('dialog .target input:checked').closest('label').innerText.includes('客户端导入')")
+        button("预览变更")
+        browser("wait", "--text", "核对配置变更")
+        button("应用配置")
+        browser("wait", "--text", "接入结果")
+        qwen_path = harness.home / ".qwenworkcn/mcp.json"
+        assert json.loads(qwen_path.read_text())["mcpServers"]["office_ui"]["url"] == office_url
+        button("完成")
+        audit("qwen-native")
+        browser("screenshot", str(record/"qwen-native.png"))
+        checks.append("installed QwenWork selects its native source by default and applies the exact HTTP entry through preview")
+
+        import sys, os
+        qwen_profile = harness.home / ("Library/Application Support/QwenWorkCN" if sys.platform=="darwin" else "AppData/Roaming/QwenWorkCN" if os.name=="nt" else ".config/QwenWorkCN")
+        marker = qwen_profile / "data/agents.identity-v2.db"
+        marker.parent.mkdir(parents=True, exist_ok=True);marker.touch()
+        before_private = qwen_path.read_bytes()
+        button("刷新本机配置")
+        wait_for("document.querySelector('.agent-unavailable')?.innerText.includes('身份隔离') && !document.querySelector('.agent-source-details')")
+        button("生成 办公接入验收 的 千问办公 配置")
+        button("生成导入配置")
+        browser("wait", "--text", "千问办公 · 待客户端导入")
+        assert qwen_path.read_bytes() == before_private
+        button("完成")
+        audit("qwen-private-fallback")
+        browser("screenshot", str(record/"qwen-private-fallback.png"))
+        marker.unlink()
+        checks.append("QwenWork identity storage switches the UI to import with a concrete reason and leaves legacy JSON untouched")
+
+        button("查看 Pi Agent")
+        wait_for("!!document.querySelector('.agent-metrics') && !!document.querySelector('.agent-source-details')")
+        row = json.loads(browser("eval", "[...document.querySelectorAll('.agent-service-row')].findIndex(row=>row.querySelector('.service-name')?.textContent.includes('办公接入验收')) + 1"))
+        assert row > 0
+        browser("click", f".agent-service-row:nth-child({row}) .cell-add")
+        wait_for("document.querySelectorAll('dialog .target input:checked').length === 1 && !document.querySelector('dialog .target input:checked').closest('label').innerText.includes('客户端导入')")
+        button("预览变更")
+        browser("wait", "--text", "核对配置变更")
+        button("应用配置")
+        browser("wait", "--text", "接入结果")
+        entry = json.loads((harness.home / '.pi/agent/mcp.json').read_text())["mcpServers"]["office_ui"]
+        assert entry["url"] == office_url and entry["type"] == "http" and "transport" not in entry
+        button("完成")
+        audit("pi-native")
+        browser("screenshot", str(record/"pi-native.png"))
+        browser("click", ".agent-panel-actions button")
+        wait_for("document.querySelector('dialog')?.innerText.includes('Pi 1.x') && !!document.querySelector('dialog option[value=project]')")
+        assert json.loads(browser("eval", "!document.querySelector('dialog input[placeholder=\"完整 JSON 文件路径\"]')"))
+        button("关闭")
+        checks.append("installed Pi applies strict native HTTP through preview and explains its built-in MCP and project trust requirements")
         result["conclusion"]="PASS"
     finally:
         try:
