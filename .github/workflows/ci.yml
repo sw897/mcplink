@@ -140,6 +140,9 @@ jobs:
       - name: Isolated generated CLI acceptance
         timeout-minutes: 5
         run: python -u tests/e2e/generated_cli.py --record artifacts/e2e/ci-generated
+      - name: HTTP API Adapter acceptance
+        timeout-minutes: 5
+        run: python -u tests/e2e/http_api.py --record artifacts/e2e/ci-http-api
       - name: Catalog and authentication boundary acceptance
         timeout-minutes: 5
         run: python -u tests/e2e/architecture_boundaries.py --record artifacts/e2e/ci-boundaries
@@ -186,6 +189,16 @@ jobs:
         if: runner.os == 'Windows'
         timeout-minutes: 12
         run: npm run release:windows
+      - name: Curate public Windows distribution files
+        if: runner.os == 'Windows'
+        shell: python {0}
+        run: |
+          import json, subprocess, sys
+          from pathlib import Path
+          version = json.loads(Path('package.json').read_text())['version']
+          directories = list(Path('artifacts/releases').glob(f'{version}/*'))
+          assert len(directories) == 1
+          subprocess.run([sys.executable, 'scripts/upload_release_draft.py', '--tag', 'v' + version, '--directory', str(directories[0]), '--platform', 'windows', '--prepare-only', '--output', 'artifacts/build/windows-release'], check=True)
       - name: macOS DMG acceptance
         if: runner.os == 'macOS'
         run: |
@@ -196,49 +209,16 @@ jobs:
         run: |
           suffix=""
           if [[ "$RUNNER_OS" == "Windows" ]]; then suffix=".exe"; fi
-          python scripts/release_manifest.py --require-clean --record artifacts/e2e/ci-manifest --binary "target/release/mcplink${suffix}" --binary "target/release/mcplink-desktop${suffix}"
+          python scripts/release_manifest.py --require-clean --record artifacts/build/source --binary "target/release/mcplink${suffix}" --binary "target/release/mcplink-desktop${suffix}"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        if: always()
         with:
-          name: acceptance-${{ matrix.os }}
+          name: packages-${{ matrix.os }}
           if-no-files-found: warn
           path: |
-            artifacts/e2e/ci-integrity/report.json
-            artifacts/e2e/ci-bridge-adoption/report.json
-            artifacts/e2e/ci-renderer/report.json
-            artifacts/e2e/ci-renderer/failure-snapshot.txt
-            artifacts/e2e/ci-renderer/failure.png
-            artifacts/e2e/ci-cli/report.json
-            artifacts/e2e/ci-core/report.json
-            artifacts/e2e/ci-claude/report.json
-            artifacts/e2e/ci-claude-writable/report.json
-            artifacts/e2e/ci-opencode/report.json
-            artifacts/e2e/ci-agents/report.json
-            artifacts/e2e/ci-office-agents/report.json
-            artifacts/e2e/ci-pi/report.json
-            artifacts/e2e/ci-tools/report.json
-            artifacts/e2e/ci-generated/report.json
-            artifacts/e2e/ci-boundaries/report.json
-            artifacts/e2e/ci-aggregate/report.json
-            artifacts/e2e/ci-aggregate/native-pi.json
-            artifacts/e2e/ci-catalog-pagination/report.json
-            artifacts/e2e/ci-entry-policy/report.json
-            artifacts/e2e/ci-catalog-refresh/report.json
-            artifacts/e2e/ci-catalog-refresh/native-pi.json
-            artifacts/e2e/ci-cli-workflow/report.json
-            artifacts/e2e/ci-upgrade-baseline/report.json
-            artifacts/e2e/ci-windows-signing/report.json
-            artifacts/e2e/ci-windows-installed/report.json
-            artifacts/e2e/ci-remote/report.json
-            artifacts/e2e/ci-oauth/report.json
-            artifacts/e2e/ci-windows-background/report.json
-            artifacts/e2e/ci-lifecycle/report.json
-            artifacts/e2e/ci-package/package-report.json
-            artifacts/e2e/ci-installed/report.json
-            artifacts/e2e/ci-manifest/release-manifest.json
+            artifacts/build/source/release-manifest.json
             target/release/bundle/dmg/*.dmg
             target/release/bundle/nsis/*setup.exe
-            artifacts/releases/*/*/*
+            artifacts/build/windows-release/*
 
 
   public-source:

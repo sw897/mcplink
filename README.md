@@ -7,6 +7,8 @@ English · [简体中文](README.zh-CN.md)
 
 mcplink connects multiple MCP servers through one entry per agent and makes their tools callable from terminals, scripts, and automation. Manage services, authentication, and tool ranges from the desktop or CLI.
 
+Ordinary HTTP APIs can also join that entry through a declarative HTTP API-to-MCP Adapter. Define tool parameters, HTTP requests, and response mappings once; agents and tool CLIs use the same managed connection.
+
 Single-service entries, aggregate entries, and tool CLIs reuse the same managed service-account authentication. Authorize a connection once for its account and scope, then use it across agents and commands. Native direct connections remain optional and use client-managed authentication. See the [product definition](docs/product.md) for the behavior and acceptance criteria.
 
 Free and MIT-licensed, with no mcplink account required. Upstream services keep their own authentication and access requirements.
@@ -19,8 +21,9 @@ Free and MIT-licensed, with no mcplink account required. Upstream services keep 
 | --- | --- | --- |
 | Unified access to multiple MCP servers | Configure one `mcplink` entry per agent; select and maintain its services in mcplink | Tools, resources and prompts from selected services; per-entry tool ranges, stable pagination, refresh notifications, and upstream failure diagnostics |
 | MCP-to-CLI | Call MCP tools directly or generate named commands with argument validation, JSON input/output, and automation support | Tool calls, JSON Schema validation, named command generation, desktop parameter and call workflows, contract checks, and rebinding |
+| HTTP API-to-MCP | Expose a web service as MCP tools without writing a separate server | Declarative path/query/JSON mapping, managed headers, JSON/text/image results, and shared entry/CLI invocation |
 
-The desktop, authorization management, client adapters, and background process support these two capabilities.
+The desktop, authorization management, client adapters, and background process support these capabilities.
 
 ## Supporting features available today
 
@@ -67,7 +70,7 @@ Authentication reuse applies to the same managed service connection, account, an
 
 1. Install a preview build or build from source, then open mcplink. Keep the application or standalone CLI in a permanent location before setting up shared connections.
 2. Review discovered services and agents. Add project or profile configuration sources as needed.
-3. Import an existing connection or create one with a STDIO command or remote MCP URL. Supply the required authorization and check its tools.
+3. Import an existing connection, create one with a STDIO command or remote MCP URL, or register an HTTP API definition. Supply any required authorization and check its tools.
 4. Create an aggregate entry, select its services, and connect it to the target agent. Alternatively, connect a single service through a managed entry or native direct configuration. Review the proposed changes and complete setup as prompted.
 5. Reload the client's MCP configuration and make an actual tool call to confirm access.
 
@@ -75,7 +78,7 @@ Use the service and account views to update managed authorization. Review config
 
 ## Install and build
 
-The current preview is **0.2.1**, with macOS Apple Silicon and Windows x64 build and upgrade acceptance passing in [CI](https://github.com/sw897/mcplink/actions/runs/43001509117). Open a successful run in [GitHub Actions](https://github.com/sw897/mcplink/actions/workflows/ci.yml) and download the platform's `acceptance-*` artifact for its installer and verification reports. See the [release notes](docs/release-notes.md) for this version.
+Download the **[0.3.0 preview](https://github.com/sw897/mcplink/releases/tag/v0.3.0)** for macOS Apple Silicon or Windows x64. The release includes installers, standalone CLIs, SHA-256 checksums, and public build manifests. [GitHub Actions](https://github.com/sw897/mcplink/actions/workflows/ci.yml) also provides `packages-*` artifacts from successful builds. See the [release notes](docs/release-notes.md) for changes and signing status.
 
 Upgrade the desktop and standalone CLI together, then restart the background process. Version compatibility, package checksums, and signing details are covered in the [release guide](docs/release.md).
 
@@ -115,6 +118,28 @@ Open **Tool CLI** from a managed service or aggregate entry to inspect parameter
 
 `call --stdin` accepts the tool's argument JSON. Generated commands use the local mcplink runtime and managed authorization without embedding credentials. Usage and error boundaries are covered in the [CLI guide](docs/agent-cli.md).
 
+## HTTP API-to-MCP
+
+Register a web service with a base URL and a declarative `httpApi` definition. It becomes a managed MCP service: use it directly, select it in an aggregate entry, or generate a tool CLI. It does not need to implement the MCP protocol itself.
+
+Available since 0.3.0 with management API 21. Upgrade the desktop, CLI, and background together; 0.2.1 builds do not include the adapter.
+
+Two keyless examples are included:
+
+```sh
+mcplink connections save --stdin < examples/http-api/quickchart.json
+mcplink connections save --stdin < examples/http-api/open-meteo.json
+mcplink connections tools CONNECTION_ID
+mcplink connections probe CONNECTION_ID
+mcplink call OPEN_METEO_CONNECTION_ID get_weather --stdin
+```
+
+Use the IDs returned by registration. QuickChart accepts a chart configuration and returns a PNG; Open-Meteo accepts coordinates and returns weather JSON. Add both connections to the same aggregate entry for one MCP entry per agent. The samples configure an explicit probe that makes one real API call; listing tools only checks the local definition.
+
+The adapter supports typed JSON input, encoded path/query parameters, JSON request bodies, and JSON, UTF-8 text, image bytes, or mapped Base64 image responses. PNG, JPEG, and WebP images return as MCP image content. Keep credentials in managed headers. A raw HTTP API is available through mcplink shared entries, rather than native direct MCP configuration.
+
+This version uses explicit operation definitions; it does not import OpenAPI, upload multipart files, or run asynchronous jobs. Free public endpoints have upstream rate limits; Open-Meteo's free endpoint is for non-commercial use. See the [HTTP Adapter guide](docs/http-api.md) for configuration, calls, verification, and limits.
+
 ## Management CLI and Skill
 
 The CLI provides JSON output and stdin input for scripts and agents. Inspect the installed build's commands and connection state first:
@@ -130,7 +155,7 @@ The bundled management Skill uses the same CLI and configuration transactions. S
 
 Connection metadata and configuration history stay on your computer. Managed credentials use the system credential store. Configuration backups may contain plaintext credentials already present in native files and need the same protection as those files.
 
-mcplink supports STDIO and Streamable HTTP with ordinary tools, resources, and prompts requests. Authentication and tool behavior follow each upstream service's contract. See [supported scope](docs/compatibility.md) for protocol and platform limits, and use synthetic data in issue reports. Security reports follow [SECURITY.md](SECURITY.md).
+mcplink supports STDIO and Streamable HTTP with ordinary tools, resources, and prompts requests. Declarative HTTP API connections expose tools through the same managed path. Authentication and tool behavior follow each upstream service's contract. See [supported scope](docs/compatibility.md) for protocol and platform limits, and use synthetic data in issue reports. Security reports follow [SECURITY.md](SECURITY.md).
 
 ## Documentation and contributing
 

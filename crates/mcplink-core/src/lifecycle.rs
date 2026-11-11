@@ -174,6 +174,7 @@ pub(crate) fn persist_definition(
         } else {
             let previous = engine.definition(connection)?;
             previous.url != definition.url
+                || previous.http_api.is_some() != definition.http_api.is_some()
                 || previous.origin_project != definition.origin_project
                 || previous.oauth != definition.oauth
                 || previous.client_id != definition.client_id

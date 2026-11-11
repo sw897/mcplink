@@ -22,7 +22,7 @@ impl Store {
         let db = Sqlite::open(data.join("mcplink.sqlite3")).context("无法打开本地数据库")?;
         db.busy_timeout(std::time::Duration::from_secs(5))?;
         let schema: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        anyhow::ensure!(schema <= 4, "数据库来自较新版本，请升级 mcplink");
+        anyhow::ensure!(schema <= 5, "数据库来自较新版本，请升级 mcplink");
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
             CREATE TABLE IF NOT EXISTS connections(id TEXT PRIMARY KEY, document TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS bindings(connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE, source_id TEXT NOT NULL, name TEXT NOT NULL, document TEXT NOT NULL, PRIMARY KEY(source_id,name));
@@ -36,7 +36,7 @@ impl Store {
             CREATE TABLE IF NOT EXISTS connection_deletions(connection_id TEXT PRIMARY KEY, definition_ref TEXT, released_bindings INTEGER NOT NULL);
             CREATE INDEX IF NOT EXISTS connection_deletions_pending ON connection_deletions(connection_id) WHERE definition_ref IS NOT NULL;
             CREATE TABLE IF NOT EXISTS credential_cleanup(connection_id TEXT NOT NULL, reference TEXT PRIMARY KEY);
-            PRAGMA user_version=4;")?;
+            PRAGMA user_version=5;")?;
         Ok(Self { db: Mutex::new(db) })
     }
 

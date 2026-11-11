@@ -4,9 +4,11 @@ MCP 转 CLI 是 mcplink 的核心能力之一：从工具 Schema 发现参数，
 
 单服务入口、聚合入口和工具 CLI 引用同一份托管连接及认证。CLI 可调用服务的原始工具名，也可调用聚合入口发现的命名空间工具名。产品定义见[产品定位](product.md)。本文中的命令均描述现有实现。
 
+普通 HTTP API 可以通过 `connections save --stdin` 的 `definition.httpApi` 注册，再复用同样的 `call`、`gateway` 和 `cli generate` 命令；`schema.httpApi` 描述映射契约。工具发现不发出业务请求，配置的 probe 只由显式检查执行，详见 [HTTP API 指南](http-api.md)。
+
 `mcplink` CLI 与桌面使用同一个管理核心、后台、系统凭据库和配置事务。命令不启动桌面或浏览器；后台在首次管理调用时按需启动。`schema` 和 `skill` 离线可用。
 
-客户端与来源支持范围见[Agent 兼容矩阵](agent-discovery.md)。原生文件写入需要客户端已安装，当前聚合管理与桌面快照要求 management API 20；桌面、CLI 和后台应使用同一构建。管理 Skill 的复制安装目标另见下文。
+客户端与来源支持范围见[Agent 兼容矩阵](agent-discovery.md)。原生文件写入需要客户端已安装，当前聚合管理与桌面快照要求 management API 21；桌面、CLI 和后台应使用同一构建。管理 Skill 的复制安装目标另见下文。
 
 ## 安装与发现
 

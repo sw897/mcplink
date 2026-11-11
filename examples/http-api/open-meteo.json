@@ -1,0 +1,69 @@
+{
+  "name": "open_meteo",
+  "title": "Open-Meteo",
+  "definition": {
+    "url": "https://api.open-meteo.com",
+    "enabled": true,
+    "timeout": 60,
+    "httpApi": {
+      "tools": [
+        {
+          "name": "get_weather",
+          "description": "Get current weather for latitude/longitude from Open-Meteo. Returns current values and units as JSON. This public endpoint requires no API key and is free for non-commercial use.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "latitude": { "type": "number", "minimum": -90, "maximum": 90 },
+              "longitude": {
+                "type": "number",
+                "minimum": -180,
+                "maximum": 180
+              },
+              "current": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "temperature_2m",
+                    "relative_humidity_2m",
+                    "apparent_temperature",
+                    "precipitation",
+                    "weather_code",
+                    "wind_speed_10m"
+                  ]
+                },
+                "minItems": 1,
+                "maxItems": 6
+              },
+              "timezone": { "type": "string", "maxLength": 80 }
+            },
+            "required": ["latitude", "longitude"],
+            "additionalProperties": false
+          },
+          "method": "GET",
+          "path": "/v1/forecast",
+          "query": {
+            "latitude": { "$input": "/latitude" },
+            "longitude": { "$input": "/longitude" },
+            "current": {
+              "$input": "/current",
+              "default": ["temperature_2m", "weather_code"]
+            },
+            "timezone": { "$input": "/timezone", "default": "auto" },
+            "forecast_days": 1
+          },
+          "response": { "type": "json" },
+          "annotations": {
+            "readOnlyHint": true,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        }
+      ],
+      "probe": {
+        "tool": "get_weather",
+        "arguments": { "latitude": 31.23, "longitude": 121.47 }
+      }
+    }
+  }
+}

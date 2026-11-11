@@ -51,7 +51,7 @@ Windows 候选包含 NSIS 安装包、含许可文件的规范化 CLI ZIP、源�
 
 ## GitHub Actions
 
-`ci.yml` 为 macOS Apple Silicon 和 Windows x64 分别运行检查、构建和合成 CLI 场景。macOS 另验收 DMG，Windows 另验收 NSIS 安装生命周期。打包前清理生成的 bundle 目录，避免 Cargo 缓存中的旧包混入当前工件。CI 按近期 main 成功运行的源码清单核对安装包版本、按哈希合并相同副本，并优先选不同版本作为升级基线，报告来源 run、提交、版本和哈希，再做旧版到当前构建的升级；若旧工件不可用，明确记录缺少跨版本基线，不将重装当作跨版本升级。Windows 结果须以实际 workflow 报告和桌面实机验收为准；配置工作流本身不表示通过。CI 不运行需要原生 Agent 登录的真实模型测试，也不上传测试 home、Vault 或原始配置。
+`ci.yml` 为 macOS Apple Silicon 和 Windows x64 分别运行检查、构建和合成 CLI 场景。macOS 另验收 DMG，Windows 另验收 NSIS 安装生命周期。打包前清理生成的 bundle 目录，避免 Cargo 缓存中的旧包混入当前工件。CI 按近期 main 成功运行的源码清单核对安装包版本、按哈希合并相同副本，并优先选不同版本作为升级基线，报告来源 run、提交、版本和哈希，再做旧版到当前构建的升级；若旧工件不可用，明确记录缺少跨版本基线，不将重装当作跨版本升级。Windows 结果须以实际 workflow 报告和桌面实机验收为准；配置工作流本身不表示通过。CI 不运行需要原生 Agent 登录的真实模型测试。`packages-*` 工件仅保留安装包、CLI、校验值与公开构建来源清单，不上传测试报告、失败截图、home、Vault、原始配置或原始日志。新升级基线读取该清单，同时兼容旧 `acceptance-*` 工件及其清单路径。
 
 `release-macos.yml` 仅手动运行，输入必须是与源码版本匹配的已有 tag。仓库需要以下 secrets：
 
@@ -65,7 +65,7 @@ Windows 候选包含 NSIS 安装包、含许可文件的规范化 CLI ZIP、源�
 
 `release-windows.yml` 也仅手动运行，tag 与版本须匹配。需要 `WINDOWS_CERTIFICATE`（PFX 的 Base64）、`WINDOWS_CERTIFICATE_PASSWORD` 和 `WINDOWS_SIGNING_CERTIFICATE_SHA1` secrets；可选仓库变量 `WINDOWS_TIMESTAMP_URL`。PFX 只经 runner 临时文件导入当前用户证书库，结束时清理文件和指定私钥。使用非导出硬件或签名服务时，在持有该身份的 Windows 环境运行本地签名入口，按相同验证标准交付，不把服务机密写进配置。
 
-签名、安装包和 CLI 验收都通过后，工作流创建或补充匹配 tag 的 **Release 草稿**，拒绝覆盖已有同名文件或修改已发布 Release；两平台元数据使用平台前缀。正式公开发布从草稿单独执行。工作流固定第三方 Action 的提交 SHA。Runner 平台依据 [GitHub 官方标签表](https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/choose-the-runner-for-a-job)。
+签名、安装包和 CLI 验收都通过后，工作流创建或补充匹配 tag 的 **Release 草稿**，拒绝覆盖已有同名文件或修改已发布 Release；两平台元数据使用平台前缀。上传入口按安装包白名单、源码修订与 SHA-256 验证文件，仅输出允许的构建来源字段与签名布尔值；`verification.json` 和原始验收材料留在本地或临时 runner，不上传。可用 `--prepare-only --output NEW_DIRECTORY` 先检查公开文件集。正式公开发布从草稿单独执行。工作流固定第三方 Action 的提交 SHA。Runner 平台依据 [GitHub 官方标签表](https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/choose-the-runner-for-a-job)。
 
 发布前核对待公开的源码、文档和 Git 历史，扫描凭据，避免纳入本机配置、账号验收记录或签名材料。根据两平台 CI 的实际结果记录兼容性；合成测试不能代替 Windows 桌面实机验收。
 
@@ -73,7 +73,7 @@ Windows CI 在打包前用 `scripts/prepare_windows_bundler.py` 通过 GitHub Re
 
 ## 预览包交付
 
-预览包可按 GitHub Pre-release 交付 macOS Apple Silicon 的 DMG、App ZIP、独立 CLI，以及 Windows x64 NSIS 安装包。签名和公证状态以实际构建的 `verification.json` 为准。
+预览包可按 GitHub Pre-release 交付 macOS Apple Silicon 的 DMG、App ZIP、独立 CLI，以及 Windows x64 NSIS 安装包。本地签名和公证检查来自 `verification.json`；公开附件中的平台构建清单只保留对应签名状态字段，不附原始验收报告。
 
 固定源码提交后，在干净的公开源码检出目录构建，并等待同一提交的两平台 CI 完成。Windows 安装包从对应的成功 CI 获取，核对 CLI、桌面程序、许可及编译路径；Tauri 会将桌面 PE 内唯一的 bundle-type 标记从 `UNK` 改为 `NSS`，其余内容应与构建清单一致。
 

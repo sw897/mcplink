@@ -76,7 +76,7 @@ jobs:
           from pathlib import Path
           directories = sorted(Path('artifacts/releases').glob('*/*'))
           assert len(directories) == 1
-          subprocess.run([sys.executable, 'scripts/upload_release_draft.py', '--tag', os.environ['RELEASE_TAG'], '--directory', str(directories[0]), '--platform', 'windows'], check=True)
+          subprocess.run([sys.executable, 'scripts/upload_release_draft.py', '--tag', os.environ['RELEASE_TAG'], '--directory', str(directories[0]), '--platform', 'windows', '--output', 'artifacts/build/public-release'], check=True)
       - name: Remove imported signing key
         if: always()
         shell: pwsh
@@ -92,4 +92,4 @@ jobs:
         with:
           name: signed-windows-release
           if-no-files-found: error
-          path: artifacts/releases/*/*/*
+          path: artifacts/build/public-release/*

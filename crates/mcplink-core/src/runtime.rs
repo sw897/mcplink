@@ -63,7 +63,7 @@ async fn health(State(state): State<ServerState>, headers: HeaderMap) -> impl In
     (
         StatusCode::OK,
         Json(
-            json!({"application":"mcplink","instance":state.info.instance,"version":env!("CARGO_PKG_VERSION"),"managementApi":20}),
+            json!({"application":"mcplink","instance":state.info.instance,"version":env!("CARGO_PKG_VERSION"),"managementApi":21}),
         ),
     )
 }
@@ -390,6 +390,14 @@ impl Client {
     }
 
     pub async fn call(&self, method: &str, params: Value) -> Result<Value> {
+        if self.management_api < 21
+            && method == "connections.save"
+            && params
+                .pointer("/definition/httpApi")
+                .is_some_and(|v| !v.is_null())
+        {
+            bail!("旧后台不支持 HTTP API Adapter，请退出并重启后台");
+        }
         if self.management_api < 19
             && matches!(
                 method,

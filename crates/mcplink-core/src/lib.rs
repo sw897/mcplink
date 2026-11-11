@@ -7,6 +7,7 @@ mod dsh_config;
 pub mod engine;
 pub mod gateway;
 pub mod generated;
+pub mod http_api;
 pub mod invocation;
 mod json_config;
 mod lifecycle;

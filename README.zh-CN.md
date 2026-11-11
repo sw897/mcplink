@@ -7,6 +7,8 @@
 
 mcplink 将多个 MCP Server 汇集到每个 Agent 的一个入口中，也能把工具转成终端、脚本和自动化任务可调用的 CLI。服务、认证和工具范围可通过桌面或 CLI 统一维护。
 
+普通 HTTP API 也能通过声明式 HTTP API → MCP Adapter 接入这个入口。配置一次工具参数、HTTP 请求与结果映射，Agent 和工具 CLI 即可复用同一个托管连接。
+
 单服务入口、聚合入口和工具 CLI 共用托管认证。同一服务连接完成相应账号和授权范围的认证后，可供多个 Agent 和命令复用。原生直连作为可选方式，由客户端维护认证。完整定义与验收标准见[产品定位](docs/product.md)。
 
 免费、MIT 开源，本机管理无需注册 mcplink 账号。上游服务仍按各自的规则认证和授权。
@@ -19,8 +21,9 @@ mcplink 将多个 MCP Server 汇集到每个 Agent 的一个入口中，也能�
 | --- | --- | --- |
 | 多 MCP Server 统一接入 | 每个 Agent 配置一个 `mcplink` 入口，在 mcplink 内选择和维护多个服务 | 聚合所选服务的工具、资源和提示词；支持每入口工具范围、稳定分页、清单刷新通知和上游故障诊断 |
 | MCP 转 CLI | 将 MCP 工具转成可直接调用或按需生成的命令，支持参数校验、JSON 输入输出与自动化 | 工具调用、JSON Schema 校验、具名命令生成，以及桌面参数查看、实际调用、契约检查和重新绑定 |
+| HTTP API 转 MCP | 将 Webservice 注册为 MCP 工具，无需单独编写 Server | 声明式路径/query/JSON 映射、托管请求头、JSON/文本/图片结果，以及统一入口和 CLI 调用 |
 
-桌面界面、认证维护、客户端适配和后台运行围绕这两项能力提供支持。
+HTTP API 转 MCP 支持路径、query、JSON 请求映射，托管请求头认证，以及 JSON、文本和图片结果；与现有 MCP 服务共用统一入口和 CLI。桌面界面、认证维护、客户端适配和后台运行围绕这些能力提供支持。
 
 ## 已有配套功能
 
@@ -67,7 +70,7 @@ flowchart LR
 
 1. 安装预览构建，或从源码构建并打开 mcplink。设置共享接入前，将应用或独立 CLI 放在长期保留的位置。
 2. 查看发现的服务与 Agent，按需添加项目或 profile 配置来源。
-3. 导入已有连接，或填写 STDIO 命令、远程 MCP 地址新建连接。完成所需认证，再检查工具清单。
+3. 导入已有连接，填写 STDIO 命令、远程 MCP 地址，或注册 HTTP API 工具定义。完成所需认证，再检查工具清单。
 4. 在“统一入口”页创建入口并选择服务，再接给目标 Agent；也可直接为某个服务选择单服务入口或原生直连。核对预览，按界面提示完成接入。
 5. 重新加载客户端的 MCP 配置，并做一次实际工具调用确认结果。
 
@@ -75,7 +78,7 @@ flowchart LR
 
 ## 安装与构建
 
-当前预览版本为 **0.2.1**，macOS Apple Silicon 和 Windows x64 的构建与升级验收均已在 [CI](https://github.com/sw897/mcplink/actions/runs/43001509117) 通过。在 [GitHub Actions](https://github.com/sw897/mcplink/actions/workflows/ci.yml) 中打开成功运行，下载对应平台的 `acceptance-*` 工件，即可获取安装包与验收报告。版本变化见[发布说明](docs/release-notes.md)。
+下载 **[0.3.0 预览版](https://github.com/sw897/mcplink/releases/tag/v0.3.0)**，支持 macOS Apple Silicon 和 Windows x64。Release 提供安装包、独立 CLI、SHA-256 校验值和公开构建清单；[GitHub Actions](https://github.com/sw897/mcplink/actions/workflows/ci.yml) 的成功构建也提供 `packages-*` 工件。版本变化与签名状态见[发布说明](docs/release-notes.md)。
 
 升级时同步更新桌面与独立 CLI，并重启后台。版本兼容、包校验值及签名状态见[发布指南](docs/release.md)。
 
@@ -114,6 +117,26 @@ mcplink cli check ./notes-cli/notes.mcplink.json
 `call --stdin` 接收工具参数 JSON。生成物复用本机 mcplink 运行时和托管认证，不包含凭据；使用方法与错误边界见 [CLI 指南](docs/agent-cli.md)。
 
 从托管服务或统一入口的“工具 CLI”打开工作流，查看参数、勾选工具、生成到新目录，也可以明确触发一次实际调用。已有清单可检查当前契约，变化后核对参数并生成到新目录，原文件保留。
+
+## HTTP API 转 MCP
+
+从 0.3.0 开始提供，使用 management API 21。升级时应同步更新桌面、CLI 与后台；0.2.1 构建不包含 Adapter。
+
+通过基础 URL 和 `httpApi` 工具定义注册普通 Webservice，无需为每项服务另外编写 MCP Server：
+
+```sh
+mcplink connections save --stdin < examples/http-api/quickchart.json
+mcplink connections save --stdin < examples/http-api/open-meteo.json
+mcplink connections tools CONNECTION_ID
+mcplink connections probe CONNECTION_ID
+mcplink call OPEN_METEO_CONNECTION_ID get_weather --stdin
+```
+
+连接 ID 使用保存命令的返回值。QuickChart 示例将图表 JSON 转为 PNG；Open-Meteo 示例将坐标转为天气 JSON，两者均可无 Key 调用。将两个连接加入同一个统一入口，即可由每个 Agent 的一个 `mcplink` 条目调用，也能通过直接调用和生成的 CLI 使用。
+
+工具发现只读取本地定义；示例中的显式 probe 会执行一次真实 API 调用。图片以 MCP 图片内容返回，凭据仍使用托管请求头。普通 API 需要共享接入，不能直接当成原生 MCP 地址导出。
+
+首版采用显式工具定义，尚未提供 OpenAPI 导入、multipart 上传或异步任务。公共免费接口受上游限额约束；Open-Meteo 的免费入口限非商业用途。完整配置、调用与验证说明见 [HTTP Adapter 指南](docs/http-api.md)。
 
 ## 管理 CLI 与 Skill
 

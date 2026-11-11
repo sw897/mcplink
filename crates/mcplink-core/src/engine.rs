@@ -1499,7 +1499,10 @@ impl Engine {
                     method == "changes.preview_restore",
                 )
             }
-            "connections.probe" | "connections.tools" => self.probe(required(&p, "id")?).await,
+            "connections.probe" | "connections.tools" => {
+                self.probe(required(&p, "id")?, method == "connections.probe")
+                    .await
+            }
             "credentials.update" => {
                 let _guard = self.mutation.lock().await;
                 let mut connection = self.store.connection(required(&p, "id")?)?;
@@ -1630,6 +1633,12 @@ impl Engine {
                     }
                     return Ok(crate::gateway::description());
                 }
+                if self.definition(&connection)?.http_api.is_some() {
+                    if !connection.active {
+                        bail!("连接已断开，请重新连接");
+                    }
+                    return Ok(crate::http_api::description());
+                }
                 let peer = self.pool.peer(self.clone(), required(&p, "id")?).await?;
                 let mut info =
                     serde_json::to_value(peer.peer_info().context("上游未返回服务信息")?)?;
@@ -1670,7 +1679,11 @@ impl Engine {
         }
     }
 
-    async fn probe(self: &Arc<Self>, id: &str) -> Result<Value> {
+    async fn probe(self: &Arc<Self>, id: &str, execute_probe: bool) -> Result<Value> {
+        let connection = self.store.connection(id)?;
+        if connection.members.is_none() && self.definition(&connection)?.http_api.is_some() {
+            return crate::http_api::probe(self.clone(), id, execute_probe).await;
+        }
         let expected_revision = self.store.connection(id)?.revision;
         let temporary = McpPool::default();
         let shared = self.store.connections()?.iter().any(|c| {

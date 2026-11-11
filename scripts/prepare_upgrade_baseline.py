@@ -25,14 +25,26 @@ def main():
     fallback, chosen = None, None
     for run in json.loads(process.stdout)[:3]:
         destination = args.record / str(run["databaseId"])
-        downloaded = subprocess.run(["gh", "run", "download", str(run["databaseId"]), "--repo", args.repo, "--name", args.artifact, "--dir", str(destination)], capture_output=True, text=True, timeout=180)
+        # Older CI used acceptance-* and included reports. New CI exposes only
+        # packages and build provenance; keep those old installers usable.
+        artifact_names = [args.artifact.replace("acceptance-", "packages-")]
+        legacy = args.artifact.replace("packages-", "acceptance-")
+        if legacy not in artifact_names:
+            artifact_names.append(legacy)
+        for artifact_name in artifact_names:
+            downloaded = subprocess.run(["gh", "run", "download", str(run["databaseId"]), "--repo", args.repo, "--name", artifact_name, "--dir", str(destination)], capture_output=True, text=True, timeout=180)
+            if downloaded.returncode == 0:
+                break
+            if not any(message in downloaded.stderr.lower() for message in ["404", "410", "not found", "no artifacts", "no artifact matches", "no valid artifacts", "not exist", "expired"]):
+                raise RuntimeError("Cannot download the upgrade baseline; verify Actions read permission and network access")
         if downloaded.returncode:
-            if not any(message in downloaded.stderr.lower() for message in ["404", "410", "not found", "no artifacts", "no valid artifacts", "not exist", "expired"]):
+            if not any(message in downloaded.stderr.lower() for message in ["404", "410", "not found", "no artifacts", "no artifact matches", "no valid artifacts", "not exist", "expired"]):
                 raise RuntimeError("Cannot download the upgrade baseline; verify Actions read permission and network access")
             continue
         try:
-            manifest = json.loads((destination / "artifacts/e2e/ci-manifest/release-manifest.json").read_text())
-        except (OSError, ValueError):
+            candidates = [destination / "artifacts/build/source/release-manifest.json", destination / "artifacts/e2e/ci-manifest/release-manifest.json"]
+            manifest = json.loads(next(path for path in candidates if path.is_file()).read_text())
+        except (OSError, ValueError, StopIteration):
             continue
         version = manifest.get("version")
         if manifest.get("conclusion") != "PASS" or manifest.get("revision") != run["headSha"] or not isinstance(version, str):

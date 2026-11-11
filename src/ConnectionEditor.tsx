@@ -24,6 +24,7 @@ export function Editor({
   const [token, setToken] = useState("");
   const [environment, setEnvironment] = useState("{}");
   const [customHeaders, setCustomHeaders] = useState("{}");
+  const [httpApi, setHttpApi] = useState('{"tools": []}');
   const [cwd, setCwd] = useState("");
   const [definition, setDefinition] = useState<Definition>();
   const [pending, setPending] = useState(false);
@@ -45,7 +46,16 @@ export function Editor({
           setTitle(current.title);
           setAccount(current.accountLabel);
           setDefinition(result.definition);
-          setType(result.definition.url ? "http" : "stdio");
+          setType(
+            result.definition.httpApi
+              ? "http-api"
+              : result.definition.url
+                ? "http"
+                : "stdio",
+          );
+          setHttpApi(
+            JSON.stringify(result.definition.httpApi || { tools: [] }, null, 2),
+          );
           setUrl(result.definition.url || "");
           setCommand(result.definition.command || "");
           setArgs(result.definition.args.join("\n"));
@@ -65,7 +75,7 @@ export function Editor({
     }
   };
   const originChanged =
-    type === "http" &&
+    type !== "stdio" &&
     !!definition?.url &&
     !!url &&
     origin(definition.url) !== origin(url);
@@ -82,7 +92,8 @@ export function Editor({
         oauth: false,
         ...definition,
         command: type === "stdio" ? command : undefined,
-        url: type === "http" ? url : undefined,
+        url: type !== "stdio" ? url : undefined,
+        httpApi: type === "http-api" ? JSON.parse(httpApi) : undefined,
       };
       if (type === "stdio") {
         next.args =
@@ -116,7 +127,14 @@ export function Editor({
         )
           throw new Error("环境变量与请求头需要键值均为字符串的 JSON 对象");
       }
-      if (token && type === "http") {
+      if (type === "http-api") {
+        next.oauth = false;
+        next.clientId = undefined;
+        next.clientSecret = undefined;
+        next.oauthScopes = [];
+        next.oauthCallbackPort = undefined;
+      }
+      if (token && type !== "stdio") {
         next.headers = Object.fromEntries(
           Object.entries(next.headers).filter(
             ([key]) => key.toLowerCase() !== "authorization",
@@ -189,20 +207,43 @@ export function Editor({
               onChange={(event) => setType(event.target.value)}
             >
               <option value="http">HTTP MCP</option>
+              <option value="http-api">HTTP API → MCP</option>
               <option value="stdio">本地进程 · STDIO</option>
             </select>
           </label>
-          {type === "http" ? (
+          {type !== "stdio" ? (
             <>
               <label className="field">
-                <span>MCP 地址</span>
+                <span>
+                  {type === "http-api" ? "HTTP API 基础 URL" : "MCP 地址"}
+                </span>
                 <input
                   required
                   value={url}
                   onChange={(event) => setUrl(event.target.value)}
-                  placeholder="https://example.com/mcp"
+                  placeholder={
+                    type === "http-api"
+                      ? "https://api.example.com"
+                      : "https://example.com/mcp"
+                  }
                 />
               </label>
+              {type === "http-api" && (
+                <label className="field">
+                  <span>工具与请求映射 · JSON</span>
+                  <textarea
+                    rows={12}
+                    value={httpApi}
+                    onChange={(event) => setHttpApi(event.target.value)}
+                    spellCheck={false}
+                  />
+                  <span className="field-help">
+                    填写工具参数、HTTP
+                    请求与结果映射。凭据使用下方认证字段；此服务通过 mcplink
+                    共享入口调用。
+                  </span>
+                </label>
+              )}
               {originChanged && (
                 <div className="warning-banner" role="status">
                   保存后连接将暂停，旧地址的认证不会发送到新地址。请在账号页设置新凭据，或确认地址后重新连接。
@@ -423,7 +464,10 @@ export function CredentialDialog({
         <p className="field-help">
           按上游要求原样保存，更新后可检查连接并查看实际工具。
         </p>
-        <details className="oauth-option">
+        <details
+          className="oauth-option"
+          hidden={connection.transport === "http-api"}
+        >
           <summary>服务使用 OAuth 浏览器授权</summary>
           <p className="muted">
             适用于提供标准 MCP OAuth

@@ -621,6 +621,7 @@ fn normalize_context(raw: &Value, agent: Agent, project: Option<&Path>) -> Resul
             .or_insert_with(|| format!("${{env:{key}}}"));
     }
     let mut definition = Definition {
+        http_api: None,
         command: raw
             .get("command")
             .and_then(Value::as_str)
@@ -678,6 +679,7 @@ fn normalize_context(raw: &Value, agent: Agent, project: Option<&Path>) -> Resul
 }
 
 pub fn validate(def: &Definition) -> Result<()> {
+    crate::http_api::validate(def)?;
     if def.client_id.as_ref().is_some_and(|value| {
         value.trim().is_empty() || value.len() > 2048 || value.chars().any(char::is_control)
     }) || def.client_secret.as_ref().is_some_and(|value| {
@@ -780,6 +782,9 @@ pub fn check_source_import(source: &Source, raw: &Value) -> Result<()> {
 }
 
 pub fn native(def: &Definition, source: &Source) -> Result<Value> {
+    if def.http_api.is_some() {
+        bail!("普通 HTTP API 需要 mcplink Adapter，请使用共享接入，不能导出为原生 MCP 地址");
+    }
     if source.agent.native_adapter() {
         return crate::agent_config::native(def, source);
     }

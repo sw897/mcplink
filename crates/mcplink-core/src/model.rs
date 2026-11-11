@@ -121,6 +121,7 @@ pub struct Definition {
     pub env: BTreeMap<String, String>,
     pub cwd: Option<String>,
     pub url: Option<String>,
+    pub http_api: Option<crate::http_api::HttpApi>,
     pub headers: BTreeMap<String, String>,
     pub enabled: bool,
     pub oauth: bool,
@@ -142,7 +143,13 @@ pub struct Definition {
 
 impl Definition {
     pub fn transport(&self) -> &'static str {
-        if self.url.is_some() { "http" } else { "stdio" }
+        if self.http_api.is_some() {
+            "http-api"
+        } else if self.url.is_some() {
+            "http"
+        } else {
+            "stdio"
+        }
     }
 
     pub fn summary(&self) -> String {
@@ -249,7 +256,7 @@ impl Definition {
             Ok(url) => format!("{}/••••••••", url.origin().ascii_serialization()),
             Err(_) => "••••••••".into(),
         });
-        json!({"command":self.command,"args":args,"env":env,"cwd":self.cwd,"url":url,"headers":headers,"enabled":self.enabled,"oauth":self.oauth,"clientId":self.client_id,
+        json!({"command":self.command,"args":args,"env":env,"cwd":self.cwd,"url":url,"httpApi":self.http_api,"headers":headers,"enabled":self.enabled,"oauth":self.oauth,"clientId":self.client_id,
             "clientSecret":self.client_secret.as_ref().map(|_|"••••••••"),"oauthScopes":self.oauth_scopes,"oauthCallbackPort":self.oauth_callback_port,
             "includeTools":self.include_tools,"excludeTools":self.exclude_tools,"timeout":self.timeout,"startupTimeout":self.startup_timeout,"includeSpecified":self.include_specified,"resourcesDisabled":self.resources_disabled,"promptsDisabled":self.prompts_disabled,"transport":self.transport()})
     }

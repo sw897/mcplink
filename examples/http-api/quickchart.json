@@ -1,0 +1,65 @@
+{
+  "name": "quickchart",
+  "title": "QuickChart",
+  "definition": {
+    "url": "https://quickchart.io",
+    "enabled": true,
+    "timeout": 60,
+    "httpApi": {
+      "tools": [
+        {
+          "name": "render_chart",
+          "description": "Render a Chart.js v4 JSON chart as a PNG image. Supply labels and datasets in chart.data. No API key is required for rate-limited public requests. Use synthetic or public data.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "chart": {
+                "type": "object",
+                "properties": {
+                  "type": { "type": "string" },
+                  "data": { "type": "object" },
+                  "options": { "type": "object" }
+                },
+                "required": ["type", "data"]
+              },
+              "width": { "type": "integer", "minimum": 100, "maximum": 1500 },
+              "height": { "type": "integer", "minimum": 100, "maximum": 1500 }
+            },
+            "required": ["chart"],
+            "additionalProperties": false
+          },
+          "method": "POST",
+          "path": "/chart",
+          "body": {
+            "version": "4",
+            "format": "png",
+            "devicePixelRatio": 1,
+            "chart": { "$input": "/chart" },
+            "width": { "$input": "/width", "default": 640 },
+            "height": { "$input": "/height", "default": 400 }
+          },
+          "response": { "type": "image", "mimeType": "image/png" },
+          "annotations": {
+            "readOnlyHint": true,
+            "idempotentHint": true,
+            "openWorldHint": true
+          }
+        }
+      ],
+      "probe": {
+        "tool": "render_chart",
+        "arguments": {
+          "chart": {
+            "type": "bar",
+            "data": {
+              "labels": ["A", "B"],
+              "datasets": [{ "label": "Example", "data": [3, 7] }]
+            }
+          },
+          "width": 320,
+          "height": 200
+        }
+      }
+    }
+  }
+}

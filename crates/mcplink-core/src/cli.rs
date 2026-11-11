@@ -333,9 +333,14 @@ fn schema() -> Value {
     json!({"schemaVersion":1,"version":env!("CARGO_PKG_VERSION"),"executable":std::env::current_exe().ok(),
         "output":{"success":{"ok":"result"},"failure":{"error":{"code":"error category","message":"safe diagnostic"},"result":"optional partial result"}},
         "exitCodes":{"0":"success","1":"operation failure, non-ready probe, upstream error or partial apply","2":"invalid CLI arguments or stdin"},
+        "httpApi":{"definitionField":"httpApi","transport":"http-api","baseUrlField":"url","authentication":"managed definition.headers; no MCP OAuth; shared connections only",
+            "tools":{"required":["name","description","inputSchema","method","path","response"],"optional":["pathParams","query","body","annotations"],"methods":["GET","POST","PUT","PATCH","DELETE","HEAD"]},
+            "mapping":{"input":{"$input":"JSON Pointer","default":"optional literal"},"missing":"omit object/query values; required path and array entries fail","queryArrays":"comma-separated","paths":"whole-segment {name}, percent-encoded, same origin"},
+            "response":{"type":["json","text","image","base64Image"],"pointer":"optional JSON Pointer for json/base64Image","mimeType":"optional expected image/png,image/jpeg,image/webp","maxBytes":8388608},
+            "probe":{"tool":"explicit operation name","arguments":"validated JSON object","semantics":"Only connections probe executes this sample. tools/list is local; successful discovery alone does not verify the upstream."}},
         "stdin":{"limitBytes":INPUT_LIMIT,"encoding":"UTF-8 JSON object; close stdin after one request",
             "connections save":{"required":["name","definition"],"optional":["id","title","accountLabel"],
-                "definition":{"command":"string (stdio)","args":"string[]","env":"object<string,string>","cwd":"string","url":"string (HTTP)","headers":"object<string,string>","enabled":"boolean (default true)","oauth":"boolean","clientId":"string or null","clientSecret":"string or null; masked on output","oauthScopes":"string[] (empty uses server suggestions)","oauthCallbackPort":"integer 1–65535 or null (automatic)","includeTools":"string[]","excludeTools":"string[]","includeSpecified":"boolean (true to restrict even when includeTools is empty)","timeout":"integer seconds","startupTimeout":"integer seconds","resourcesDisabled":"boolean","promptsDisabled":"boolean"},
+                "definition":{"command":"string (stdio)","args":"string[]","env":"object<string,string>","cwd":"string","url":"string (HTTP MCP or API base URL)","httpApi":"object or null; see top-level httpApi contract","headers":"object<string,string>","enabled":"boolean (default true)","oauth":"boolean","clientId":"string or null","clientSecret":"string or null; masked on output","oauthScopes":"string[] (empty uses server suggestions)","oauthCallbackPort":"integer 1–65535 or null (automatic)","includeTools":"string[]","excludeTools":"string[]","includeSpecified":"boolean (true to restrict even when includeTools is empty)","timeout":"integer seconds","startupTimeout":"integer seconds","resourcesDisabled":"boolean","promptsDisabled":"boolean"},
                 "semantics":"Edit the normalized definition from connections show. Masked credentials stay with their origin. Changing origin suspends access. Metadata edits preserve connection state."},
             "credentials update":{"required":["value"],"optional":["header (default Authorization)"],"semantics":"Value stored verbatim, no Bearer prefix added"},
             "gateway save":{"required":["connectionIds"],"optional":["id","editVersion","title","toolSelections"],"semantics":"Create an aggregate entry or replace its service selection. Updates require editVersion. toolSelections maps selected connection IDs to original tool names: null inherits the service policy, [] exposes no tools; omission retains the saved range. Entry ranges can only narrow service-wide policy. Empty service selection exposes nothing; authentication stays with member connections."},
@@ -695,7 +700,10 @@ async fn execute(command: Command, data: PathBuf) -> Result<Value, Failure> {
                 ))
             }
             "connections.probe" | "connections.tools"
-                if value["connection"]["status"] != "ready" =>
+                if value["connection"]["status"] != "ready"
+                    && !(method == "connections.tools"
+                        && value["connection"]["transport"] == "http-api"
+                        && value["verification"]["configuration"] == "valid") =>
             {
                 Some(("connection_unready", "连接尚未就绪，请核对认证及连接状态"))
             }

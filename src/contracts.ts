@@ -158,6 +158,7 @@ export type Definition = {
   env: Record<string, string>;
   cwd?: string;
   url?: string;
+  httpApi?: Json;
   headers: Record<string, string>;
   enabled: boolean;
   oauth: boolean;

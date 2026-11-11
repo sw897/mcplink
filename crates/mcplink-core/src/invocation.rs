@@ -263,7 +263,7 @@ pub(crate) fn validator(schema: &Value) -> Result<jsonschema::Validator> {
         .map_err(|_| ToolFailure::new(ToolErrorCode::InvalidToolSchema).into())
 }
 
-fn validate(schema: &Value, input: &Value) -> Result<()> {
+pub(crate) fn validate(schema: &Value, input: &Value) -> Result<()> {
     let validator = validator(schema)?;
     let issues: Vec<_> = validator
         .iter_errors(input)

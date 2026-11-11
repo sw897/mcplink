@@ -61,7 +61,7 @@ fn client_config() -> ClientConfig {
     config
 }
 
-fn http_endpoint(raw: &str, project: Option<&std::path::Path>) -> Result<String> {
+pub(crate) fn http_endpoint(raw: &str, project: Option<&std::path::Path>) -> Result<String> {
     let endpoint = config::resolve(raw, project)?;
     let url = url::Url::parse(&endpoint).context("MCP 地址无效")?;
     let loopback = match url.host() {
@@ -207,6 +207,9 @@ impl McpPool {
             return Ok(session.peer().clone());
         }
         let definition = engine.definition(&connection)?;
+        if definition.http_api.is_some() {
+            bail!("HTTP API 通过 Adapter 派发，不能建立 MCP 上游会话");
+        }
         if definition.oauth && connection.status == "needs_auth" {
             bail!("需要 OAuth 授权，请在账号页登录");
         }
@@ -452,6 +455,9 @@ impl McpPool {
         }
         let list = method == "tools/list";
         let invoking = method == "tools/call";
+        if definition.http_api.is_some() {
+            return crate::http_api::request(engine, &connection, &definition, &request).await;
+        }
         let peer = self.peer(engine.clone(), id).await?;
         if let Some(expected) = revision {
             let current = engine.store.connection(id)?;
@@ -650,6 +656,9 @@ pub async fn start_oauth(engine: Arc<Engine>, id: &str) -> Result<Value> {
     let _mutation = engine.mutation.lock().await;
     let mut connection = engine.store.connection(id)?;
     let mut definition = engine.definition(&connection)?;
+    if definition.http_api.is_some() {
+        bail!("HTTP API Adapter 使用托管请求头认证，不支持 MCP OAuth 登录");
+    }
     let endpoint = http_endpoint(
         definition
             .url

@@ -36,6 +36,9 @@ pub fn check_portable(def: &Definition) -> Result<()> {
 }
 
 pub fn entry(def: &Definition, agent: &Agent) -> Result<Value> {
+    if def.http_api.is_some() {
+        bail!("普通 HTTP API 需要 mcplink Adapter，请使用共享模式，不能导出为原生 MCP 地址");
+    }
     if !agent.supports_import() {
         bail!("此客户端使用原生配置预览，请选择千问办公或豆包工作导入")
     }

@@ -655,6 +655,7 @@ function App() {
                       ["all", "全部"],
                       ["stdio", "本地进程"],
                       ["http", "HTTP"],
+                      ["http-api", "HTTP API"],
                       ["shared", "共享账号"],
                     ].map(([id, label]) => (
                       <button
@@ -1002,7 +1003,7 @@ function App() {
                     (connection) =>
                       !connection.members &&
                       (connection.authKind !== "none" ||
-                        connection.transport === "http"),
+                        connection.transport.startsWith("http")),
                   )
                   .map((connection) => (
                     <article className="account-card" key={connection.id}>
@@ -1070,17 +1071,18 @@ function App() {
                           onClick={() =>
                             setDialog(
                               connection.detected &&
-                                connection.transport === "http"
+                                connection.transport.startsWith("http")
                                 ? {
                                     kind: "adopt",
                                     intent: "credential",
                                     connections: [connection],
                                   }
                                 : {
-                                    kind:
-                                      connection.transport === "http"
-                                        ? "credential"
-                                        : "editor",
+                                    kind: connection.transport.startsWith(
+                                      "http",
+                                    )
+                                      ? "credential"
+                                      : "editor",
                                     connection,
                                   },
                             )
@@ -1133,7 +1135,7 @@ function App() {
                   (connection) =>
                     !connection.members &&
                     (connection.authKind !== "none" ||
-                      connection.transport === "http"),
+                      connection.transport.startsWith("http")),
                 ) && (
                   <div className="empty">
                     <KeyRound size={30} />
@@ -1719,9 +1721,11 @@ function App() {
                 <dd>
                   {dialog.connection.members
                     ? "多服务聚合入口"
-                    : dialog.connection.transport === "http"
-                      ? "HTTP MCP"
-                      : "本地进程 · STDIO"}
+                    : dialog.connection.transport === "http-api"
+                      ? "HTTP API → MCP"
+                      : dialog.connection.transport === "http"
+                        ? "HTTP MCP"
+                        : "本地进程 · STDIO"}
                 </dd>
               </div>
               <div>

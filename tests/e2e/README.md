@@ -24,6 +24,7 @@ python3 tests/e2e/run.py --record artifacts/e2e/core-local
 | `agent_discovery.py`、`office_agents.py`、`pi_agent.py` | 安装门禁、来源与存储保护、原生配置及客户端确认、共享调用 |
 | `claude_sources.py`、`claude_writable.py`、`opencode_sources.py` | 客户端作用域、只读边界、格式及可写事务 |
 | `tool_calls.py`、`generated_cli.py`、`cli_workflow.py` | 工具发现、Schema 校验、错误与退出码、命令生成及重新绑定 |
+| `http_api.py` | HTTP API 的路径/query/JSON 映射、图片与 Base64 转换、发现与核验区分、聚合路由、CLI 与凭据生命周期 |
 | `aggregate_gateway.py` | 单入口多上游、重名路由、分页、资源与提示、服务选择、配置迁移和三路径共用 OAuth；可用 `--pi-package` 验证官方 Pi MCP 运行时 |
 | `entry_policy.py` | 同一账号的独立入口白名单、空与继承语义、全局上限和拒绝伪造调用 |
 | `catalog_refresh.py` | 工具/资源/提示变更通知、入口隔离、手动刷新、断开清理及官方 Pi 实时工具刷新（`--pi-package`） |
