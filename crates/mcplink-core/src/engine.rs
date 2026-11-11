@@ -62,6 +62,11 @@ impl Engine {
             shutdown: tokio::sync::watch::channel(false).0,
         });
         engine.reconcile()?;
+        for (id, _) in engine.store.pending_credential_cleanup()? {
+            if crate::lifecycle::cleanup_credentials(&engine, &id).is_err() {
+                eprintln!("mcplink: 连接 {id} 的旧凭据清理待重试");
+            }
+        }
         for (id, definition_ref) in engine.store.pending_credential_deletions()? {
             if engine
                 .finish_credential_deletion(&id, &definition_ref)
@@ -118,68 +123,6 @@ impl Engine {
             .get(&connection.definition_ref)?
             .context("连接数据未能从系统凭据库取得")?;
         serde_json::from_str(&raw).context("连接数据无法读取")
-    }
-
-    pub(crate) fn save_definition(
-        &self,
-        connection: &mut Connection,
-        definition: &Definition,
-    ) -> Result<()> {
-        self.persist_definition(connection, definition, None)
-    }
-
-    fn persist_definition(
-        &self,
-        connection: &mut Connection,
-        definition: &Definition,
-        binding: Option<&Binding>,
-    ) -> Result<()> {
-        let old = connection.definition_ref.clone();
-        let reset_oauth = if old.is_empty() {
-            false
-        } else {
-            let previous = self.definition(connection)?;
-            previous.url != definition.url
-                || previous.origin_project != definition.origin_project
-                || previous.client_id != definition.client_id
-                || previous.client_secret != definition.client_secret
-                || previous.oauth_scopes != definition.oauth_scopes
-                || previous.oauth_callback_port != definition.oauth_callback_port
-        };
-        if reset_oauth && definition.oauth && connection.active {
-            connection.status = "needs_auth".into();
-        }
-        if reset_oauth {
-            self.vault.delete(&format!("oauth/{}", connection.id))?;
-        }
-        let reference = format!("definition/{}", uuid::Uuid::new_v4());
-        self.vault
-            .set(&reference, &serde_json::to_string(definition)?)?;
-        connection.definition_ref = reference;
-        connection.revision += 1;
-        connection.transport = if connection.members.is_some() {
-            "aggregate"
-        } else {
-            definition.transport()
-        }
-        .into();
-        connection.endpoint = connection
-            .members
-            .as_ref()
-            .map(|members| format!("{} 项托管服务", members.len()))
-            .unwrap_or_else(|| definition.summary());
-        let write = match binding {
-            Some(binding) => self.store.save_bound_connection(connection, binding),
-            None => self.store.save_connection(connection),
-        };
-        if let Err(error) = write {
-            self.vault.delete(&connection.definition_ref)?;
-            return Err(error);
-        }
-        if !old.is_empty() {
-            self.vault.delete(&old)?;
-        }
-        Ok(())
     }
 
     pub fn snapshot(&self) -> Result<Value> {
@@ -394,7 +337,13 @@ impl Engine {
             fingerprint: entry.fingerprint,
             revision: 1,
         };
-        self.persist_definition(&mut connection, &entry.definition, Some(&binding))?;
+        crate::lifecycle::persist_definition(
+            self,
+            &mut connection,
+            &entry.definition,
+            Some(&binding),
+            false,
+        )?;
         Ok(connection.public_value())
     }
 
@@ -429,7 +378,7 @@ impl Engine {
         Ok((entry, version))
     }
 
-    fn save(&self, p: &Value) -> Result<(Value, bool)> {
+    async fn save(&self, p: &Value) -> Result<Value> {
         let name = required(p, "name")?;
         config::safe_name(name)?;
         let mut definition: Definition =
@@ -595,27 +544,11 @@ impl Engine {
             .into();
         let same_definition = previous.as_ref() == Some(&definition);
         if !connection.definition_ref.is_empty() && same_definition {
+            crate::lifecycle::retry_cleanup(self, &connection.id).await?;
             self.store.save_connection(&connection)?;
-            return Ok((connection.public_value(), false));
+            return Ok(connection.public_value());
         }
-        connection.auth_kind = if definition.oauth {
-            "oauth"
-        } else if !definition.headers.is_empty() {
-            "token"
-        } else {
-            "none"
-        }
-        .into();
         connection.active &= !changed_origin;
-        connection.status = if connection.active {
-            "configured"
-        } else {
-            "disconnected"
-        }
-        .into();
-        connection.checked_at = None;
-        connection.tool_count = None;
-        connection.last_error = None;
         let binding = draft.map(|(entry, _)| Binding {
             connection_id: connection.id.clone(),
             source_id: entry.source.id,
@@ -624,8 +557,15 @@ impl Engine {
             fingerprint: entry.fingerprint,
             revision: u64::from(same_definition),
         });
-        self.persist_definition(&mut connection, &definition, binding.as_ref())?;
-        Ok((connection.public_value(), true))
+        crate::lifecycle::replace_definition(
+            self,
+            &mut connection,
+            &definition,
+            binding.as_ref(),
+            crate::lifecycle::Transition::Definition,
+        )
+        .await?;
+        Ok(connection.public_value())
     }
 
     fn preview(&self, p: &Value) -> Result<Value> {
@@ -1326,6 +1266,7 @@ impl Engine {
     }
 
     fn finish_credential_deletion(&self, id: &str, definition_ref: &str) -> Result<()> {
+        crate::lifecycle::cleanup_credentials(self, id)?;
         self.vault.delete(&format!("oauth/{id}"))?;
         self.vault.delete(definition_ref)?;
         self.store.finish_credential_deletion(id)
@@ -1337,11 +1278,11 @@ impl Engine {
             None => self.begin_connection_deletion(id, keep_native)?,
         };
         if let Some(definition_ref) = &deletion.definition_ref {
-            self.pool.invalidate(id).await;
-            let refresh = self.pool.refresh_lock(id);
-            let _refresh = refresh.lock().await;
-            self.finish_credential_deletion(id, definition_ref)
-                .context("托管记录已删除，凭据清理待完成。恢复凭据库访问后可用原命令重试")?;
+            let edit = crate::lifecycle::CredentialEdit::begin(self, id).await;
+            let result = self
+                .finish_credential_deletion(id, definition_ref)
+                .context("托管记录已删除，凭据清理待完成。恢复凭据库访问后可用原命令重试");
+            edit.finish(result).await?;
         }
         Ok(if keep_native {
             json!({"deleted":true,"nativePreserved":true,"releasedBindings":deletion.released_bindings})
@@ -1492,51 +1433,27 @@ impl Engine {
                 }
                 config::check_source_import(&source, &entry.definition.original)?;
                 let mut connection = self.store.connection(&binding.connection_id)?;
-                let lock = self.pool.refresh_lock(&connection.id);
-                let guard = lock.lock().await;
                 let previous = self.definition(&connection)?;
                 if entry.definition.changed_origin(&previous) {
                     entry.definition.discard_inherited_auth(&previous);
                     entry.definition.clear_native_auth();
                     connection.active = false;
                 }
-                connection.status = if connection.active {
-                    "configured"
-                } else {
-                    "disconnected"
-                }
-                .into();
-                connection.auth_kind = if entry.definition.oauth {
-                    "oauth"
-                } else if entry.definition.headers.is_empty() {
-                    "none"
-                } else {
-                    "token"
-                }
-                .into();
-                connection.checked_at = None;
-                connection.tool_count = None;
-                connection.last_error = None;
                 binding.fingerprint = entry.fingerprint;
                 binding.revision = connection.revision + 1;
-                self.persist_definition(&mut connection, &entry.definition, Some(&binding))?;
-                drop(guard);
-                self.pool.invalidate(&connection.id).await;
+                crate::lifecycle::replace_definition(
+                    self,
+                    &mut connection,
+                    &entry.definition,
+                    Some(&binding),
+                    crate::lifecycle::Transition::Definition,
+                )
+                .await?;
                 Ok(connection.public_value())
             }
             "connections.save" => {
                 let _guard = self.mutation.lock().await;
-                let lock = p["id"].as_str().map(|id| self.pool.refresh_lock(id));
-                let guard = match &lock {
-                    Some(lock) => Some(lock.lock().await),
-                    None => None,
-                };
-                let (result, definition_changed) = self.save(&p)?;
-                drop(guard);
-                if definition_changed {
-                    self.pool.invalidate(required(&result, "id")?).await;
-                }
-                Ok(result)
+                self.save(&p).await
             }
             "connections.source_detail" => {
                 let (entry, version) = self.detected_draft(&p)?;
@@ -1616,24 +1533,20 @@ impl Engine {
                         original.remove(key);
                     }
                 }
-                self.pool.invalidate(&connection.id).await;
-                let refresh = self.pool.refresh_lock(&connection.id);
-                let _refresh = refresh.lock().await;
-                connection.auth_kind = "token".into();
-                connection.active = true;
-                connection.status = "configured".into();
-                connection.checked_at = None;
-                connection.tool_count = None;
-                connection.last_error = None;
-                self.save_definition(&mut connection, &definition)?;
-                self.vault.delete(&format!("oauth/{}", connection.id))?;
-                drop(_refresh);
-                self.pool.invalidate(&connection.id).await;
+                crate::lifecycle::replace_definition(
+                    self,
+                    &mut connection,
+                    &definition,
+                    None,
+                    crate::lifecycle::Transition::Token,
+                )
+                .await?;
                 Ok(connection.public_value())
             }
             "connections.reconnect" => {
                 let _guard = self.mutation.lock().await;
                 let mut connection = self.store.connection(required(&p, "id")?)?;
+                crate::lifecycle::retry_cleanup(self, &connection.id).await?;
                 if !connection.active {
                     connection.active = true;
                     connection.status = "configured".into();
@@ -1648,35 +1561,20 @@ impl Engine {
             "credentials.disconnect" => {
                 let _guard = self.mutation.lock().await;
                 let mut connection = self.store.connection(required(&p, "id")?)?;
-                self.pool.invalidate(&connection.id).await;
-                let refresh = self.pool.refresh_lock(&connection.id);
-                let _refresh = refresh.lock().await;
                 let mut definition = self.definition(&connection)?;
                 definition.headers.clear();
                 definition.clear_native_auth();
-                connection.active = false;
-                connection.last_error = None;
-                connection.status = "disconnected".into();
-                connection.checked_at = None;
-                connection.tool_count = None;
-                self.save_definition(&mut connection, &definition)?;
-                self.vault.delete(&format!("oauth/{}", connection.id))?;
+                crate::lifecycle::replace_definition(
+                    self,
+                    &mut connection,
+                    &definition,
+                    None,
+                    crate::lifecycle::Transition::Disconnect,
+                )
+                .await?;
                 Ok(connection.public_value())
             }
-            "oauth.start" => {
-                let id = required(&p, "id")?;
-                let result = crate::mcp::start_oauth(self.clone(), id).await;
-                if result.is_err() {
-                    let _guard = self.mutation.lock().await;
-                    let mut c = self.store.connection(id)?;
-                    if c.status == "authorizing" {
-                        c.status = "needs_auth".into();
-                        c.last_error = Some("未能开始 OAuth 授权，请检查服务认证设置".into());
-                        self.store.save_connection(&c)?;
-                    }
-                }
-                result
-            }
+            "oauth.start" => crate::mcp::start_oauth(self.clone(), required(&p, "id")?).await,
             "oauth.configure" => crate::mcp::configure_oauth(self.clone(), &p).await,
             "gateway.status" => Ok(
                 json!({"paused":self.paused.load(Ordering::SeqCst),"sessions":self.pool.count()}),

@@ -319,13 +319,22 @@ async fn describe(client: &Client, connection: &str, names: &[String]) -> Result
             bail!("生成期间连接已变化，请重新核对后生成");
         }
         revision = Some(current);
-        tools.push(contract(name.clone(), value).await?);
+        tools.push(
+            contract(
+                name.clone(),
+                value["tool"]["inputSchema"].clone(),
+                value["schemaHash"]
+                    .as_str()
+                    .context("工具摘要缺失")?
+                    .to_owned(),
+            )
+            .await?,
+        );
     }
     Ok(tools)
 }
 
-async fn contract(name: String, value: Value) -> Result<Tool> {
-    let schema = value["tool"]["inputSchema"].clone();
+async fn contract(name: String, schema: Value, schema_hash: String) -> Result<Tool> {
     tokio::task::spawn_blocking({
         let schema = schema.clone();
         move || invocation::validator(&schema).map(|_| ())
@@ -367,7 +376,7 @@ async fn contract(name: String, value: Value) -> Result<Tool> {
     };
     Ok(Tool {
         name,
-        schema_hash: value["schemaHash"].as_str().context("工具摘要缺失")?.into(),
+        schema_hash,
         stdin_only,
         parameters,
     })
@@ -426,17 +435,18 @@ pub async fn generate_managed(
         bail!("输出目录必须尚不存在，且父目录必须已存在");
     }
     let fingerprint = crate::gateway::catalog_version(&engine, connection)?;
-    let (_, available) = invocation::discover(engine.clone(), connection).await?;
+    let available = invocation::contracts(engine.clone(), connection).await?;
     let mut tools = Vec::new();
     for name in names {
         let tool = available
             .iter()
-            .find(|tool| tool["name"] == *name)
+            .find(|tool| tool.tool["name"] == *name)
             .context("工具不存在或未在此入口中启用")?;
         tools.push(
             contract(
                 name.clone(),
-                json!({"schemaHash":invocation::schema_hash(tool)?,"tool":tool}),
+                tool.tool["inputSchema"].clone(),
+                tool.schema_hash.clone(),
             )
             .await?,
         );
@@ -522,10 +532,9 @@ pub async fn check_managed(engine: Arc<Engine>, path: &Path) -> Result<Value> {
     let manifest = Manifest::read(path)?;
     let dataset_matches = engine.dataset_id().await? == manifest.dataset_id;
     let discovered = if dataset_matches {
-        invocation::discover(engine, &manifest.connection_id)
+        invocation::contracts(engine, &manifest.connection_id)
             .await
             .ok()
-            .map(|(_, tools)| tools)
     } else {
         None
     };
@@ -533,12 +542,13 @@ pub async fn check_managed(engine: Arc<Engine>, path: &Path) -> Result<Value> {
     for tool in &manifest.tools {
         let actual = discovered
             .as_ref()
-            .and_then(|tools| tools.iter().find(|actual| actual["name"] == tool.name));
+            .and_then(|tools| tools.iter().find(|actual| actual.tool["name"] == tool.name));
         let status = match actual {
             Some(actual) => {
                 let current = contract(
                     tool.name.clone(),
-                    json!({"tool":actual,"schemaHash":invocation::schema_hash(actual)?}),
+                    actual.tool["inputSchema"].clone(),
+                    actual.schema_hash.clone(),
                 )
                 .await;
                 if current.as_ref().is_ok_and(|current| current == tool) {

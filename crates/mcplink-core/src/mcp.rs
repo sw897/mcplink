@@ -1,6 +1,5 @@
-use crate::{Engine, config, model::Connection};
+use crate::{Engine, config, lifecycle::VaultCredentials};
 use anyhow::{Context, Result, bail};
-use async_trait::async_trait;
 use rmcp::{
     ClientHandler, RoleClient, ServiceExt,
     model::*,
@@ -8,9 +7,7 @@ use rmcp::{
     transport::{
         StreamableHttpClientTransport, TokioChildProcess,
         auth::{
-            AuthClient, AuthError, AuthorizationManager, AuthorizationRequest,
-            CredentialRefreshGuard, CredentialStore, OAuthClientConfig, OAuthState,
-            StoredCredentials,
+            AuthClient, AuthorizationManager, AuthorizationRequest, OAuthClientConfig, OAuthState,
         },
         streamable_http_client::StreamableHttpClientTransportConfig,
     },
@@ -247,6 +244,11 @@ impl McpPool {
                             engine.clone(),
                             &connection,
                         ));
+                        // initialize_from_store may clear/save credentials without
+                        // the SDK refresh guard. Coordinate this phase explicitly;
+                        // release before serve, whose proactive refresh takes R.
+                        let refresh = engine.pool.refresh_lock(&connection.id);
+                        let guard = refresh.lock().await;
                         if !manager
                             .initialize_from_store()
                             .await
@@ -254,6 +256,7 @@ impl McpPool {
                         {
                             bail!("需要 OAuth 授权，请在账号页登录");
                         }
+                        drop(guard);
                         let (stored_client, _) = manager
                             .get_credentials()
                             .await
@@ -402,7 +405,9 @@ impl McpPool {
         request: Value,
         revision: Option<u64>,
     ) -> Result<Value> {
-        if revision.is_some() && engine.paused.load(std::sync::atomic::Ordering::SeqCst) {
+        if std::ptr::eq(self, &engine.pool)
+            && engine.paused.load(std::sync::atomic::Ordering::SeqCst)
+        {
             bail!("共享后台已暂停，请在 mcplink 恢复");
         }
         let method = request.get("method").and_then(Value::as_str).unwrap_or("");
@@ -548,78 +553,6 @@ fn connection_error(error: impl std::error::Error + 'static) -> anyhow::Error {
     }
 }
 
-struct VaultCredentials {
-    engine: Arc<Engine>,
-    id: String,
-    revision: u64,
-    lock: Arc<AsyncMutex<()>>,
-}
-
-impl VaultCredentials {
-    fn new(engine: Arc<Engine>, connection: &Connection) -> Self {
-        let lock = engine.pool.refresh_lock(&connection.id);
-        Self {
-            engine,
-            id: connection.id.clone(),
-            revision: connection.revision,
-            lock,
-        }
-    }
-
-    fn check(&self) -> std::result::Result<(), AuthError> {
-        let current = self
-            .engine
-            .store
-            .connection(&self.id)
-            .map_err(|_| AuthError::CredentialStoreError("连接不存在".into()))?;
-        if !current.active || current.revision != self.revision {
-            return Err(AuthError::CredentialStoreError(
-                "授权会话已变化，请重新登录".into(),
-            ));
-        }
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl CredentialStore for VaultCredentials {
-    async fn load(&self) -> std::result::Result<Option<StoredCredentials>, AuthError> {
-        self.check()?;
-        self.engine
-            .vault
-            .get(&format!("oauth/{}", self.id))
-            .map_err(|_| AuthError::CredentialStoreError("系统凭据库不可用".into()))?
-            .map(|value| {
-                serde_json::from_str(&value)
-                    .map_err(|_| AuthError::CredentialStoreError("授权数据格式有误".into()))
-            })
-            .transpose()
-    }
-    async fn save(&self, value: StoredCredentials) -> std::result::Result<(), AuthError> {
-        self.check()?;
-        let value = serde_json::to_string(&value)
-            .map_err(|_| AuthError::CredentialStoreError("授权数据无法编码".into()))?;
-        self.engine
-            .vault
-            .set(&format!("oauth/{}", self.id), &value)
-            .map_err(|_| AuthError::CredentialStoreError("系统凭据库不可用".into()))
-    }
-    async fn clear(&self) -> std::result::Result<(), AuthError> {
-        self.check()?;
-        self.engine
-            .vault
-            .delete(&format!("oauth/{}", self.id))
-            .map_err(|_| AuthError::CredentialStoreError("系统凭据库不可用".into()))
-    }
-    async fn acquire_refresh_guard(
-        &self,
-    ) -> std::result::Result<Option<CredentialRefreshGuard>, AuthError> {
-        Ok(Some(CredentialRefreshGuard::new(
-            self.lock.clone().lock_owned().await,
-        )))
-    }
-}
-
 pub async fn configure_oauth(engine: Arc<Engine>, params: &Value) -> Result<Value> {
     let _mutation = engine.mutation.lock().await;
     let id = params["id"].as_str().context("缺少连接 ID")?;
@@ -695,9 +628,18 @@ pub async fn configure_oauth(engine: Arc<Engine>, params: &Value) -> Result<Valu
     }
     config::validate(&definition)?;
     let changed = previous != serde_json::to_value(&definition)?;
+    if !changed {
+        crate::lifecycle::retry_cleanup(&engine, id).await?;
+    }
     if changed {
-        engine.save_definition(&mut connection, &definition)?;
-        engine.pool.invalidate(id).await;
+        crate::lifecycle::replace_definition(
+            &engine,
+            &mut connection,
+            &definition,
+            None,
+            crate::lifecycle::Transition::Definition,
+        )
+        .await?;
     }
     Ok(
         json!({"status":if changed {"configured"}else{"unchanged"},"connection":connection.public_value(),"definition":connection.editable_definition(&definition)}),
@@ -716,8 +658,6 @@ pub async fn start_oauth(engine: Arc<Engine>, id: &str) -> Result<Value> {
         definition.origin_project.as_deref(),
     )?;
     config::validate(&definition)?;
-    let refresh = engine.pool.refresh_lock(id);
-    let _refresh = refresh.lock().await;
     let listener = TcpListener::bind((
         std::net::Ipv4Addr::LOCALHOST,
         definition.oauth_callback_port.unwrap_or(0),
@@ -779,12 +719,14 @@ pub async fn start_oauth(engine: Arc<Engine>, id: &str) -> Result<Value> {
     definition
         .headers
         .retain(|key, _| !key.eq_ignore_ascii_case("authorization"));
-    connection.active = true;
-    connection.auth_kind = "oauth".into();
-    connection.status = "authorizing".into();
-    engine.save_definition(&mut connection, &definition)?;
-    engine.vault.delete(&format!("oauth/{id}"))?;
-    engine.pool.invalidate(id).await;
+    crate::lifecycle::replace_definition(
+        &engine,
+        &mut connection,
+        &definition,
+        None,
+        crate::lifecycle::Transition::Authorize,
+    )
+    .await?;
     if let OAuthState::Session(session) = &mut state {
         session
             .auth_manager
@@ -815,30 +757,35 @@ pub async fn start_oauth(engine: Arc<Engine>, id: &str) -> Result<Value> {
                         );
                     }
                     let _mutation = engine.mutation.lock().await;
-                    let refresh = engine.pool.refresh_lock(&id);
-                    let _refresh = refresh.lock().await;
+                    let edit = crate::lifecycle::CredentialEdit::begin(&engine, &id).await;
                     if !engine
                         .store
                         .connection(&id)
                         .is_ok_and(|c| c.active && c.revision == revision)
                     {
+                        let _ = edit.finish(Ok(())).await;
                         return (
                             axum::http::StatusCode::BAD_REQUEST,
                             axum::response::Html("授权会话已失效，请重新登录"),
                         );
                     }
                     let callback = format!("http://{host}{uri}");
-                    let result = state.lock().await.handle_callback_url(&callback).await;
-                    if result.is_err() {
+                    let exchange = state.lock().await.handle_callback_url(&callback).await;
+                    if exchange.is_err() {
+                        let _ = edit.finish(Ok(())).await;
                         return (
                             axum::http::StatusCode::BAD_REQUEST,
                             axum::response::Html("授权校验未通过，请返回 mcplink 重新登录"),
                         );
                     }
-                    if let Ok(mut connection) = engine.store.connection(&id) {
-                        connection.status = "configured".into();
-                        connection.last_error = None;
-                        let _ = engine.store.save_connection(&connection);
+                    let result = crate::lifecycle::complete_oauth(&engine, &id, revision);
+                    if edit.finish(result).await.is_err() {
+                        return (
+                            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                            axum::response::Html(
+                                "授权凭据已接收，但连接状态保存失败；请返回 mcplink 检查连接。",
+                            ),
+                        );
                     }
                     let _ = done.send(()).await;
                     (

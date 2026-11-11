@@ -18,6 +18,7 @@ TOOLS = [
     {"name": "read_document", "description": "Read one synthetic document", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "delay_ms": {"type": "integer"}}, "required": ["id"]}, "annotations": {"readOnlyHint": True}},
 ]
 DISCOVERY_SERIAL = 0
+ROUTE_SERIAL = 0
 
 CALL_TOOLS = [
     {"name":"inspect_payload","description":"Echo a typed synthetic payload","inputSchema":{
@@ -45,6 +46,24 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
 def handle(request, endpoint="", origin=""):
     method = request.get("method")
     params = request.get("params") or {}
+    families = {"tools/list":("tools","name"), "resources/list":("resources","uri"),
+                "resources/templates/list":("resourceTemplates","uriTemplate"), "prompts/list":("prompts","name")}
+    if endpoint.startswith("/mcp-catalog-") and method in families:
+        field, key = families[method]
+        row = {key:"fixture://item" if key != "name" else "item", "name":"item"}
+        if field == "tools": row["inputSchema"] = {"type":"object"}
+        mode = endpoint.removeprefix("/mcp-catalog-")
+        if mode == "cycle": return {field:[], "nextCursor":"repeat"}
+        if mode == "duplicate": return {field:[row,row]}
+        if mode == "empty": return {field:[row | {key:""}]}
+        if mode == "cursor": return {field:[], "nextCursor":42}
+        if mode in {"bounds", "pages", "items"}:
+            page = int(params.get("cursor", "0"))
+            count = 101 if mode == "items" and page == 99 else 100
+            rows = [row | {key:str(page*100+i)} for i in range(count)]
+            result = {field:rows}
+            if page < (100 if mode == "pages" else 99): result["nextCursor"] = str(page+1)
+            return result
     if method == "initialize":
         return {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}, "resources": {}, "prompts": {}}, "serverInfo": {"name": "mcplink-fixture", "version": "1.0.0"}}
     if method == "server/discover":
@@ -55,6 +74,11 @@ def handle(request, endpoint="", origin=""):
     if method == "ping":
         return {}
     if method == "tools/list":
+        if endpoint == "/mcp-route-schema":
+            global ROUTE_SERIAL
+            ROUTE_SERIAL += 1
+            return {"tools":[TOOLS[1] | {"inputSchema":TOOLS[1]["inputSchema"] | {
+                "properties":TOOLS[1]["inputSchema"]["properties"] | {"version_"+str(ROUTE_SERIAL):{"type":"boolean"}}}}]}
         if endpoint == "/mcp-unstable":
             global DISCOVERY_SERIAL
             DISCOVERY_SERIAL += 1
@@ -118,6 +142,16 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
 
+    def gate(self, name):
+        # Opt-in deterministic barriers for synthetic concurrency scenarios.
+        with self.server.gate_lock:
+            state = self.server.gates.get(name)
+            if not state or not state["armed"]: return
+            state["armed"] = False
+            state["arrivals"] += 1
+            event = state["event"]
+        event.wait(20)
+
     def send(self, status, body, headers=None):
         data = json.dumps(body, ensure_ascii=False).encode()
         self.send_response(status)
@@ -132,6 +166,7 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path)
         origin = f"http://127.0.0.1:{self.server.server_port}"
         if path.path.startswith("/.well-known/oauth-protected-resource"):
+            self.gate("metadata")
             return self.send(200, {"resource": origin + "/mcp", "authorization_servers": [origin], "scopes_supported": ["documents:read","documents:write"] if self.server.registered else ["documents:read"]})
         if path.path.startswith("/.well-known/oauth-authorization-server") or path.path.startswith("/.well-known/openid-configuration"):
             metadata={"issuer": origin, "authorization_endpoint": origin + "/authorize", "token_endpoint": origin + "/token", "response_types_supported": ["code"], "grant_types_supported": ["authorization_code", "refresh_token"], "token_endpoint_auth_methods_supported": ["client_secret_"+self.server.token_auth] if self.server.registered else ["none"], "code_challenge_methods_supported": ["S256"], "scopes_supported": ["documents:read", "offline_access"], "authorization_response_iss_parameter_supported": True}
@@ -153,7 +188,9 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         if path.path == "/stats":
-            return self.send(200, {"refreshes": self.server.refreshes, "calls": self.server.calls,"lists":self.server.lists,"schemaReads":self.server.schema_reads,"sessionVersions":list(self.server.sessions.values()),"registrations":self.server.registrations,"tokenAuthChecks":self.server.token_auth_checks,"requestedScopes":self.server.requested_scopes})
+            with self.server.gate_lock:
+                gates = {name:state["arrivals"] for name,state in self.server.gates.items()}
+            return self.send(200, {"refreshes": self.server.refreshes, "calls": self.server.calls,"lists":self.server.lists,"schemaReads":self.server.schema_reads,"sessionVersions":list(self.server.sessions.values()),"registrations":self.server.registrations,"tokenAuthChecks":self.server.token_auth_checks,"requestedScopes":self.server.requested_scopes,"gates":gates,"forwardedMcplinkMeta":self.server.forwarded_mcplink_meta})
         if path.path == "/schema-external":
             self.server.schema_reads += 1
             return self.send(200,{"type":"string"})
@@ -164,6 +201,16 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length)
         path = urlparse(self.path).path
         origin = f"http://127.0.0.1:{self.server.server_port}"
+        if path == "/control":
+            body = json.loads(raw)
+            name = body["gate"]
+            with self.server.gate_lock:
+                state = self.server.gates.setdefault(name, {"armed":False,"arrivals":0,"event":threading.Event()})
+                if body["action"] == "arm":
+                    state["event"] = threading.Event()
+                    state["armed"] = True
+                else: state["event"].set()
+            return self.send(200,{"ok":True})
         if path == "/register":
             self.server.registrations+=1
             if self.server.registered: return self.send(400,{"error":"registration_not_supported"})
@@ -171,6 +218,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(201, {"client_id": "mcplink-synthetic-client", "redirect_uris": body["redirect_uris"], "token_endpoint_auth_method": "none", "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"]})
         if path == "/token":
             body = {key: values[0] for key, values in parse_qs(raw.decode()).items()}
+            self.gate(body.get("grant_type"))
             if self.server.registered:
                 client,secret=body.get("client_id"),body.get("client_secret")
                 basic=self.headers.get("Authorization","").startswith("Basic ")
@@ -205,6 +253,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(401, {"jsonrpc": "2.0", "id": None, "error": {"code": -32001, "message": "Synthetic authentication required"}}, challenge)
         try:
             request = json.loads(raw)
+            if request.get("method") == "initialize": self.gate("initialize")
             if path == "/mcp-session":
                 if request.get("method")=="initialize":
                     # Reproduce the observed remote behavior: the session is bound
@@ -223,6 +272,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(202, {})
             if request.get("method") == "tools/call":
                 self.server.calls += 1
+                if "mcplink" in request.get("params",{}).get("_meta",{}): self.server.forwarded_mcplink_meta += 1
                 if path == "/mcp-drop":
                     self.close_connection = True
                     self.connection.close()
@@ -262,7 +312,9 @@ def main():
         faulthandler.cancel_dump_traceback_later()
     server.auth, server.codes, server.refreshes, server.calls = args.auth, {}, 0, 0
     server.lists, server.schema_reads = 0, 0
+    server.forwarded_mcplink_meta = 0
     server.sessions = {}
+    server.gates, server.gate_lock = {}, threading.Lock()
     server.registered, server.token_auth = args.registered_client, args.token_auth
     server.registrations, server.token_auth_checks, server.requested_scopes = 0, 0, []
     server.access_token, server.refresh_token = "unissued-synthetic-access", "unissued-synthetic-refresh"

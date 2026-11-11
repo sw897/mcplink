@@ -1,4 +1,5 @@
 mod agent_config;
+mod catalog;
 mod client_import;
 pub mod config;
 mod discovery;
@@ -8,6 +9,7 @@ pub mod gateway;
 pub mod generated;
 pub mod invocation;
 mod json_config;
+mod lifecycle;
 pub mod mcp;
 pub mod model;
 mod opencode;

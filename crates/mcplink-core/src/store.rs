@@ -22,7 +22,7 @@ impl Store {
         let db = Sqlite::open(data.join("mcplink.sqlite3")).context("无法打开本地数据库")?;
         db.busy_timeout(std::time::Duration::from_secs(5))?;
         let schema: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        anyhow::ensure!(schema <= 3, "数据库来自较新版本，请升级 mcplink");
+        anyhow::ensure!(schema <= 4, "数据库来自较新版本，请升级 mcplink");
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
             CREATE TABLE IF NOT EXISTS connections(id TEXT PRIMARY KEY, document TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS bindings(connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE, source_id TEXT NOT NULL, name TEXT NOT NULL, document TEXT NOT NULL, PRIMARY KEY(source_id,name));
@@ -35,7 +35,8 @@ impl Store {
             CREATE TABLE IF NOT EXISTS operation_details(id TEXT PRIMARY KEY REFERENCES operations(id),kind TEXT NOT NULL,restore_effect TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS connection_deletions(connection_id TEXT PRIMARY KEY, definition_ref TEXT, released_bindings INTEGER NOT NULL);
             CREATE INDEX IF NOT EXISTS connection_deletions_pending ON connection_deletions(connection_id) WHERE definition_ref IS NOT NULL;
-            PRAGMA user_version=3;")?;
+            CREATE TABLE IF NOT EXISTS credential_cleanup(connection_id TEXT NOT NULL, reference TEXT PRIMARY KEY);
+            PRAGMA user_version=4;")?;
         Ok(Self { db: Mutex::new(db) })
     }
 
@@ -104,14 +105,24 @@ impl Store {
     }
 
     pub fn save_bound_connection(&self, connection: &Connection, binding: &Binding) -> Result<()> {
+        self.commit_definition(connection, Some(binding), &[])
+    }
+
+    pub(crate) fn commit_definition(
+        &self,
+        connection: &Connection,
+        binding: Option<&Binding>,
+        cleanup: &[String],
+    ) -> Result<()> {
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
-        mark_ownership(&tx, &binding.source_id, &binding.name)?;
         tx.execute(
             "INSERT INTO connections(id, document) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET document=excluded.document",
             params![connection.id, serde_json::to_string(connection)?],
         )?;
-        let updated = tx.execute(
+        if let Some(binding) = binding {
+            mark_ownership(&tx, &binding.source_id, &binding.name)?;
+            let updated = tx.execute(
             "INSERT INTO bindings(connection_id,source_id,name,document) VALUES(?1,?2,?3,?4)
              ON CONFLICT(source_id,name) DO UPDATE SET document=excluded.document WHERE bindings.connection_id=excluded.connection_id",
             params![
@@ -121,8 +132,45 @@ impl Store {
                 serde_json::to_string(binding)?
             ],
         )?;
-        anyhow::ensure!(updated == 1, "绑定已由其他连接接管");
+            anyhow::ensure!(updated == 1, "绑定已由其他连接接管");
+        }
+        for reference in cleanup {
+            tx.execute(
+                "INSERT OR IGNORE INTO credential_cleanup(connection_id, reference) VALUES(?1,?2)",
+                params![connection.id, reference],
+            )?;
+        }
+        // The new definition is now referenced. Its staging cleanup must be
+        // removed atomically with this reference becoming current.
+        tx.execute(
+            "DELETE FROM credential_cleanup WHERE reference=?1",
+            [&connection.definition_ref],
+        )?;
         tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn pending_credential_cleanup(&self) -> Result<Vec<(String, String)>> {
+        let db = self.db.lock().unwrap();
+        let mut statement =
+            db.prepare("SELECT connection_id, reference FROM credential_cleanup ORDER BY rowid")?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    pub(crate) fn stage_definition(&self, id: &str, reference: &str) -> Result<()> {
+        self.db.lock().unwrap().execute(
+            "INSERT INTO credential_cleanup(connection_id, reference) VALUES(?1,?2)",
+            params![id, reference],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn finish_credential_cleanup(&self, reference: &str) -> Result<()> {
+        self.db.lock().unwrap().execute(
+            "DELETE FROM credential_cleanup WHERE reference=?1",
+            [reference],
+        )?;
         Ok(())
     }
 

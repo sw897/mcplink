@@ -140,6 +140,9 @@ jobs:
       - name: Isolated generated CLI acceptance
         timeout-minutes: 5
         run: python -u tests/e2e/generated_cli.py --record artifacts/e2e/ci-generated
+      - name: Catalog and authentication boundary acceptance
+        timeout-minutes: 5
+        run: python -u tests/e2e/architecture_boundaries.py --record artifacts/e2e/ci-boundaries
       - name: Aggregate routing and shared authentication acceptance
         timeout-minutes: 5
         run: python -u tests/e2e/aggregate_gateway.py --record artifacts/e2e/ci-aggregate --pi-package artifacts/e2e/native-pi/node_modules/@earendil-works/pi-coding-agent
@@ -213,6 +216,7 @@ jobs:
             artifacts/e2e/ci-pi/report.json
             artifacts/e2e/ci-tools/report.json
             artifacts/e2e/ci-generated/report.json
+            artifacts/e2e/ci-boundaries/report.json
             artifacts/e2e/ci-aggregate/report.json
             artifacts/e2e/ci-aggregate/native-pi.json
             artifacts/e2e/ci-catalog-pagination/report.json

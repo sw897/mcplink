@@ -3,7 +3,7 @@ use crate::{Engine, model::digest};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{collections::HashSet, sync::Arc};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -79,66 +79,100 @@ pub(crate) async fn discover_with_pool(
     Ok((revision, tools))
 }
 
+pub(crate) struct ToolContract {
+    pub connection_id: String,
+    pub entry_revision: u64,
+    pub tool: Value,
+    pub schema_hash: String,
+    route: Option<crate::gateway::ToolRoute>,
+}
+
+impl ToolContract {
+    fn new(
+        id: &str,
+        revision: u64,
+        mut tool: Value,
+        route: Option<crate::gateway::ToolRoute>,
+    ) -> Result<Self> {
+        let schema_hash = schema_hash(&tool)?;
+        if let Some(route) = &route {
+            route.public_metadata(&mut tool);
+        }
+        Ok(Self {
+            connection_id: id.to_owned(),
+            entry_revision: revision,
+            tool,
+            schema_hash,
+            route,
+        })
+    }
+
+    fn public_value(&self) -> Value {
+        json!({"connectionId":self.connection_id,"connectionRevision":self.entry_revision,
+            "schemaHash":self.schema_hash,"tool":self.tool,
+            "validation":{"drafts":["draft-04","draft-06","draft-07","2019-09","2020-12"],
+            "defaultDraft":"2020-12","externalReferences":false,"formatAssertions":false,"customVocabularies":false}})
+    }
+}
+
+pub(crate) async fn contracts(engine: Arc<Engine>, id: &str) -> Result<Vec<ToolContract>> {
+    let (_, tools, _) = contracts_with_pool(engine.clone(), id, &engine.pool).await?;
+    Ok(tools)
+}
+
+async fn contracts_with_pool(
+    engine: Arc<Engine>,
+    id: &str,
+    pool: &crate::mcp::McpPool,
+) -> Result<(u64, Vec<ToolContract>, Vec<Value>)> {
+    let connection = engine.store.connection(id)?;
+    if connection.members.is_some() {
+        let mut catalog =
+            crate::gateway::collect_entry(engine, &connection, crate::catalog::CatalogKind::Tools)
+                .await?;
+        let tools = catalog
+            .rows
+            .into_iter()
+            .map(|tool| {
+                let route = tool["name"]
+                    .as_str()
+                    .and_then(|name| catalog.routes.remove(name))
+                    .context("聚合工具路由缺失")?;
+                ToolContract::new(id, connection.revision, tool, Some(route))
+            })
+            .collect::<Result<_>>()?;
+        return Ok((connection.revision, tools, catalog.errors));
+    }
+    let catalog = crate::catalog::collect(engine, pool, id, crate::catalog::CatalogKind::Tools)
+        .await
+        .map_err(
+            |error| match error.downcast_ref::<crate::catalog::CatalogFailure>() {
+                Some(failure) => anyhow::Error::new(ToolFailure::new(match failure {
+                    crate::catalog::CatalogFailure::Changed => ToolErrorCode::ConnectionChanged,
+                    crate::catalog::CatalogFailure::Invalid => ToolErrorCode::ToolDiscoveryFailed,
+                })),
+                None => error,
+            },
+        )?;
+    let tools = catalog
+        .items
+        .into_iter()
+        .map(|tool| ToolContract::new(id, catalog.revision, tool, None))
+        .collect::<Result<_>>()?;
+    Ok((catalog.revision, tools, catalog.diagnostics))
+}
+
 pub(crate) async fn discover_report(
     engine: Arc<Engine>,
     id: &str,
     pool: &crate::mcp::McpPool,
 ) -> Result<(u64, Vec<Value>, Vec<Value>)> {
-    let connection = engine.store.connection(id)?;
-    let revision = connection.revision;
-    let mut tools = Vec::new();
-    let mut names = HashSet::new();
-    let mut cursors = HashSet::new();
-    let mut params = json!({});
-    let mut errors = Vec::new();
-    for _ in 0..100 {
-        let page = pool
-            .request(
-                engine.clone(),
-                id,
-                json!({"method":"tools/list","params":params}),
-            )
-            .await?;
-        if engine.store.connection(id)?.revision != revision {
-            bail!(ToolFailure::new(ToolErrorCode::ConnectionChanged));
-        }
-        if connection.members.is_some()
-            && let Some(upstreams) = page
-                .pointer("/_meta/mcplink/upstreamErrors")
-                .and_then(Value::as_array)
-        {
-            for upstream in upstreams {
-                if !errors
-                    .iter()
-                    .any(|error: &Value| error["connectionId"] == upstream["connectionId"])
-                {
-                    errors.push(upstream.clone());
-                }
-            }
-        }
-        let rows = page
-            .get("tools")
-            .and_then(Value::as_array)
-            .context(ToolFailure::new(ToolErrorCode::ToolDiscoveryFailed))?;
-        for tool in rows {
-            let name = tool
-                .get("name")
-                .and_then(Value::as_str)
-                .context(ToolFailure::new(ToolErrorCode::ToolDiscoveryFailed))?;
-            if name.is_empty() || !names.insert(name.to_owned()) || tools.len() >= 10_000 {
-                bail!(ToolFailure::new(ToolErrorCode::ToolDiscoveryFailed));
-            }
-            tools.push(tool.clone());
-        }
-        match page.get("nextCursor") {
-            None | Some(Value::Null) => return Ok((revision, tools, errors)),
-            Some(Value::String(cursor)) if cursors.insert(cursor.clone()) => {
-                params = json!({"cursor":cursor});
-            }
-            _ => bail!(ToolFailure::new(ToolErrorCode::ToolDiscoveryFailed)),
-        }
-    }
-    bail!(ToolFailure::new(ToolErrorCode::ToolDiscoveryFailed))
+    let (revision, tools, diagnostics) = contracts_with_pool(engine, id, pool).await?;
+    Ok((
+        revision,
+        tools.into_iter().map(|contract| contract.tool).collect(),
+        diagnostics,
+    ))
 }
 
 pub fn schema_hash(tool: &Value) -> Result<String> {
@@ -162,17 +196,16 @@ pub fn schema_hash(tool: &Value) -> Result<String> {
     ))?))
 }
 
-pub async fn describe(engine: Arc<Engine>, id: &str, name: &str) -> Result<Value> {
-    let (revision, tools) = discover(engine, id).await?;
-    let tool = tools
+async fn find_contract(engine: Arc<Engine>, id: &str, name: &str) -> Result<ToolContract> {
+    contracts(engine, id)
+        .await?
         .into_iter()
-        .find(|tool| tool["name"] == name)
-        .context(ToolFailure::new(ToolErrorCode::ToolNotFound))?;
-    Ok(
-        json!({"connectionId":id,"connectionRevision":revision,"schemaHash":schema_hash(&tool)?,"tool":tool,
-        "validation":{"drafts":["draft-04","draft-06","draft-07","2019-09","2020-12"],
-        "defaultDraft":"2020-12","externalReferences":false,"formatAssertions":false,"customVocabularies":false}}),
-    )
+        .find(|contract| contract.tool["name"] == name)
+        .context(ToolFailure::new(ToolErrorCode::ToolNotFound))
+}
+
+pub async fn describe(engine: Arc<Engine>, id: &str, name: &str) -> Result<Value> {
+    Ok(find_contract(engine, id, name).await?.public_value())
 }
 
 pub async fn call(
@@ -185,39 +218,33 @@ pub async fn call(
     if !arguments.is_object() {
         bail!(ToolFailure::new(ToolErrorCode::InvalidToolArguments));
     }
-    let descriptor = describe(engine.clone(), id, name).await?;
-    let hash = descriptor["schemaHash"]
-        .as_str()
-        .context("工具 Schema 摘要缺失")?;
-    if expected_hash.is_some_and(|expected| expected != hash) {
+    let contract = find_contract(engine.clone(), id, name).await?;
+    if expected_hash.is_some_and(|expected| expected != contract.schema_hash) {
         bail!(ToolFailure::new(ToolErrorCode::ToolSchemaChanged));
     }
-    let schema = descriptor["tool"]["inputSchema"].clone();
+    let schema = contract.tool["inputSchema"].clone();
     let input = arguments.clone();
     tokio::task::spawn_blocking(move || validate(&schema, &input))
         .await
         .map_err(|_| ToolFailure::new(ToolErrorCode::InvalidToolSchema))??;
-    let revision = descriptor["connectionRevision"]
-        .as_u64()
-        .context("连接修订缺失")?;
-    if engine.store.connection(id)?.revision != revision {
+    let current = engine.store.connection(id)?;
+    if current.revision != contract.entry_revision {
         bail!(ToolFailure::new(ToolErrorCode::ConnectionChanged));
     }
-    let mut params = json!({"name":name,"arguments":arguments});
-    if engine.store.connection(id)?.members.is_some()
-        && let Some(upstream_revision) = descriptor.pointer("/tool/_meta/mcplink/upstreamRevision")
-    {
-        params["_meta"] = json!({"mcplink":{"expectedUpstreamRevision":upstream_revision,"expectedSchemaHash":hash}});
-    }
-    let output = engine
-        .pool
-        .request_at_revision(
-            engine.clone(),
-            id,
-            json!({"method":"tools/call","params":params}),
-            Some(revision),
-        )
-        .await?;
+    let hash = contract.schema_hash;
+    let output = if let Some(route) = contract.route {
+        crate::gateway::call_tool(engine.clone(), &current, route, hash.clone(), arguments).await?
+    } else {
+        engine
+            .pool
+            .request_at_revision(
+                engine.clone(),
+                id,
+                json!({"method":"tools/call","params":{"name":name,"arguments":arguments}}),
+                Some(contract.entry_revision),
+            )
+            .await?
+    };
     Ok(json!({"connectionId":id,"tool":name,"schemaHash":hash,"output":output}))
 }
 

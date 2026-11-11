@@ -20,7 +20,15 @@ impl Bridge {
         &self,
         method: &str,
         params: P,
+        meta: RequestMetaObject,
     ) -> Result<R, McpError> {
+        let mut params = serde_json::to_value(params)
+            .map_err(|_| McpError::internal_error("无法编码 MCP 请求参数", None))?;
+        // rmcp moves metadata from params into the context for every handler.
+        if !meta.is_empty() {
+            params["_meta"] = serde_json::to_value(meta)
+                .map_err(|_| McpError::internal_error("无法编码 MCP 请求元数据", None))?;
+        }
         let client = Client::connect(self.client.data.clone())
             .await
             .map_err(|error| McpError::internal_error(error.to_string(), None))?;
@@ -47,56 +55,63 @@ impl ServerHandler for Bridge {
     async fn list_tools(
         &self,
         p: Option<PaginatedRequestParams>,
-        _: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        self.forward("tools/list", p.unwrap_or_default()).await
+        self.forward("tools/list", p.unwrap_or_default(), context.meta)
+            .await
     }
     async fn call_tool(
         &self,
         p: CallToolRequestParams,
-        _: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
-        self.forward::<_, CallToolResult>("tools/call", p)
+        self.forward::<_, CallToolResult>("tools/call", p, context.meta)
             .await
             .map(Into::into)
     }
     async fn list_resources(
         &self,
         p: Option<PaginatedRequestParams>,
-        _: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
-        self.forward("resources/list", p.unwrap_or_default()).await
+        self.forward("resources/list", p.unwrap_or_default(), context.meta)
+            .await
     }
     async fn list_resource_templates(
         &self,
         p: Option<PaginatedRequestParams>,
-        _: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListResourceTemplatesResult, McpError> {
-        self.forward("resources/templates/list", p.unwrap_or_default())
-            .await
+        self.forward(
+            "resources/templates/list",
+            p.unwrap_or_default(),
+            context.meta,
+        )
+        .await
     }
     async fn read_resource(
         &self,
         p: ReadResourceRequestParams,
-        _: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, McpError> {
-        self.forward::<_, ReadResourceResult>("resources/read", p)
+        self.forward::<_, ReadResourceResult>("resources/read", p, context.meta)
             .await
             .map(Into::into)
     }
     async fn list_prompts(
         &self,
         p: Option<PaginatedRequestParams>,
-        _: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListPromptsResult, McpError> {
-        self.forward("prompts/list", p.unwrap_or_default()).await
+        self.forward("prompts/list", p.unwrap_or_default(), context.meta)
+            .await
     }
     async fn get_prompt(
         &self,
         p: GetPromptRequestParams,
-        _: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<GetPromptResponse, McpError> {
-        self.forward::<_, GetPromptResult>("prompts/get", p)
+        self.forward::<_, GetPromptResult>("prompts/get", p, context.meta)
             .await
             .map(Into::into)
     }

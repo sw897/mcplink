@@ -63,7 +63,7 @@ async fn health(State(state): State<ServerState>, headers: HeaderMap) -> impl In
     (
         StatusCode::OK,
         Json(
-            json!({"application":"mcplink","instance":state.info.instance,"version":env!("CARGO_PKG_VERSION"),"managementApi":19}),
+            json!({"application":"mcplink","instance":state.info.instance,"version":env!("CARGO_PKG_VERSION"),"managementApi":20}),
         ),
     )
 }
@@ -403,6 +403,22 @@ impl Client {
             )
         {
             bail!("旧后台不支持入口工具范围与清单刷新，请退出并重启后台");
+        }
+        if self.management_api < 20
+            && matches!(
+                method,
+                "connections.save"
+                    | "connections.import"
+                    | "connections.adopt_source"
+                    | "connections.reconnect"
+                    | "credentials.update"
+                    | "credentials.disconnect"
+                    | "oauth.configure"
+                    | "oauth.start"
+                    | "snapshot"
+            )
+        {
+            bail!("旧后台不支持认证持久化与清理恢复，请退出并重启后台");
         }
         if self.management_api < 18
             && matches!(method, "gateway.list" | "gateway.save" | "snapshot")
