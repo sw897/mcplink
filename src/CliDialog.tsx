@@ -22,6 +22,14 @@ type Manifest = {
   tools: { name: string }[];
 };
 
+const accountLabel = (connection: Connection) =>
+  `${connection.title} · ${connection.members ? "统一入口" : connection.accountLabel || connection.name}`;
+
+const objectValue = (value: unknown): Json | undefined =>
+  value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Json)
+    : undefined;
+
 export function CliDialog({
   connection,
   connections,
@@ -136,10 +144,21 @@ export function CliDialog({
         setSelected(manifest.tools.map((t) => t.name));
       }
     });
-  const required = descriptor?.tool.inputSchema?.required as
-    string[] | undefined;
-  const properties = descriptor?.tool.inputSchema?.properties as
-    Record<string, Json> | undefined;
+  const requiredValue = descriptor?.tool.inputSchema?.required;
+  const required = Array.isArray(requiredValue)
+    ? requiredValue.filter(
+        (value): value is string => typeof value === "string",
+      )
+    : [];
+  const properties = objectValue(descriptor?.tool.inputSchema?.properties);
+  const connectionLabel = (connection?: Connection) => {
+    if (!connection) return "服务已移除";
+    const label = accountLabel(connection);
+    return connections.filter((c) => !c.detected && accountLabel(c) === label)
+      .length > 1
+      ? `${label} · ${connection.id.slice(0, 8)}`
+      : label;
+  };
   const toolLabel = (tool: string) => {
     const member = connections
       .find((c) => c.id === source)
@@ -147,7 +166,9 @@ export function CliDialog({
     return member
       ? {
           name: tool.slice(member.namespace.length + 2),
-          service: connections.find((c) => c.id === member.connectionId)?.title,
+          service: connectionLabel(
+            connections.find((c) => c.id === member.connectionId),
+          ),
         }
       : { name: tool, service: undefined };
   };
@@ -176,8 +197,7 @@ export function CliDialog({
                 .filter((c) => !c.detected)
                 .map((c) => (
                   <option key={c.id} value={c.id}>
-                    {c.title}
-                    {c.members ? " · 统一入口" : ""}
+                    {connectionLabel(c)}
                   </option>
                 ))}
             </select>
@@ -322,22 +342,25 @@ export function CliDialog({
                 )}
                 {properties && (
                   <dl className="cli-parameters">
-                    {Object.entries(properties).map(([key, property]) => (
-                      <div key={key}>
-                        <dt>
-                          {key}
-                          {required?.includes(key) ? "（必填）" : ""}
-                        </dt>
-                        <dd>
-                          {typeof property.type === "string"
-                            ? property.type
-                            : "JSON"}
-                          {typeof property.description === "string"
-                            ? ` · ${property.description}`
-                            : ""}
-                        </dd>
-                      </div>
-                    ))}
+                    {Object.entries(properties).map(([key, value]) => {
+                      const property = objectValue(value) || {};
+                      return (
+                        <div key={key}>
+                          <dt>
+                            {key}
+                            {required?.includes(key) ? "（必填）" : ""}
+                          </dt>
+                          <dd>
+                            {typeof property.type === "string"
+                              ? property.type
+                              : "JSON"}
+                            {typeof property.description === "string"
+                              ? ` · ${property.description}`
+                              : ""}
+                          </dd>
+                        </div>
+                      );
+                    })}
                   </dl>
                 )}
                 <details>

@@ -466,7 +466,7 @@ if (location.origin === ORIGIN) {
         harness.rpc("connections.delete", {"id":status_id})
         checks.append("restored disabled configurations remain associated without a stale missing warning")
         for name, title in [("gateway_alpha", "聚合服务甲"), ("gateway_beta", "聚合服务乙")]:
-            harness.rpc("connections.save", {"name":name,"title":title,"definition":{"url":harness.url,"headers":{"Authorization":"synthetic-fixture-authorization"}}})
+            harness.rpc("connections.save", {"name":name,"title":title,"accountLabel":"隔离账号甲" if name == "gateway_alpha" else "隔离账号乙","definition":{"url":harness.url,"headers":{"Authorization":"synthetic-fixture-authorization"}}})
         button("刷新本机配置")
         button("统一入口")
         browser("click", ".header-actions button.primary")
@@ -517,6 +517,7 @@ if (location.origin === ORIGIN) {
         browser("find", "label", "导出 " + alias, "click")
         button("查看 " + alias + " 参数")
         wait_for("!!document.querySelector('.cli-tool-help textarea')")
+        wait_for("document.querySelector('.cli-tool-name small')?.innerText.includes('隔离账号甲') && document.querySelector('.cli-source select option:checked')?.innerText.includes('统一入口')")
         browser("find", "label", "调用参数（JSON 对象）", "fill", '{"id":"weekly-fixture"}')
         audit("tool-cli")
         browser("screenshot", str(record/"tool-cli.png"))
@@ -535,7 +536,7 @@ if (location.origin === ORIGIN) {
         wait_for("document.querySelector('.cli-contract')?.innerText.includes('工具契约一致')")
         browser("screenshot", str(record/"tool-cli-generated.png"))
         button("关闭")
-        checks.append("desktop discovers and explains a tool, guards double submission, generates and checks a credential-free CLI with explicit directory selection")
+        checks.append("desktop shows service/account ownership, explains a tool, guards double submission, generates and checks a credential-free CLI with explicit directory selection")
         button("通知 Agent 刷新")
         checks.append("entry exposes an explicit list-refresh action")
         member_id = entry["members"][0]["connectionId"]

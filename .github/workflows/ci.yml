@@ -30,6 +30,12 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.13"
+      - name: Windows signing refusal boundaries
+        if: runner.os == 'Windows'
+        shell: python {0}
+        run: |
+          import subprocess, sys
+          subprocess.run([sys.executable, '-u', 'tests/e2e/windows_signing.py', '--binary', sys.executable, '--record', 'artifacts/e2e/ci-windows-signing'], check=True)
       - name: Cache Rust dependencies and build outputs
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -156,9 +162,6 @@ jobs:
         if: runner.os == 'Windows'
         timeout-minutes: 5
         run: python -u tests/e2e/windows_background.py --record artifacts/e2e/ci-windows-background
-      - name: Windows signing refusal boundaries
-        if: runner.os == 'Windows'
-        run: python -u tests/e2e/windows_signing.py --record artifacts/e2e/ci-windows-signing
       - name: Windows installer upgrade and recovery
         if: runner.os == 'Windows'
         timeout-minutes: 8
