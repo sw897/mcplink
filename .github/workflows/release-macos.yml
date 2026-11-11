@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 concurrency:
   group: signed-macos-release
@@ -44,6 +45,10 @@ jobs:
           PY
           python3 scripts/release_manifest.py --require-clean --record artifacts/e2e/release-source
       - run: npm ci
+      - name: Prepare previous installer for upgrade acceptance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/prepare_upgrade_baseline.py --repo "$GITHUB_REPOSITORY" --artifact acceptance-macos-15 --platform macos --record artifacts/e2e/release-upgrade-baseline
       - name: Build, notarize and verify
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}

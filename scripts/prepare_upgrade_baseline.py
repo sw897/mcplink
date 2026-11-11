@@ -17,11 +17,15 @@ def main():
     args.record.mkdir(parents=True, exist_ok=False)
     report = {"available": False, "scope": "last successful push on main with an available installer artifact"}
     process = subprocess.run(["gh", "run", "list", "--repo", args.repo, "--workflow", "ci.yml", "--branch", "main", "--event", "push", "--status", "success", "--limit", "10", "--json", "databaseId,headSha"], capture_output=True, text=True, timeout=45)
+    if process.returncode:
+        raise RuntimeError("Cannot list upgrade baselines; verify GitHub authentication and Actions read permission")
     if process.returncode == 0:
         for run in json.loads(process.stdout)[:3]:
             destination = args.record / str(run["databaseId"])
             downloaded = subprocess.run(["gh", "run", "download", str(run["databaseId"]), "--repo", args.repo, "--name", args.artifact, "--dir", str(destination)], capture_output=True, text=True, timeout=180)
             if downloaded.returncode:
+                if not any(message in downloaded.stderr.lower() for message in ["404", "410", "not found", "no artifacts", "no valid artifacts", "not exist", "expired"]):
+                    raise RuntimeError("Cannot download the upgrade baseline; verify Actions read permission and network access")
                 continue
             files = list(destination.rglob("*.dmg" if args.platform == "macos" else "*setup.exe"))
             if len(files) != 1 or files[0].is_symlink():
