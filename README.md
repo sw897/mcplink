@@ -5,9 +5,9 @@
 
 English · [简体中文](README.zh-CN.md)
 
-mcplink configures multiple MCP servers in one place, exposes selected services through one MCP entry per agent, and turns MCP tools into commands for terminals, scripts, and automation.
+mcplink connects multiple MCP servers through one entry per agent and makes their tools callable from terminals, scripts, and automation. Manage services, authentication, and tool ranges from the desktop or CLI.
 
-Single-service entries, aggregate entries, and tool CLIs reuse managed authentication: authorize a service account once and use it from multiple agents. Native direct connections remain optional. See the [product definition](docs/product.md) for the behavior and acceptance criteria.
+Single-service entries, aggregate entries, and tool CLIs reuse the same managed service-account authentication. Authorize a connection once for its account and scope, then use it across agents and commands. Native direct connections remain optional and use client-managed authentication. See the [product definition](docs/product.md) for the behavior and acceptance criteria.
 
 Free and MIT-licensed, with no mcplink account required. Upstream services keep their own authentication and access requirements.
 
@@ -17,8 +17,8 @@ Free and MIT-licensed, with no mcplink account required. Upstream services keep 
 
 | Capability | User goal | Current status |
 | --- | --- | --- |
-| Unified access to multiple MCP servers | Configure one `mcplink` entry per agent; select and maintain its services in mcplink | Aggregated tools, resources and prompts, namespace routing, stable pagination, per-entry tool ranges, list-change notifications, and upstream failure diagnostics |
-| MCP-to-CLI | Call MCP tools directly or generate named commands with argument validation, JSON input/output, and automation support | Tool calls and CLI generation for service or aggregate entries, desktop generation/call workflow, contract checks, and rebinding |
+| Unified access to multiple MCP servers | Configure one `mcplink` entry per agent; select and maintain its services in mcplink | Tools, resources and prompts from selected services; per-entry tool ranges, stable pagination, refresh notifications, and upstream failure diagnostics |
+| MCP-to-CLI | Call MCP tools directly or generate named commands with argument validation, JSON input/output, and automation support | Tool calls, JSON Schema validation, named command generation, desktop parameter and call workflows, contract checks, and rebinding |
 
 The desktop, authorization management, client adapters, and background process support these two capabilities.
 
@@ -47,6 +47,16 @@ Add a service and complete its managed authentication, then choose how to connec
 | Aggregate entry | One `mcplink` entry exposes the selected services. | Add or remove services while retaining one client entry. |
 | Native direct connection (optional) | The agent launches or connects to the upstream itself. | Client-managed connections and authentication. |
 
+Managed calls follow this path:
+
+```mermaid
+flowchart LR
+    Agent["AI agent"] -->|One mcplink entry| Gateway["mcplink"]
+    Terminal["Terminal / scripts"] -->|Tool CLI| Gateway
+    Gateway --> A["MCP server A"]
+    Gateway --> B["MCP server B"]
+```
+
 Direct configurations include complete URLs, credentials, and launch arguments. Review where they will be stored or shared before applying them. Shared configurations contain local launcher and connection references; upstream credentials stay in the system credential store.
 
 Create an entry and select services and tool ranges on the desktop's aggregate-entry page, then connect it to an agent. Agents can use different views or share one entry. Selection updates retain the native configuration. Clients receive list-change notifications; those without live refresh need MCP reload. Use “Notify agents to refresh” or `mcplink gateway refresh ENTRY_ID` to request a fresh list. Single-service entries preserve upstream names, while aggregate entries use stable namespaces for tools, prompts, and resource URIs.
@@ -55,7 +65,7 @@ Authentication reuse applies to the same managed service connection, account, an
 
 ## Quick start
 
-1. Build and open mcplink. Keep the application or standalone CLI in a permanent location before setting up shared connections.
+1. Install a preview build or build from source, then open mcplink. Keep the application or standalone CLI in a permanent location before setting up shared connections.
 2. Review discovered services and agents. Add project or profile configuration sources as needed.
 3. Import an existing connection or create one with a STDIO command or remote MCP URL. Supply the required authorization and check its tools.
 4. Create an aggregate entry, select its services, and connect it to the target agent. Alternatively, connect a single service through a managed entry or native direct configuration. Review the proposed changes and complete setup as prompted.
@@ -64,6 +74,10 @@ Authentication reuse applies to the same managed service connection, account, an
 Use the service and account views to update managed authorization. Review configuration operations in change history. After moving the executable, regenerate shared entries from its new location.
 
 ## Install and build
+
+The current preview is **0.2.1**, with macOS Apple Silicon and Windows x64 build and upgrade acceptance passing in [CI](https://github.com/sw897/mcplink/actions/runs/43001509117). Open a successful run in [GitHub Actions](https://github.com/sw897/mcplink/actions/workflows/ci.yml) and download the platform's `acceptance-*` artifact for its installer and verification reports. See the [release notes](docs/release-notes.md) for this version.
+
+Upgrade the desktop and standalone CLI together, then restart the background process. Version compatibility, package checksums, and signing details are covered in the [release guide](docs/release.md).
 
 The desktop uses Tauri 2, React, TypeScript, and Rust. Install Node.js 22 LTS as pinned in [.node-version](.node-version) (minimum 22.12.0), the toolchain in [rust-toolchain.toml](rust-toolchain.toml), Python 3.11+, and the [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/).
 
@@ -79,10 +93,10 @@ npm run desktop
 | Target | Build and installation |
 | --- | --- |
 | macOS Apple Silicon | `npm run release:macos` creates a DMG and App ZIP; install `mcplink.app` in `/Applications`. |
-| Windows x64 | `npm run bundle` creates an NSIS installer in `target/release/bundle/nsis/`. |
+| Windows x64 | `npm run release:windows` creates a verified preview candidate with an NSIS installer and standalone CLI ZIP. |
 | Standalone CLI | `cargo install --path crates/mcplink-core --locked`; add Cargo's executable directory to PATH. |
 
-Run `npm run build` for the frontend and `npm run check` for Rust formatting and static checks. macOS release output goes to `artifacts/releases/<version>/<timestamp>/`.
+Run `npm run build` for the frontend and `npm run check` for Rust formatting and static checks. Release candidates go to `artifacts/releases/<version>/<timestamp>/`; `bundle` output is under `target/release/bundle/`.
 
 Default macOS preview packages use ad-hoc signing; Windows installers are unsigned. Signing, notarization, build manifests, and checksums are covered in the [release guide](docs/release.md). Intel Mac and Linux do not have validated installer packages.
 

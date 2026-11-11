@@ -5,9 +5,9 @@
 
 [English](README.md) · 简体中文
 
-mcplink 在一处接入多个 MCP Server，让 Agent 通过一个 MCP 入口使用所选服务，也能把 MCP 工具转成终端、脚本和自动化任务可调用的 CLI。
+mcplink 将多个 MCP Server 汇集到每个 Agent 的一个入口中，也能把工具转成终端、脚本和自动化任务可调用的 CLI。服务、认证和工具范围可通过桌面或 CLI 统一维护。
 
-单服务入口、聚合入口和工具 CLI 共用托管认证：同一服务账号认证一次，供多个 Agent 使用。原生直连作为可选方式保留。完整定义与验收标准见[产品定位](docs/product.md)。
+单服务入口、聚合入口和工具 CLI 共用托管认证。同一服务连接完成相应账号和授权范围的认证后，可供多个 Agent 和命令复用。原生直连作为可选方式，由客户端维护认证。完整定义与验收标准见[产品定位](docs/product.md)。
 
 免费、MIT 开源，本机管理无需注册 mcplink 账号。上游服务仍按各自的规则认证和授权。
 
@@ -17,8 +17,8 @@ mcplink 在一处接入多个 MCP Server，让 Agent 通过一个 MCP 入口使�
 
 | 能力 | 用户目标 | 当前状态 |
 | --- | --- | --- |
-| 多 MCP Server 统一接入 | 每个 Agent 配置一个 `mcplink` 入口，在 mcplink 内选择和维护多个服务 | 已支持工具、资源、提示词聚合，命名空间路由、分页及上游故障诊断 |
-| MCP 转 CLI | 将 MCP 工具转成可直接调用或按需生成的命令，支持参数校验、JSON 输入输出与自动化 | 已支持服务或聚合入口中的工具调用、CLI 生成、契约检查与重新绑定 |
+| 多 MCP Server 统一接入 | 每个 Agent 配置一个 `mcplink` 入口，在 mcplink 内选择和维护多个服务 | 聚合所选服务的工具、资源和提示词；支持每入口工具范围、稳定分页、清单刷新通知和上游故障诊断 |
+| MCP 转 CLI | 将 MCP 工具转成可直接调用或按需生成的命令，支持参数校验、JSON 输入输出与自动化 | 工具调用、JSON Schema 校验、具名命令生成，以及桌面参数查看、实际调用、契约检查和重新绑定 |
 
 桌面界面、认证维护、客户端适配和后台运行围绕这两项能力提供支持。
 
@@ -47,6 +47,16 @@ Codex、Hermes、Claude Code、OpenCode、ZCode、DeepSeek Harness、OpenClaw、
 | 聚合入口 | Agent 只配置一个 `mcplink` 条目，提供入口中选择的多个服务。 | 集中增删服务，保留同一个 Agent 配置入口。 |
 | 原生直连（可选） | Agent 使用自身配置，直接启动或连接上游。 | 由客户端维护连接及认证。 |
 
+托管调用结构：
+
+```mermaid
+flowchart LR
+    Agent["AI Agent"] -->|一个 mcplink 入口| Gateway["mcplink"]
+    Terminal["终端 / 脚本"] -->|工具 CLI| Gateway
+    Gateway --> A["MCP Server A"]
+    Gateway --> B["MCP Server B"]
+```
+
 直连配置包含完整地址、凭据和启动参数，应用前需核对保存及共享范围。共享配置只保存本地程序入口和连接引用，上游凭据留在系统凭据库中。
 
 桌面“统一入口”页创建入口、选择服务与工具范围，再接给指定 Agent。不同 Agent 可使用不同入口，也可共用同一入口。修改选择无需重写原生配置。支持实时刷新的客户端会收到清单变更通知；其他客户端仍需重新加载 MCP。也可点击“通知 Agent 刷新”或运行 `mcplink gateway refresh ENTRY_ID`。单服务入口保留上游名称；聚合入口使用稳定命名空间处理工具、提示词和资源 URI 冲突。
@@ -55,7 +65,7 @@ Codex、Hermes、Claude Code、OpenCode、ZCode、DeepSeek Harness、OpenClaw、
 
 ## 快速上手
 
-1. 构建并打开 mcplink。设置共享接入前，将应用或独立 CLI 放在长期保留的位置。
+1. 安装预览构建，或从源码构建并打开 mcplink。设置共享接入前，将应用或独立 CLI 放在长期保留的位置。
 2. 查看发现的服务与 Agent，按需添加项目或 profile 配置来源。
 3. 导入已有连接，或填写 STDIO 命令、远程 MCP 地址新建连接。完成所需认证，再检查工具清单。
 4. 在“统一入口”页创建入口并选择服务，再接给目标 Agent；也可直接为某个服务选择单服务入口或原生直连。核对预览，按界面提示完成接入。
@@ -64,6 +74,10 @@ Codex、Hermes、Claude Code、OpenCode、ZCode、DeepSeek Harness、OpenClaw、
 后续可在服务与账号页面更新托管授权，在变更历史中检查和恢复操作。移动程序后，需要从新位置重新生成共享入口。
 
 ## 安装与构建
+
+当前预览版本为 **0.2.1**，macOS Apple Silicon 和 Windows x64 的构建与升级验收均已在 [CI](https://github.com/sw897/mcplink/actions/runs/43001509117) 通过。在 [GitHub Actions](https://github.com/sw897/mcplink/actions/workflows/ci.yml) 中打开成功运行，下载对应平台的 `acceptance-*` 工件，即可获取安装包与验收报告。版本变化见[发布说明](docs/release-notes.md)。
+
+升级时同步更新桌面与独立 CLI，并重启后台。版本兼容、包校验值及签名状态见[发布指南](docs/release.md)。
 
 技术栈为 Tauri 2、React、TypeScript 和 Rust。安装 [.node-version](.node-version) 固定的 Node.js 22 LTS（最低 22.12.0）、[rust-toolchain.toml](rust-toolchain.toml) 中的工具链、Python 3.11+ 及 [Tauri 平台构建工具](https://v2.tauri.app/start/prerequisites/)。
 
@@ -79,10 +93,10 @@ npm run desktop
 | 目标 | 构建与安装 |
 | --- | --- |
 | macOS Apple Silicon | `npm run release:macos` 生成 DMG 和 App ZIP，将 `mcplink.app` 安装到 `/Applications`。 |
-| Windows x64 | `npm run bundle` 在 `target/release/bundle/nsis/` 生成 NSIS 安装包。 |
+| Windows x64 | `npm run release:windows` 生成经过验收的预览候选，包含 NSIS 安装包与独立 CLI ZIP。 |
 | 独立 CLI | `cargo install --path crates/mcplink-core --locked`，将 Cargo 的可执行目录加入 PATH。 |
 
-`npm run build` 构建前端，`npm run check` 检查 Rust 格式与静态问题。macOS 发布产物位于 `artifacts/releases/<版本>/<时间>/`。
+`npm run build` 构建前端，`npm run check` 检查 Rust 格式与静态问题。发布候选位于 `artifacts/releases/<版本>/<时间>/`，`bundle` 产物位于 `target/release/bundle/`。
 
 默认 macOS 预览包使用 ad-hoc 签名，Windows 安装包未签名。签名、公证、构建清单和校验值见[发布指南](docs/release.md)。Intel Mac 和 Linux 暂无已验收的安装包。
 
