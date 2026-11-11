@@ -142,6 +142,25 @@ if (location.origin === ORIGIN) {
         def button(name):
             browser("find","role","button","click","--name",name,"--exact")
 
+        def copy_import_value(label, expected):
+            attribute = json.dumps(label, ensure_ascii=False)
+            field = '.import-config [aria-label=' + attribute + ']'
+            selector = '.import-config .import-value:has([aria-label=' + attribute + ']) button'
+            wait_for('document.querySelector(' + json.dumps(field) + ')?.value === ' + json.dumps(expected))
+            browser("scrollintoview", selector)
+            # Scrolling a long form can move a button under the modal footer.
+            # Verify the actual hit target before the one real clipboard click.
+            wait_for('''(() => {
+                const button = document.querySelector(SELECTOR);
+                const body = document.querySelector('dialog .modal-body');
+                if (!button || !body) return false;
+                const r = button.getBoundingClientRect(), b = body.getBoundingClientRect();
+                return r.top >= b.top && r.bottom <= b.bottom &&
+                    button.contains(document.elementFromPoint(r.x+r.width/2, r.y+r.height/2));
+            })()'''.replace('SELECTOR', json.dumps(selector)))
+            button("复制" + label)
+            wait_for("window.__fixtureClipboard === " + json.dumps(expected))
+
         button("完成")
         readonly = harness.home / "review-readonly.json"
         readonly.write_text(json.dumps({"mcpServers":{"readonly_notes":{"url":harness.url}}}))
@@ -269,14 +288,11 @@ if (location.origin === ORIGIN) {
             if client == "千问办公":
                 generated = json.loads(browser("eval", "document.querySelector('.import-config textarea').value"))
                 assert json.loads(generated)["mcpServers"]["office_ui"]["url"] == office_url
-                button("复制JSON 配置")
-                wait_for("window.__fixtureClipboard === document.querySelector('.import-config textarea').value")
+                copy_import_value("JSON 配置", generated)
             else:
                 assert json.loads(browser("eval", "document.querySelector('input[aria-label=\"服务器 URL\"]').value")) == office_url
-                button("复制服务器 URL")
-                wait_for("window.__fixtureClipboard === " + json.dumps(office_url))
-                button("复制Header Authorization")
-                wait_for("window.__fixtureClipboard === 'synthetic-fixture-authorization'")
+                copy_import_value("服务器 URL", office_url)
+                copy_import_value("Header Authorization", "synthetic-fixture-authorization")
             audit("qwen-import" if client == "千问办公" else "doubao-import")
             browser("screenshot", str(record / ("qwen-import.png" if client == "千问办公" else "doubao-import.png")))
             button("返回调整")
@@ -289,8 +305,7 @@ if (location.origin === ORIGIN) {
                 assert definition["command"] == str(BINARY) and definition["args"] == ["bridge","--connection",office_id]
             else:
                 assert json.loads(browser("eval", "document.querySelector('input[aria-label=运行命令]').value")) == str(BINARY)
-                button("复制参数 3")
-                wait_for("window.__fixtureClipboard === " + json.dumps(office_id))
+                copy_import_value("参数 3", office_id)
             assert "synthetic-fixture-authorization" not in browser("snapshot")
             button("完成")
         after = harness.rpc("snapshot")

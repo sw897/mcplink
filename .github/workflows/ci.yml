@@ -206,6 +206,8 @@ jobs:
             artifacts/e2e/ci-integrity/report.json
             artifacts/e2e/ci-bridge-adoption/report.json
             artifacts/e2e/ci-renderer/report.json
+            artifacts/e2e/ci-renderer/failure-snapshot.txt
+            artifacts/e2e/ci-renderer/failure.png
             artifacts/e2e/ci-cli/report.json
             artifacts/e2e/ci-core/report.json
             artifacts/e2e/ci-claude/report.json
