@@ -49,6 +49,7 @@ import { Status, ModalNotice, Modal } from "./Modal";
 import { SourceDialog } from "./SourceDialog";
 import { ConnectDialog, ChangeDiff } from "./ConnectDialog";
 import { GatewayDialog } from "./GatewayDialog";
+import { CliDialog } from "./CliDialog";
 import { importInstructions } from "./ImportConfigCard";
 import { Editor, CredentialDialog } from "./ConnectionEditor";
 import "./style.css";
@@ -944,7 +945,26 @@ function App() {
                             setDialog({ kind: "gateway", connection: entry })
                           }
                         >
-                          服务选择
+                          服务与工具范围
+                        </button>
+                        <button
+                          className="button small"
+                          onClick={() =>
+                            setDialog({ kind: "cli", connection: entry })
+                          }
+                        >
+                          工具 CLI
+                        </button>
+                        <button
+                          className="button small"
+                          disabled={!!busy}
+                          onClick={() =>
+                            void action("通知刷新工具", "gateway.refresh", {
+                              id: entry.id,
+                            })
+                          }
+                        >
+                          通知 Agent 刷新
                         </button>
                         <button
                           className="button small"
@@ -1735,6 +1755,17 @@ function App() {
                 <RefreshCw size={15} />
                 检查工具
               </button>
+              {!dialog.connection.detected && (
+                <button
+                  className="button"
+                  disabled={!!busy}
+                  onClick={() =>
+                    setDialog({ kind: "cli", connection: dialog.connection })
+                  }
+                >
+                  工具 CLI
+                </button>
+              )}
               <button
                 className="button"
                 disabled={!!busy}
@@ -2118,6 +2149,13 @@ function App() {
                 : previous,
             );
           }}
+        />
+      )}
+      {dialog?.kind === "cli" && (
+        <CliDialog
+          connection={dialog.connection}
+          connections={data?.connections || []}
+          onClose={() => setDialog(undefined)}
         />
       )}
       {dialog?.kind === "credential" && (

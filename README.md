@@ -17,8 +17,8 @@ Free and MIT-licensed, with no mcplink account required. Upstream services keep 
 
 | Capability | User goal | Current status |
 | --- | --- | --- |
-| Unified access to multiple MCP servers | Configure one `mcplink` entry per agent; select and maintain its services in mcplink | Aggregated tools, resources and prompts, namespace routing, pagination, and upstream failure diagnostics |
-| MCP-to-CLI | Call MCP tools directly or generate named commands with argument validation, JSON input/output, and automation support | Tool calls and CLI generation for service or aggregate entries, contract checks, and rebinding |
+| Unified access to multiple MCP servers | Configure one `mcplink` entry per agent; select and maintain its services in mcplink | Aggregated tools, resources and prompts, namespace routing, stable pagination, per-entry tool ranges, list-change notifications, and upstream failure diagnostics |
+| MCP-to-CLI | Call MCP tools directly or generate named commands with argument validation, JSON input/output, and automation support | Tool calls and CLI generation for service or aggregate entries, desktop generation/call workflow, contract checks, and rebinding |
 
 The desktop, authorization management, client adapters, and background process support these two capabilities.
 
@@ -49,7 +49,7 @@ Add a service and complete its managed authentication, then choose how to connec
 
 Direct configurations include complete URLs, credentials, and launch arguments. Review where they will be stored or shared before applying them. Shared configurations contain local launcher and connection references; upstream credentials stay in the system credential store.
 
-Create an entry and select services on the desktop's aggregate-entry page, then connect it to an agent. Agents can use different views or share one entry. Selection updates retain the native configuration; refresh the client's tool list or reload MCP as needed. Single-service entries preserve upstream names, while aggregate entries use stable namespaces for tools, prompts, and resource URIs.
+Create an entry and select services and tool ranges on the desktop's aggregate-entry page, then connect it to an agent. Agents can use different views or share one entry. Selection updates retain the native configuration. Clients receive list-change notifications; those without live refresh need MCP reload. Use “Notify agents to refresh” or `mcplink gateway refresh ENTRY_ID` to request a fresh list. Single-service entries preserve upstream names, while aggregate entries use stable namespaces for tools, prompts, and resource URIs.
 
 Authentication reuse applies to the same managed service connection, account, and authorization scope within one mcplink data directory. Refresh is supported when the upstream permits it; revoked or nonrenewable grants need reauthorization. Native direct connections do not share managed OAuth sessions. Tool CLIs reference the same managed connections without creating another account.
 
@@ -94,7 +94,10 @@ Call a managed connection's tools directly or generate a named CLI for selected 
 mcplink connections tools CONNECTION_ID --tool TOOL_NAME
 mcplink call CONNECTION_ID TOOL_NAME --stdin
 mcplink cli generate CONNECTION_ID --name notes --output ./notes-cli --tool TOOL_NAME
+mcplink cli check ./notes-cli/notes.mcplink.json
 ```
+
+Open **Tool CLI** from a managed service or aggregate entry to inspect parameters, choose tools, generate commands into a new directory, or explicitly call a tool once. Existing manifests can be checked against live contracts; review changes and regenerate into a new directory.
 
 `call --stdin` accepts the tool's argument JSON. Generated commands use the local mcplink runtime and managed authorization without embedding credentials. Usage and error boundaries are covered in the [CLI guide](docs/agent-cli.md).
 

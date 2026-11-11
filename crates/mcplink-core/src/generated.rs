@@ -1,5 +1,5 @@
 //! Small, credential-free CLI manifests. All execution stays in the managed backend.
-use crate::{invocation, model::digest, runtime::Client, vault::private_write};
+use crate::{Engine, invocation, model::digest, runtime::Client, vault::private_write};
 use anyhow::{Context, Result, bail};
 use clap::{Arg, ArgAction, Command};
 use serde::{Deserialize, Serialize};
@@ -10,6 +10,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Component, Path, PathBuf},
+    sync::Arc,
 };
 
 const MANIFEST_LIMIT: u64 = 1024 * 1024;
@@ -318,54 +319,58 @@ async fn describe(client: &Client, connection: &str, names: &[String]) -> Result
             bail!("生成期间连接已变化，请重新核对后生成");
         }
         revision = Some(current);
-        let schema = value["tool"]["inputSchema"].clone();
-        tokio::task::spawn_blocking({
-            let schema = schema.clone();
-            move || invocation::validator(&schema).map(|_| ())
-        })
-        .await
-        .context("无法检查工具 Schema")??;
-        let required: HashSet<_> = schema["required"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .collect();
-        let properties = schema["properties"].as_object();
-        let stdin_only = schema.get("$ref").is_some()
-            || properties.is_some_and(|properties| {
-                properties.len() > 256 || properties.keys().any(|key| !parameter_name(key))
-            })
-            || required
-                .iter()
-                .any(|name| properties.is_none_or(|properties| !properties.contains_key(*name)));
-        let parameters = if stdin_only {
-            Vec::new()
-        } else {
-            properties
-                .into_iter()
-                .flatten()
-                .map(|(name, schema)| Parameter {
-                    name: name.clone(),
-                    kind: match schema["type"].as_str() {
-                        Some("string") => Kind::String,
-                        Some("boolean") => Kind::Boolean,
-                        Some("number") => Kind::Number,
-                        Some("integer") => Kind::Integer,
-                        _ => Kind::Json,
-                    },
-                    required: required.contains(name.as_str()),
-                })
-                .collect()
-        };
-        tools.push(Tool {
-            name: name.clone(),
-            schema_hash: value["schemaHash"].as_str().context("工具摘要缺失")?.into(),
-            stdin_only,
-            parameters,
-        });
+        tools.push(contract(name.clone(), value).await?);
     }
     Ok(tools)
+}
+
+async fn contract(name: String, value: Value) -> Result<Tool> {
+    let schema = value["tool"]["inputSchema"].clone();
+    tokio::task::spawn_blocking({
+        let schema = schema.clone();
+        move || invocation::validator(&schema).map(|_| ())
+    })
+    .await
+    .context("无法检查工具 Schema")??;
+    let required: HashSet<_> = schema["required"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let properties = schema["properties"].as_object();
+    let stdin_only = schema.get("$ref").is_some()
+        || properties.is_some_and(|properties| {
+            properties.len() > 256 || properties.keys().any(|key| !parameter_name(key))
+        })
+        || required
+            .iter()
+            .any(|name| properties.is_none_or(|properties| !properties.contains_key(*name)));
+    let parameters = if stdin_only {
+        Vec::new()
+    } else {
+        properties
+            .into_iter()
+            .flatten()
+            .map(|(name, schema)| Parameter {
+                name: name.clone(),
+                kind: match schema["type"].as_str() {
+                    Some("string") => Kind::String,
+                    Some("boolean") => Kind::Boolean,
+                    Some("number") => Kind::Number,
+                    Some("integer") => Kind::Integer,
+                    _ => Kind::Json,
+                },
+                required: required.contains(name.as_str()),
+            })
+            .collect()
+    };
+    Ok(Tool {
+        name,
+        schema_hash: value["schemaHash"].as_str().context("工具摘要缺失")?.into(),
+        stdin_only,
+        parameters,
+    })
 }
 
 fn write_new(
@@ -399,17 +404,53 @@ pub async fn generate(
     output: &Path,
     names: &[String],
 ) -> Result<Value> {
+    let output = checked_path(output)?;
+    client
+        .call(
+            "cli.generate",
+            json!({"id":connection,"name":name,"output":output,"tools":names}),
+        )
+        .await
+}
+
+pub async fn generate_managed(
+    engine: Arc<Engine>,
+    connection: &str,
+    name: String,
+    output: &Path,
+    names: &[String],
+) -> Result<Value> {
     validate_selection(&name, names)?;
     let output = checked_path(output)?;
     if output.exists() || !output.parent().is_some_and(Path::is_dir) {
         bail!("输出目录必须尚不存在，且父目录必须已存在");
     }
+    let fingerprint = crate::gateway::catalog_version(&engine, connection)?;
+    let (_, available) = invocation::discover(engine.clone(), connection).await?;
+    let mut tools = Vec::new();
+    for name in names {
+        let tool = available
+            .iter()
+            .find(|tool| tool["name"] == *name)
+            .context("工具不存在或未在此入口中启用")?;
+        tools.push(
+            contract(
+                name.clone(),
+                json!({"schemaHash":invocation::schema_hash(tool)?,"tool":tool}),
+            )
+            .await?,
+        );
+    }
+    if crate::gateway::catalog_version(&engine, connection)? != fingerprint {
+        bail!("生成期间入口或服务已变化，请重新核对后生成");
+    }
+    let dataset_id = engine.dataset_id().await?;
     let manifest = Manifest {
         manifest_version: 1,
         generator_version: env!("CARGO_PKG_VERSION").into(),
-        dataset_id: dataset(client).await?,
+        dataset_id,
         connection_id: connection.into(),
-        tools: describe(client, connection, names).await?,
+        tools,
         name,
     };
     manifest.validate()?;
@@ -473,7 +514,45 @@ try {{
         return Err(error);
     }
     Ok(
-        json!({"directory":output,"manifest":files[2],"tools":names,"runtime":"mcplink (PATH or MCPLINK_BIN)"}),
+        json!({"name":manifest.name,"directory":output,"manifest":files[2],"tools":names,"runtime":"mcplink (PATH or MCPLINK_BIN)"}),
+    )
+}
+
+pub async fn check_managed(engine: Arc<Engine>, path: &Path) -> Result<Value> {
+    let manifest = Manifest::read(path)?;
+    let dataset_matches = engine.dataset_id().await? == manifest.dataset_id;
+    let discovered = if dataset_matches {
+        invocation::discover(engine, &manifest.connection_id)
+            .await
+            .ok()
+            .map(|(_, tools)| tools)
+    } else {
+        None
+    };
+    let mut results = Vec::new();
+    for tool in &manifest.tools {
+        let actual = discovered
+            .as_ref()
+            .and_then(|tools| tools.iter().find(|actual| actual["name"] == tool.name));
+        let status = match actual {
+            Some(actual) => {
+                let current = contract(
+                    tool.name.clone(),
+                    json!({"tool":actual,"schemaHash":invocation::schema_hash(actual)?}),
+                )
+                .await;
+                if current.as_ref().is_ok_and(|current| current == tool) {
+                    "current"
+                } else {
+                    "changed"
+                }
+            }
+            None => "unavailable",
+        };
+        results.push(json!({"name":tool.name,"status":status}));
+    }
+    Ok(
+        json!({"compatible":dataset_matches && results.iter().all(|tool| tool["status"] == "current"),"datasetMatches":dataset_matches,"connectionId":manifest.connection_id,"tools":results}),
     )
 }
 

@@ -73,7 +73,11 @@ export type Connection = {
   lastError?: string;
   detected?: boolean;
   sourceId?: string;
-  members?: { connectionId: string; namespace: string }[];
+  members?: {
+    connectionId: string;
+    namespace: string;
+    includeTools?: string[] | null;
+  }[];
   editVersion?: string;
 };
 export type Source = {
@@ -183,6 +187,7 @@ export type Dialog =
   | { kind: "background" }
   | { kind: "editor"; connection?: Connection }
   | { kind: "gateway"; connection?: Connection }
+  | { kind: "cli"; connection: Connection }
   | {
       kind: "connect";
       connections: Connection[];

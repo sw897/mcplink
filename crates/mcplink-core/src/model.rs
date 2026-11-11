@@ -260,6 +260,16 @@ impl Definition {
 pub struct GatewayMember {
     pub connection_id: String,
     pub namespace: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_tools: Option<Vec<String>>,
+}
+
+impl GatewayMember {
+    pub fn tool_allowed(&self, name: &str) -> bool {
+        self.include_tools
+            .as_ref()
+            .is_none_or(|tools| tools.iter().any(|tool| tool == name))
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]

@@ -115,25 +115,71 @@ async fn bridge(data: PathBuf, connection: String) -> Result<()> {
     let mut info: ServerConfig = serde_json::from_value(raw).context("上游服务信息无效")?;
     let mut capabilities = json!({});
     if info.capabilities.tools.is_some() {
-        capabilities["tools"] = json!({});
+        capabilities["tools"] = json!({"listChanged":true});
     }
     if info.capabilities.resources.is_some() {
-        capabilities["resources"] = json!({});
+        capabilities["resources"] = json!({"listChanged":true});
     }
     if info.capabilities.prompts.is_some() {
-        capabilities["prompts"] = json!({});
+        capabilities["prompts"] = json!({"listChanged":true});
     }
     info.capabilities = serde_json::from_value(capabilities)?;
     info.protocol_version = ProtocolVersion::V_2025_11_25;
+    let mut version = client.call("mcp.catalog", json!({"id":connection})).await?;
     let bridge = Bridge {
-        client,
-        id: connection,
-        info,
+        client: client.clone(),
+        id: connection.clone(),
+        info: info.clone(),
     };
     let service = bridge
         .serve(rmcp::transport::stdio())
         .await
         .context("MCP 客户端初始化未完成")?;
-    service.waiting().await.context("MCP 会话已结束")?;
+    let peer = service.peer().clone();
+    let watcher = tokio::spawn(async move {
+        let mut client = client;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let current = match client.refresh_running().await {
+                Ok(running) => {
+                    client = running;
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(3),
+                        client.call("mcp.catalog", json!({"id":connection})),
+                    )
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .unwrap_or(json!(null))
+                }
+                Err(_) => json!(null),
+            };
+            if current != version {
+                if info.capabilities.tools.is_some()
+                    && current["tools"] != version["tools"]
+                    && peer.notify_tool_list_changed().await.is_err()
+                {
+                    break;
+                }
+                if info.capabilities.resources.is_some()
+                    && current["resources"] != version["resources"]
+                    && peer.notify_resource_list_changed().await.is_err()
+                {
+                    break;
+                }
+                if info.capabilities.prompts.is_some()
+                    && current["prompts"] != version["prompts"]
+                    && peer.notify_prompt_list_changed().await.is_err()
+                {
+                    break;
+                }
+                version = current;
+            }
+        }
+    });
+    let outcome = service.waiting().await;
+    watcher.abort();
+    let _ = watcher.await;
+    outcome.context("MCP 会话已结束")?;
     Ok(())
 }

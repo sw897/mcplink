@@ -6,7 +6,7 @@ MCP 转 CLI 是 mcplink 的核心能力之一：从工具 Schema 发现参数，
 
 `mcplink` CLI 与桌面使用同一个管理核心、后台、系统凭据库和配置事务。命令不启动桌面或浏览器；后台在首次管理调用时按需启动。`schema` 和 `skill` 离线可用。
 
-客户端与来源支持范围见[Agent 兼容矩阵](agent-discovery.md)。原生文件写入需要客户端已安装，当前聚合管理与桌面快照要求 management API 18；桌面、CLI 和后台应使用同一构建。管理 Skill 的复制安装目标另见下文。
+客户端与来源支持范围见[Agent 兼容矩阵](agent-discovery.md)。原生文件写入需要客户端已安装，当前聚合管理与桌面快照要求 management API 19；桌面、CLI 和后台应使用同一构建。管理 Skill 的复制安装目标另见下文。
 
 ## 安装与发现
 
@@ -77,7 +77,7 @@ Cargo 默认将程序放入 `~/.cargo/bin`，该目录需在 PATH 中。也可�
 | `connections tools ID --tool TOOL` | 发现指定工具，返回 Schema、描述和 `schemaHash`。 |
 | `call ID TOOL --stdin [--schema-hash HASH]` | 校验参数后调用精确工具，不自动重试。 |
 | `cli generate ID --name NAME --output NEW_DIRECTORY --tool TOOL ...` | 为明确选定的工具生成轻量入口。 |
-| `cli inspect MANIFEST` / `cli rebind MANIFEST --connection ID` | 离线检查清单，或核对契约后显式重新绑定当前数据目录中的连接。 |
+| `cli inspect MANIFEST` / `cli check MANIFEST` / `cli rebind MANIFEST --connection ID` | 离线检查清单、比对当前契约，或显式重新绑定当前数据目录中的连接。 |
 | `skill show` / `skill install --agent AGENT` | 导出或安装 mcplink 自身管理 Skill。 |
 
 `AGENT` 的可选值按具体命令由 `schema` 列出；来源添加、配置生成与 Skill 安装的目标范围分别定义。`ACTION` 为 `upsert`、`disable`、`enable`、`remove`。目标使用返回的来源 ID，连接使用导入或保存返回的托管 ID。
@@ -161,6 +161,7 @@ mcplink cli generate CONNECTION_ID --name notes --output ./notes-cli --tool sear
 ./notes-cli/notes read_document --help
 ./notes-cli/notes read_document --id example-document
 mcplink cli inspect ./notes-cli/notes.mcplink.json
+mcplink cli check ./notes-cli/notes.mcplink.json
 ```
 
 输出目录须尚不存在、父目录须已存在；生成器拒绝符号链接、覆盖和并发占用。目录包含 POSIX 入口 `notes`、Windows PowerShell 入口 `notes.ps1` 和 `notes.mcplink.json`，移动时一起保留。入口使用 PATH 中的 `mcplink`；可用环境变量 `MCPLINK_BIN` 指定可信的二进制完整路径，不导出该路径到清单。Windows 可用系统 PowerShell 运行 `powershell.exe -NoProfile -File ./notes-cli/notes.ps1 read_document --id example-document`，脚本执行遵循系统策略。入口的帮助离线可用，实际调用才连接后台。
@@ -170,6 +171,10 @@ mcplink cli inspect ./notes-cli/notes.mcplink.json
 `--stdin` 与参数标志互斥，输入同样是最多 8 MiB 的 JSON 对象，输出和退出码与 `call` 相同。含 Shell 特殊字符、业务正文或敏感值时优先经 stdin；自动化也可直接调用原生命令 `mcplink cli run --manifest MANIFEST -- TOOL --stdin`，用参数数组及 `input=` 传递，避免 Shell 解析。
 
 版本 1 清单只保存生成器版本、命令名称、数据目录 UUID、托管连接 ID、精确工具名、Schema 摘要及参数名称/类型/必填性；不保存端点、认证头、Token、OAuth grant、完整 Schema、描述、默认值、样例、枚举值或机器路径。清单不是授权凭据，仍须妥善管理命令和工具名称等元数据。检查命令拒绝未知字段、未知版本、损坏或超过 1 MiB 的清单。
+
+`cli inspect` 离线检查文件结构；`cli check` 连接后台，比对当前连接与选定工具的契约，返回 `compatible`、`datasetMatches` 和各工具的 `current` / `changed` / `unavailable` 状态，不执行工具、不修改文件。契约变化时先查看当前参数，生成到新目录；旧命令保持原样并在调用时拒绝过期契约。
+
+桌面“工具 CLI”使用同一生成与调用核心。可从托管服务或统一入口打开，查看工具的参数与 Schema、明确勾选工具、选取输出父目录生成，或检查已有清单。实际调用单独触发且一次只派发一次；结果仅保留在当前窗口，不自动重试。
 
 复制到另一个数据目录或设备后，先创建当地的托管连接，再显式重新绑定：
 
@@ -261,3 +266,13 @@ python3 tests/e2e/generated_cli.py --record artifacts/e2e/generated-cli/local-ru
 测试使用隔离配置、合成 MCP/OAuth 与 fixture Vault，不修改日常 Agent 配置。报告记录命令、退出码、断言和二进制／Skill 哈希，输出到忽略的 `artifacts/` 目录。默认测试不要求真实账号或模型登录；`run.py --native-agents` 可额外检查已安装的原生客户端命令。
 
 完整测试入口与可选原生参数见[端到端验证](../tests/e2e/README.md)。
+
+## 入口工具范围与刷新
+
+`gateway save --stdin` 可在 `connectionIds` 之外传 `toolSelections`：键是所选成员连接 ID，值是上游原始工具名数组。编辑要求当前 `editVersion`；省略映射或某个成员保留该成员的范围，null 沿用服务全局策略，空数组表示不开放工具。成员必须在本次服务选择内。入口工具范围与全局策略取交集，单服务入口和其他聚合入口不受影响；所有路径继续共用成员认证。
+
+```json
+{"title":"阅读入口","connectionIds":["SERVICE_CONNECTION_ID"],"toolSelections":{"SERVICE_CONNECTION_ID":["read_document"]}}
+```
+
+单服务与聚合 Bridge 接收上游清单变更并向相关客户端发送 `list_changed`；配置、认证和入口策略变化也会通知。可以运行 `mcplink gateway refresh ENTRY_ID` 或点击“通知 Agent 刷新”。传服务连接 ID 时，其引用入口一起更新。通知不会调用业务工具，客户端不支持实时刷新时仍需重载 MCP。

@@ -38,7 +38,8 @@ class McpClient:
             self.responses.put(None)
         threading.Thread(target=read_responses, daemon=True).start()
         self.sequence = 0
-        self.call("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": label, "version": "1.0.0"}})
+        self.notifications = []
+        self.initialized = self.call("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": label, "version": "1.0.0"}})
         self.process.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
         self.process.stdin.flush()
 
@@ -59,7 +60,27 @@ class McpClient:
             response = json.loads(line)
             if response.get("id") == self.sequence:
                 return response
+            if "method" in response:
+                self.notifications.append(response)
         raise AssertionError("Bridge response timed out")
+
+    def wait_notification(self, method, timeout=8):
+        deadline = time.monotonic() + timeout
+        while True:
+            for index, notification in enumerate(self.notifications):
+                if notification.get("method") == method:
+                    return self.notifications.pop(index)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AssertionError("Missing MCP notification: " + method)
+            try:
+                line = self.responses.get(timeout=remaining)
+            except queue.Empty as error:
+                raise AssertionError("Missing MCP notification: " + method) from error
+            assert line, "Bridge closed while waiting for a notification"
+            response = json.loads(line)
+            if "method" in response:
+                self.notifications.append(response)
 
     def close(self):
         self.process.stdin.close()

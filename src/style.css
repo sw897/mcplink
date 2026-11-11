@@ -1657,3 +1657,165 @@ dd {
     transition: none !important;
   }
 }
+/* Entry policies keep service selection and tool selection in one readable row. */
+.gateway-member {
+  border-bottom: 1px solid var(--line, #e1e8df);
+  padding-bottom: 12px;
+  margin-bottom: 12px;
+}
+.gateway-member .target {
+  border: 0;
+  margin-bottom: 4px;
+}
+.tool-range {
+  margin-left: 38px;
+}
+.tool-range-body {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+.tool-range-body > label,
+.tool-range-list label {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.tool-range-list {
+  max-height: 240px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  display: grid;
+  gap: 9px;
+  padding: 5px 0;
+}
+.tool-range-list span {
+  overflow-wrap: anywhere;
+}
+.tool-range-list small {
+  display: block;
+}
+.toolbar.compact {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.cli-workflow {
+  display: grid;
+  gap: 16px;
+}
+.modal.cli-modal {
+  width: 860px;
+}
+.cli-tool-name small {
+  display: block;
+  color: #5c6b65;
+  margin-top: 4px;
+}
+.cli-source,
+.cli-generation {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.cli-source .field,
+.cli-generation .field {
+  flex: 1;
+  min-width: 160px;
+  margin: 0;
+}
+.cli-columns {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.85fr) minmax(0, 1.5fr);
+  gap: 20px;
+  min-height: 220px;
+}
+.cli-tool-selection {
+  min-width: 0;
+}
+.cli-tools {
+  max-height: 360px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.cli-tools > div {
+  display: flex;
+  align-items: start;
+  gap: 7px;
+  padding: 8px;
+  border-bottom: 1px solid #e1e8df;
+}
+.cli-tools > div.active {
+  background: #edf4ef;
+}
+.cli-tool-name {
+  border: 0;
+  background: transparent;
+  text-align: left;
+  overflow-wrap: anywhere;
+  color: inherit;
+  padding: 0;
+  cursor: pointer;
+}
+.cli-tool-help {
+  min-width: 0;
+  border-left: 1px solid #e1e8df;
+  padding-left: 20px;
+}
+.cli-tool-help h3 {
+  overflow-wrap: anywhere;
+  font-size: 14px;
+}
+.cli-tool-help pre,
+.cli-result {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 260px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  font-size: 12px;
+}
+.cli-tool-help .tool-description {
+  max-height: 130px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.cli-parameters {
+  display: grid;
+  gap: 8px;
+  font-size: 12px;
+}
+.cli-parameters dt {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.cli-parameters dd {
+  margin: 3px 0 0;
+  color: #5c6b65;
+  overflow-wrap: anywhere;
+}
+.cli-contract,
+.cli-generated {
+  border-top: 1px solid #e1e8df;
+  padding-top: 12px;
+  overflow-wrap: anywhere;
+}
+.cli-contract ul,
+.cli-contract small {
+  font-size: 12px;
+}
+@media (max-width: 680px) {
+  .cli-columns {
+    grid-template-columns: 1fr;
+  }
+  .cli-tool-help {
+    padding: 12px 0 0;
+    border-left: 0;
+    border-top: 1px solid #e1e8df;
+  }
+  .cli-tools {
+    max-height: 180px;
+  }
+}

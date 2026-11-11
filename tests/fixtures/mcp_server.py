@@ -17,6 +17,7 @@ TOOLS = [
     {"name": "search_documents", "description": "Search synthetic documents", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}, "annotations": {"readOnlyHint": True}},
     {"name": "read_document", "description": "Read one synthetic document", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "delay_ms": {"type": "integer"}}, "required": ["id"]}, "annotations": {"readOnlyHint": True}},
 ]
+DISCOVERY_SERIAL = 0
 
 CALL_TOOLS = [
     {"name":"inspect_payload","description":"Echo a typed synthetic payload","inputSchema":{
@@ -54,6 +55,11 @@ def handle(request, endpoint="", origin=""):
     if method == "ping":
         return {}
     if method == "tools/list":
+        if endpoint == "/mcp-unstable":
+            global DISCOVERY_SERIAL
+            DISCOVERY_SERIAL += 1
+            tools = [{**TOOLS[1], "name":"paged_"+str(i), "description":"Discovery "+str(DISCOVERY_SERIAL)} for i in range(132)]
+            return {"tools": tools if DISCOVERY_SERIAL % 2 else list(reversed(tools))}
         if endpoint == "/mcp-many":
             tools = [{**TOOLS[1], "name": "bulk_" + str(i)} for i in range(130)] + [{**TOOLS[1], "name": "long_" + "x" * 120}, {**TOOLS[1], "name": "tool/特殊名称"}]
             offset = int(params.get("cursor", "0"))

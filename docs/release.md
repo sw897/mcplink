@@ -27,7 +27,7 @@ ZIP/tar 使用规范化的归档元数据，不保留构建者的用户名、UID
 python3 tests/e2e/installed_app.py --record artifacts/e2e/install-upgrade --previous-app /absolute/path/to/previous/mcplink.app
 ```
 
-测试只替换自己的临时安装目录，保留隔离数据和原生配置。相同版本的前后构建兼容不代表已验收未来版本的数据迁移。
+测试先在旧版初始化账号与原生共享配置，再替换同一临时安装目录中的程序，核对新版保留连接 ID、凭据和配置。也可用 `--previous-dmg`，或设置 `MCPLINK_PREVIOUS_DMG`。不尝试用旧程序打开新版本数据库。相同版本的前后构建兼容不代表已验收未来版本的数据迁移。
 
 ## Developer ID 与公证
 
@@ -39,9 +39,19 @@ npm run release:macos -- --signed
 
 缺少身份或公证配置时，入口在构建前失败。构建后必须通过 Developer ID、app/DMG 的 stapler 和 Gatekeeper 验证，才生成正式签名候选。`--signed` 不降级为 ad-hoc。依据：[Tauri macOS 签名与公证](https://v2.tauri.app/distribute/sign/macos/)、[Tauri 环境变量](https://v2.tauri.app/reference/environment-variables/)。
 
+## Windows 签名候选与安装生命周期
+
+Windows x64 使用 `npm run release:windows` 生成未签名预览候选；`npm run release:windows -- --signed` 要求当前用户证书库中的系统受信任且非自签名的代码签名身份，设置 `WINDOWS_SIGNING_CERTIFICATE_SHA1` 为其准确指纹。私钥可由证书提供程序或硬件维护，不放入参数或源码。可通过 `WINDOWS_SIGNTOOL` 指定 Windows SDK SignTool，`WINDOWS_TIMESTAMP_URL` 指定 RFC 3161 服务，默认使用 DigiCert 时间戳服务。
+
+签名入口拒绝缺失、过期、自签名或不可用身份。独立 CLI 与打包 sidecar 先签名；Tauri 的自定义签名命令签署桌面程序和 NSIS 安装包。所有文件必须通过指定发布者、Authenticode 信任与时间戳检查，安装后再次核对 CLI 和桌面签名；失败不降级为未签名候选。依据：[Tauri Windows 签名](https://v2.tauri.app/distribute/sign/windows/)、[Microsoft SignTool](https://learn.microsoft.com/en-us/windows/win32/seccrypto/signtool)。CI 的自签名拒绝测试仅验证错误边界，不等于正式签名成功。
+
+`tests/e2e/windows_installer.py --installer PATH --previous-installer OLD_PATH --record artifacts/e2e/windows-upgrade` 在隔离安装目录先装旧版、创建 Token/OAuth 账号及原生绑定，再覆盖安装新版、实际调用 MCP、重装并卸载。保留的账号与配置用当前独立 CLI 核对。增加 `--require-signature` 才要求真实发布者签名。未提供旧包时报告仅证明当前安装/重装/卸载，不宣称跨版本升级。发布脚本可从 `MCPLINK_PREVIOUS_INSTALLER` 获取旧包。
+
+Windows 候选包含 NSIS 安装包、含许可文件的规范化 CLI ZIP、源码及产物哈希、签名和验收摘要。正式签名不保证 SmartScreen 对新发布者或新文件已建立信誉。
+
 ## GitHub Actions
 
-`ci.yml` 为 macOS Apple Silicon 和 Windows x64 分别运行检查、构建和合成 CLI 场景。macOS 另验收 DMG。Windows 结果须以实际 workflow 报告和桌面实机验收为准；配置工作流本身不表示通过。CI 不运行需要原生 Agent 登录的真实模型测试，也不上传测试 home、Vault 或原始配置。
+`ci.yml` 为 macOS Apple Silicon 和 Windows x64 分别运行检查、构建和合成 CLI 场景。macOS 另验收 DMG，Windows 另验收 NSIS 安装生命周期。CI 会查找近期 main 推送成功的安装包，报告来源 run、提交和哈希，再做旧版到当前构建的升级；若旧工件不可用，明确记录缺少跨版本基线，不将重装当作跨版本升级。Windows 结果须以实际 workflow 报告和桌面实机验收为准；配置工作流本身不表示通过。CI 不运行需要原生 Agent 登录的真实模型测试，也不上传测试 home、Vault 或原始配置。
 
 `release-macos.yml` 仅手动运行，输入必须是与源码版本匹配的已有 tag。仓库需要以下 secrets：
 
@@ -53,7 +63,9 @@ npm run release:macos -- --signed
 | `APPLE_API_KEY` / `APPLE_API_ISSUER` | App Store Connect Key ID 与 Issuer |
 | `APPLE_API_PRIVATE_KEY` | `.p8` 正文，只落在 runner 临时目录，结束后清理 |
 
-签名、安装包和 CLI 验收都通过后，工作流创建带产物的 **Release 草稿**；正式公开发布从草稿单独执行。工作流固定第三方 Action 的提交 SHA。Runner 平台依据 [GitHub 官方标签表](https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/choose-the-runner-for-a-job)。
+`release-windows.yml` 也仅手动运行，tag 与版本须匹配。需要 `WINDOWS_CERTIFICATE`（PFX 的 Base64）、`WINDOWS_CERTIFICATE_PASSWORD` 和 `WINDOWS_SIGNING_CERTIFICATE_SHA1` secrets；可选仓库变量 `WINDOWS_TIMESTAMP_URL`。PFX 只经 runner 临时文件导入当前用户证书库，结束时清理文件和指定私钥。使用非导出硬件或签名服务时，在持有该身份的 Windows 环境运行本地签名入口，按相同验证标准交付，不把服务机密写进配置。
+
+签名、安装包和 CLI 验收都通过后，工作流创建或补充匹配 tag 的 **Release 草稿**，拒绝覆盖已有同名文件或修改已发布 Release；两平台元数据使用平台前缀。正式公开发布从草稿单独执行。工作流固定第三方 Action 的提交 SHA。Runner 平台依据 [GitHub 官方标签表](https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/choose-the-runner-for-a-job)。
 
 发布前核对待公开的源码、文档和 Git 历史，扫描凭据，避免纳入本机配置、账号验收记录或签名材料。根据两平台 CI 的实际结果记录兼容性；合成测试不能代替 Windows 桌面实机验收。
 

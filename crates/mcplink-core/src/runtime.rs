@@ -63,7 +63,7 @@ async fn health(State(state): State<ServerState>, headers: HeaderMap) -> impl In
     (
         StatusCode::OK,
         Json(
-            json!({"application":"mcplink","instance":state.info.instance,"version":env!("CARGO_PKG_VERSION"),"managementApi":18}),
+            json!({"application":"mcplink","instance":state.info.instance,"version":env!("CARGO_PKG_VERSION"),"managementApi":19}),
         ),
     )
 }
@@ -347,6 +347,18 @@ impl Client {
         })
     }
 
+    /// Reuse the authenticated HTTP client while its daemon instance is current.
+    /// Catalog observers must never start a daemon or read the Vault each tick.
+    pub async fn refresh_running(&self) -> Result<Self> {
+        let info: RuntimeInfo = serde_json::from_slice(
+            &fs::read(self.data.join("runtime.json")).context("后台尚未启动")?,
+        )?;
+        if info.instance == self.info.instance && info.port == self.info.port {
+            return Ok(self.clone());
+        }
+        Self::read(&self.data).await
+    }
+
     pub async fn connect(data: PathBuf) -> Result<Self> {
         if let Ok(client) = Self::read(&data).await {
             return Ok(client);
@@ -378,6 +390,20 @@ impl Client {
     }
 
     pub async fn call(&self, method: &str, params: Value) -> Result<Value> {
+        if self.management_api < 19
+            && matches!(
+                method,
+                "gateway.save"
+                    | "gateway.refresh"
+                    | "mcp.catalog"
+                    | "cli.generate"
+                    | "cli.inspect"
+                    | "cli.check"
+                    | "snapshot"
+            )
+        {
+            bail!("旧后台不支持入口工具范围与清单刷新，请退出并重启后台");
+        }
         if self.management_api < 18
             && matches!(method, "gateway.list" | "gateway.save" | "snapshot")
         {

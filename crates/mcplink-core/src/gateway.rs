@@ -8,27 +8,152 @@ use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::{Value, json};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     future::Future,
     pin::Pin,
-    sync::{Arc, atomic::Ordering},
-    time::Duration,
+    sync::{Arc, Mutex, atomic::Ordering},
+    time::{Duration, Instant},
 };
 
 const MAX_ITEMS: usize = 10_000;
 const PAGE_SIZE: usize = 100;
 
+const CATALOG_TTL: Duration = Duration::from_secs(300);
+const CATALOG_BUDGET: usize = 16 * 1024 * 1024;
+
+pub(crate) struct CatalogCache {
+    entries: Mutex<HashMap<String, Arc<CatalogSnapshot>>>,
+    epoch: String,
+}
+
+impl Default for CatalogCache {
+    fn default() -> Self {
+        Self {
+            entries: Mutex::new(HashMap::new()),
+            epoch: uuid::Uuid::new_v4().to_string(),
+        }
+    }
+}
+
+struct CatalogSnapshot {
+    id: String,
+    entry_id: String,
+    entry_revision: u64,
+    members: String,
+    method: String,
+    rows: Vec<Value>,
+    errors: Vec<Value>,
+    created: Instant,
+    bytes: usize,
+}
+
+impl CatalogCache {
+    fn get(&self, id: &str) -> Option<Arc<CatalogSnapshot>> {
+        let mut entries = self.entries.lock().unwrap();
+        entries.retain(|_, value| value.created.elapsed() < CATALOG_TTL);
+        entries.get(id).cloned()
+    }
+
+    fn insert(&self, snapshot: Arc<CatalogSnapshot>) {
+        let mut entries = self.entries.lock().unwrap();
+        entries.retain(|_, value| value.created.elapsed() < CATALOG_TTL);
+        while entries.len() >= 32
+            || entries.values().map(|s| s.bytes).sum::<usize>() + snapshot.bytes > CATALOG_BUDGET
+        {
+            let oldest = entries
+                .iter()
+                .min_by_key(|(_, s)| s.created)
+                .map(|(id, _)| id.clone());
+            if let Some(id) = oldest {
+                entries.remove(&id);
+            } else {
+                break;
+            }
+        }
+        entries.insert(snapshot.id.clone(), snapshot);
+    }
+}
+
+fn member_signature(engine: &Engine, entry: &Connection) -> Result<String> {
+    let connections = engine.store.connections()?;
+    let mut signature = Vec::new();
+    for member in entry.members.as_ref().context("不是聚合入口")? {
+        let connection = connections
+            .iter()
+            .find(|c| c.id == member.connection_id)
+            .context("入口成员已变化，请刷新清单")?;
+        signature.push(json!([
+            connection.id,
+            connection.revision,
+            connection.active
+        ]));
+    }
+    Ok(digest(&serde_json::to_vec(&signature)?))
+}
+
+fn catalog_page(snapshot: &CatalogSnapshot, field: &str, offset: usize) -> Result<Value> {
+    let end = (offset + PAGE_SIZE).min(snapshot.rows.len());
+    let mut result = json!({"_meta":{"mcplink":{"upstreamErrors":snapshot.errors}}});
+    result[field] = json!(&snapshot.rows[offset..end]);
+    if end < snapshot.rows.len() {
+        result["nextCursor"] = json!(URL_SAFE_NO_PAD.encode(serde_json::to_vec(
+            &json!({"snapshot":snapshot.id,"offset":end})
+        )?));
+    }
+    Ok(result)
+}
+
 pub fn description() -> Value {
     json!({"protocolVersion":"2025-11-25", "capabilities":{"tools":{},"resources":{},"prompts":{}},
         "serverInfo":{"name":"mcplink","version":env!("CARGO_PKG_VERSION")},
-        "instructions":"Tools, resources and prompts are namespaced by managed service. Reload the lists after changing the entry's service selection."})
+        "instructions":"Tools, resources and prompts are namespaced by managed service. List-change notifications are sent when the entry or its upstream catalogs change. Clients without live refresh must reload MCP."})
+}
+
+/// Cheap scoped fingerprints: no upstream discovery, Vault access or business calls.
+pub fn catalog_version(engine: &Engine, id: &str) -> Result<Value> {
+    let connections = engine.store.connections()?;
+    let entry = connections
+        .iter()
+        .find(|c| c.id == id)
+        .context("入口不存在")?;
+    let mut fingerprints = Vec::new();
+    for (index, family) in ["tools", "resources", "prompts"].iter().enumerate() {
+        let mut rows = vec![json!([
+            engine.catalog.epoch,
+            entry.id,
+            entry.revision,
+            entry.active,
+            engine.paused.load(Ordering::SeqCst),
+            engine.pool.catalog_generation(id)[index]
+        ])];
+        if let Some(members) = &entry.members {
+            for member in members {
+                if let Some(c) = connections.iter().find(|c| c.id == member.connection_id) {
+                    rows.push(json!([
+                        c.id,
+                        c.revision,
+                        c.active,
+                        engine.pool.catalog_generation(&c.id)[index]
+                    ]));
+                } else {
+                    rows.push(json!([member.connection_id, "missing"]));
+                }
+            }
+        }
+        fingerprints.push((
+            family.to_string(),
+            json!(digest(&serde_json::to_vec(&rows)?)),
+        ));
+    }
+    Ok(Value::Object(fingerprints.into_iter().collect()))
 }
 
 pub fn save(engine: &Engine, p: &Value) -> Result<Value> {
     ensure!(
-        p.as_object().is_some_and(|m| m
-            .keys()
-            .all(|k| matches!(k.as_str(), "id" | "editVersion" | "title" | "connectionIds"))),
+        p.as_object().is_some_and(|m| m.keys().all(|k| matches!(
+            k.as_str(),
+            "id" | "editVersion" | "title" | "connectionIds" | "toolSelections"
+        ))),
         "统一入口包含未知字段"
     );
     let previous = p
@@ -49,6 +174,13 @@ pub fn save(engine: &Engine, p: &Value) -> Result<Value> {
         .and_then(Value::as_array)
         .context("请选择托管服务，空数组表示不提供任何服务")?;
     ensure!(ids.len() <= 64, "每个入口最多选择 64 项服务");
+    let selections = p
+        .get("toolSelections")
+        .map(|v| {
+            v.as_object()
+                .context("工具范围须为服务 ID 到工具列表的映射")
+        })
+        .transpose()?;
     let mut seen = HashSet::new();
     let mut namespaces = HashSet::new();
     let mut members = Vec::new();
@@ -84,11 +216,47 @@ pub fn save(engine: &Engine, p: &Value) -> Result<Value> {
             namespaces.insert(namespace.clone()),
             "入口服务命名空间冲突，请重新创建入口"
         );
+        let include_tools = if let Some(value) = selections.and_then(|s| s.get(id)) {
+            if value.is_null() {
+                None
+            } else {
+                let values = value
+                    .as_array()
+                    .context("工具范围须为工具名数组，或 null 表示沿用服务范围")?;
+                ensure!(values.len() <= MAX_ITEMS, "工具范围超过限制");
+                let mut tools = Vec::new();
+                let mut unique = HashSet::new();
+                for value in values {
+                    let name = value.as_str().context("工具名称无效")?;
+                    ensure!(
+                        !name.is_empty()
+                            && name.len() <= 1024
+                            && !name.chars().any(char::is_control)
+                            && unique.insert(name),
+                        "工具名称为空、重复或超出限制"
+                    );
+                    tools.push(name.to_owned());
+                }
+                tools.sort();
+                Some(tools)
+            }
+        } else {
+            previous
+                .as_ref()
+                .and_then(|c| c.members.as_ref())
+                .and_then(|m| m.iter().find(|m| m.connection_id == id))
+                .and_then(|m| m.include_tools.clone())
+        };
         members.push(GatewayMember {
             connection_id: id.into(),
             namespace,
+            include_tools,
         });
     }
+    ensure!(
+        selections.is_none_or(|s| s.keys().all(|id| seen.contains(id.as_str()))),
+        "工具范围包含未选服务"
+    );
     let title = p
         .get("title")
         .map(|v| v.as_str().context("入口名称无效"))
@@ -280,6 +448,36 @@ async fn list(
         "prompts/list" => ("prompts", "name"),
         _ => bail!("不支持的清单"),
     };
+    let signature = member_signature(&engine, entry)?;
+    if let Some(cursor) = params.get("cursor").filter(|v| !v.is_null()) {
+        let encoded = cursor
+            .as_str()
+            .filter(|c| c.len() < 1024)
+            .context("聚合分页游标无效")?;
+        let decoded: Value = serde_json::from_slice(
+            &URL_SAFE_NO_PAD
+                .decode(encoded)
+                .context("聚合分页游标无效")?,
+        )
+        .context("聚合分页游标无效")?;
+        let snapshot = engine
+            .catalog
+            .get(required(&decoded, "snapshot")?)
+            .context("聚合分页已过期，请从第一页刷新")?;
+        ensure!(
+            snapshot.entry_id == entry.id
+                && snapshot.entry_revision == entry.revision
+                && snapshot.method == method
+                && snapshot.members == signature,
+            "入口或成员已变化，请从第一页刷新"
+        );
+        let offset = decoded["offset"]
+            .as_u64()
+            .and_then(|v| usize::try_from(v).ok())
+            .filter(|v| *v > 0 && *v < snapshot.rows.len() && *v % PAGE_SIZE == 0)
+            .context("聚合分页游标无效")?;
+        return catalog_page(&snapshot, field, offset);
+    }
     let mut jobs = tokio::task::JoinSet::new();
     for (index, member) in entry
         .members
@@ -315,6 +513,9 @@ async fn list(
         };
         for mut item in items {
             let original = item[key].as_str().context("上游清单标识无效")?;
+            if field == "tools" && !member.tool_allowed(original) {
+                continue;
+            }
             let mapped = if key == "name" {
                 alias(&member.namespace, original)
             } else {
@@ -341,37 +542,25 @@ async fn list(
         serialized.len() <= 4 * 1024 * 1024,
         "聚合清单过大，请减少入口服务选择"
     );
-    let hash = digest(&serialized);
-    let offset = match params.get("cursor") {
-        None | Some(Value::Null) => 0,
-        Some(Value::String(cursor)) if cursor.len() < 1024 => {
-            let decoded: Value = serde_json::from_slice(
-                &URL_SAFE_NO_PAD.decode(cursor).context("聚合分页游标无效")?,
-            )
-            .context("聚合分页游标无效")?;
-            ensure!(
-                decoded["revision"] == entry.revision
-                    && decoded["hash"] == hash
-                    && decoded["method"] == method,
-                "聚合清单已变化，请从第一页刷新"
-            );
-            decoded["offset"]
-                .as_u64()
-                .and_then(|v| usize::try_from(v).ok())
-                .filter(|v| *v > 0 && *v < rows.len() && *v % PAGE_SIZE == 0)
-                .context("聚合分页游标无效")?
-        }
-        _ => bail!("聚合分页游标无效"),
-    };
-    let end = (offset + PAGE_SIZE).min(rows.len());
-    let mut result = json!({"_meta":{"mcplink":{"upstreamErrors":errors}}});
-    result[field] = json!(&rows[offset..end]);
-    if end < rows.len() {
-        result["nextCursor"] = json!(URL_SAFE_NO_PAD.encode(serde_json::to_vec(
-            &json!({"revision":entry.revision,"hash":hash,"method":method,"offset":end})
-        )?));
+    ensure!(
+        member_signature(&engine, entry)? == signature,
+        "入口成员已变化，请重新发现清单"
+    );
+    let snapshot = Arc::new(CatalogSnapshot {
+        id: uuid::Uuid::new_v4().to_string(),
+        entry_id: entry.id.clone(),
+        entry_revision: entry.revision,
+        members: signature,
+        method: method.into(),
+        rows,
+        errors,
+        created: Instant::now(),
+        bytes: serialized.len(),
+    });
+    if snapshot.rows.len() > PAGE_SIZE {
+        engine.catalog.insert(snapshot.clone());
     }
-    Ok(result)
+    catalog_page(&snapshot, field, 0)
 }
 
 pub fn request(
@@ -429,9 +618,10 @@ pub fn request(
             let item = items
                 .into_iter()
                 .find(|item| {
-                    item["name"]
-                        .as_str()
-                        .is_some_and(|name| alias(&member.namespace, name) == target)
+                    item["name"].as_str().is_some_and(|name| {
+                        alias(&member.namespace, name) == target
+                            && (method != "tools/call" || member.tool_allowed(name))
+                    })
                 })
                 .context("此工具或提示不在入口清单中")?;
             if let Some(expected) = params.pointer("/_meta/mcplink/expectedUpstreamRevision") {

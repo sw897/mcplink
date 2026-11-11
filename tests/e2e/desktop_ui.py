@@ -40,7 +40,7 @@ def main():
             request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             if request.get("method") == "gateway.save" and request.get("params", {}).get("title") == "异步关闭入口":
                 time.sleep(1.5)
-            if request.get("method") not in {"snapshot","connections.detail","connections.save","connections.export_config","changes.preview","changes.apply","sources.add","connections.source_detail","connections.import","connections.detach","connections.probe","changes.preview_restore","changes.restore","credentials.disconnect","changes.history","gateway.save"}:
+            if request.get("method") not in {"snapshot","connections.detail","connections.save","connections.export_config","changes.preview","changes.apply","sources.add","connections.source_detail","connections.import","connections.detach","connections.probe","changes.preview_restore","changes.restore","credentials.disconnect","changes.history","gateway.save","connections.tools","tools.describe","tools.call","cli.generate","cli.inspect","cli.check","gateway.refresh"}:
                 return self.send_error(403)
             if request["method"] == "sources.add" and request.get("params") != {"agent":"codex","path":str(extra)}:
                 return self.send_error(403)
@@ -71,13 +71,17 @@ if (location.origin === ORIGIN) {
         method:"POST", headers:{"Content-Type":"application/json","X-Fixture":KEY},body:JSON.stringify(args)
       })).json();
       if (cmd.startsWith("plugin:event|")) return ++sequence;
-      if (cmd === "plugin:dialog|open") return SOURCE_PATH;
+      if (cmd === "plugin:dialog|open") {
+        if (args?.options?.directory) return CLI_PARENT;
+        if (args?.options?.filters?.[0]?.name === "mcplink CLI") return CLI_MANIFEST;
+        return SOURCE_PATH;
+      }
       if (cmd === "desktop_status") return {supported:false};
       throw Error("Unexpected desktop operation");
     }
   };
 }
-""".replace("ORIGIN",json.dumps(origin)).replace("KEY",json.dumps(secret)).replace("SOURCE_PATH", json.dumps(str(extra))))
+""".replace("ORIGIN",json.dumps(origin)).replace("KEY",json.dumps(secret)).replace("SOURCE_PATH", json.dumps(str(extra))).replace("CLI_PARENT",json.dumps(str(record))).replace("CLI_MANIFEST",json.dumps(str(record/"desktop-tools/desktop-tools.mcplink.json"))))
 
     def browser(*command):
         return subprocess.check_output(["agent-browser","--session",args.session,*command],
@@ -469,8 +473,14 @@ if (location.origin === ORIGIN) {
         browser("find", "label", "入口名称", "fill", "桌面聚合入口")
         browser("find", "label", "聚合服务甲", "click")
         browser("find", "label", "聚合服务乙", "click")
+        browser("find", "first", ".tool-range > button", "click")
+        wait_for("document.querySelector('.tool-range-body')?.innerText.includes('沿用服务范围')")
+        browser("find", "label", "仅开放所选工具", "click")
+        wait_for("!![...document.querySelectorAll('.tool-range-list label')].find(l=>l.innerText==='read_document')")
+        browser("find", "label", "read_document", "click")
         audit("gateway-selection")
-        button("保存服务选择")
+        checks.append("entry editor selects a per-service allowlist without nesting interactive controls")
+        button("保存入口")
         wait_for("document.querySelector('dialog')?.innerText.includes('入口中的服务') && document.querySelectorAll('dialog .binding-detail').length === 2")
         browser("press", "Escape")
         wait_for("document.querySelector('article h2')?.textContent === '桌面聚合入口'")
@@ -483,9 +493,9 @@ if (location.origin === ORIGIN) {
         browser("wait", "--text", "接入结果")
         button("完成")
         native_before = hermes_path.read_bytes()
-        button("服务选择")
+        button("服务与工具范围")
         browser("find", "label", "聚合服务乙", "click")
-        button("保存服务选择")
+        button("保存入口")
         wait_for("document.querySelector('dialog')?.innerText.includes('入口中的服务') && document.querySelectorAll('dialog .binding-detail').length === 2")
         browser("press", "Escape")
         wait_for("!document.querySelector('dialog[open]')")
@@ -493,6 +503,55 @@ if (location.origin === ORIGIN) {
         wait_for("document.querySelector('article')?.innerText.includes('1 项托管服务')")
         browser("screenshot", str(record/"gateway-entry.png"))
         audit("gateways")
+        entry = harness.rpc("gateway.list")[0]
+        assert entry["members"][0]["includeTools"] == ["read_document"]
+        alias = entry["members"][0]["namespace"] + "__read_document"
+        import urllib.request
+        def stats():
+            with urllib.request.urlopen(f"http://127.0.0.1:{harness.port}/stats",timeout=5) as response:
+                return json.load(response)
+        calls_before = stats()["calls"]
+        button("工具 CLI")
+        wait_for("!!document.querySelector('.cli-tools button')")
+        assert stats()["calls"] == calls_before
+        browser("find", "label", "导出 " + alias, "click")
+        button("查看 " + alias + " 参数")
+        wait_for("!!document.querySelector('.cli-tool-help textarea')")
+        browser("find", "label", "调用参数（JSON 对象）", "fill", '{"id":"weekly-fixture"}')
+        audit("tool-cli")
+        browser("screenshot", str(record/"tool-cli.png"))
+        browser("eval", "(()=>{const b=[...document.querySelectorAll('dialog button')].find(b=>b.innerText==='实际调用一次');b.click();b.click()})()")
+        wait_for("!!document.querySelector('.cli-result') && !document.querySelector('dialog footer .primary').textContent.includes('调用工具')")
+        assert stats()["calls"] == calls_before + 1
+        browser("find", "label", "命令名称", "fill", "desktop-tools")
+        button("选择目录")
+        button("生成 CLI")
+        wait_for("!!document.querySelector('.cli-generated')")
+        manifest = record / "desktop-tools/desktop-tools.mcplink.json"
+        assert manifest.is_file() and "synthetic-fixture-authorization" not in manifest.read_text()
+        button("复制清单位置")
+        wait_for("window.__fixtureClipboard === " + json.dumps(str(manifest)))
+        button("检查已有 CLI")
+        wait_for("document.querySelector('.cli-contract')?.innerText.includes('工具契约一致')")
+        browser("screenshot", str(record/"tool-cli-generated.png"))
+        button("关闭")
+        checks.append("desktop discovers and explains a tool, guards double submission, generates and checks a credential-free CLI with explicit directory selection")
+        button("通知 Agent 刷新")
+        checks.append("entry exposes an explicit list-refresh action")
+        member_id = entry["members"][0]["connectionId"]
+        harness.rpc("credentials.update", {"id": member_id, "value": "synthetic-invalid-authorization"})
+        button("服务与工具范围")
+        browser("find", "first", ".tool-range > button", "click")
+        wait_for("!!document.querySelector('.tool-range-body [role=alert]')")
+        browser("find", "label", "仅开放所选工具", "click")
+        wait_for("document.querySelector('.tool-range-list input')?.checked === true")
+        button("保存入口")
+        wait_for("document.querySelector('dialog')?.innerText.includes('入口中的服务')")
+        browser("press", "Escape")
+        assert harness.rpc("gateway.list")[0]["members"][0]["includeTools"] == ["read_document"]
+        harness.rpc("credentials.update", {"id": member_id, "value": "synthetic-fixture-authorization"})
+        assert harness.rpc("connections.probe", {"id": member_id})["connection"]["status"] == "ready"
+        checks.append("a failed tool discovery preserves the entry's saved allowlist through edit and save")
         button("账号")
         wait_for("![...document.querySelectorAll('article h2')].some(h=>h.textContent === '桌面聚合入口') && [...document.querySelectorAll('article')].some(a=>a.querySelector('h2')?.textContent === '聚合服务甲' && a.innerText.includes('Hermes'))")
         browser("click", "nav button:first-child")
@@ -501,7 +560,7 @@ if (location.origin === ORIGIN) {
         button("统一入口")
         browser("click", ".header-actions button.primary")
         browser("find", "label", "入口名称", "fill", "异步关闭入口")
-        button("保存服务选择")
+        button("保存入口")
         browser("press", "Escape")
         wait_for("document.querySelectorAll('.account-card').length === 2 && !document.querySelector('dialog[open]')")
         checks.append("closing an aggregate editor during an in-flight save refreshes the entry without reopening a dialog")

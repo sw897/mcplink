@@ -49,7 +49,7 @@ Codex、Hermes、Claude Code、OpenCode、ZCode、DeepSeek Harness、OpenClaw、
 
 直连配置包含完整地址、凭据和启动参数，应用前需核对保存及共享范围。共享配置只保存本地程序入口和连接引用，上游凭据留在系统凭据库中。
 
-桌面“统一入口”页创建入口、选择服务，再接给指定 Agent。不同 Agent 可使用不同入口，也可共用同一入口。修改服务选择无需重写原生配置，客户端需要刷新工具清单，必要时重新加载 MCP。单服务入口保留上游名称；聚合入口使用稳定命名空间处理工具、提示词和资源 URI 冲突。
+桌面“统一入口”页创建入口、选择服务与工具范围，再接给指定 Agent。不同 Agent 可使用不同入口，也可共用同一入口。修改选择无需重写原生配置。支持实时刷新的客户端会收到清单变更通知；其他客户端仍需重新加载 MCP。也可点击“通知 Agent 刷新”或运行 `mcplink gateway refresh ENTRY_ID`。单服务入口保留上游名称；聚合入口使用稳定命名空间处理工具、提示词和资源 URI 冲突。
 
 托管认证复用限于同一 mcplink 数据目录中的同一服务连接、账号与授权范围。上游支持时自动刷新，撤销或无法续期时重新认证；原生直连不承诺共用托管 OAuth 登录态。CLI 同样引用托管连接，不另建账号。
 
@@ -94,9 +94,12 @@ CLI 可以直接调用托管连接中的工具，也可以为选定工具生成�
 mcplink connections tools CONNECTION_ID --tool TOOL_NAME
 mcplink call CONNECTION_ID TOOL_NAME --stdin
 mcplink cli generate CONNECTION_ID --name notes --output ./notes-cli --tool TOOL_NAME
+mcplink cli check ./notes-cli/notes.mcplink.json
 ```
 
 `call --stdin` 接收工具参数 JSON。生成物复用本机 mcplink 运行时和托管认证，不包含凭据；使用方法与错误边界见 [CLI 指南](docs/agent-cli.md)。
+
+从托管服务或统一入口的“工具 CLI”打开工作流，查看参数、勾选工具、生成到新目录，也可以明确触发一次实际调用。已有清单可检查当前契约，变化后核对参数并生成到新目录，原文件保留。
 
 ## 管理 CLI 与 Skill
 

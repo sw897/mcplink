@@ -1,0 +1,94 @@
+name: Signed Windows release draft
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag matching the source version
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: signed-windows-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    env:
+      PYTHONUTF8: "1"
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - name: Verify source version and import signing identity
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_SIGNING_CERTIFICATE_SHA1: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_SHA1 }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -c "import os,sys;sys.path.insert(0,'scripts');from release_manifest import release_version;assert os.environ['RELEASE_TAG']=='v'+release_version(),'Tag/version mismatch'"
+          if ($LASTEXITCODE) { throw 'Tag/version mismatch' }
+          if (-not $env:WINDOWS_CERTIFICATE -or $env:WINDOWS_SIGNING_CERTIFICATE_SHA1 -notmatch '^[0-9a-fA-F]{40}$') { throw 'Missing Windows signing identity secrets' }
+          $certificatePath = Join-Path $env:RUNNER_TEMP 'mcplink-signing.pfx'
+          try {
+            [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+            $password = if ($env:WINDOWS_CERTIFICATE_PASSWORD) { ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText } else { New-Object Security.SecureString }
+            $certificates = @(Import-PfxCertificate -FilePath $certificatePath -CertStoreLocation Cert:\CurrentUser\My -Password $password)
+            $certificates.Thumbprint | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'mcplink-imported-identities.txt')
+            if (-not ($certificates | Where-Object Thumbprint -eq $env:WINDOWS_SIGNING_CERTIFICATE_SHA1)) { throw 'Imported identity does not match the selected publisher' }
+            "WINDOWS_SIGNING_CERTIFICATE_SHA1=$($env:WINDOWS_SIGNING_CERTIFICATE_SHA1)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          } finally { Remove-Item $certificatePath -Force -ErrorAction SilentlyContinue }
+      - run: npm ci
+      - name: Prepare verified bundler tools and upgrade baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python -u scripts/prepare_windows_bundler.py
+          python -u scripts/prepare_upgrade_baseline.py --repo "$env:GITHUB_REPOSITORY" --artifact acceptance-windows-2025 --platform windows --record artifacts/e2e/release-upgrade-baseline
+      - name: Build, sign, timestamp and verify
+        env:
+          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: npm run release:windows -- --signed
+      - name: Add verified artifacts to a draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: python {0}
+        run: |
+          import os, subprocess, sys
+          from pathlib import Path
+          directories = sorted(Path('artifacts/releases').glob('*/*'))
+          assert len(directories) == 1
+          subprocess.run([sys.executable, 'scripts/upload_release_draft.py', '--tag', os.environ['RELEASE_TAG'], '--directory', str(directories[0]), '--platform', 'windows'], check=True)
+      - name: Remove imported signing key
+        if: always()
+        shell: pwsh
+        run: |
+          $identities = Join-Path $env:RUNNER_TEMP 'mcplink-imported-identities.txt'
+          if (Test-Path -LiteralPath $identities) {
+            foreach ($identity in Get-Content -LiteralPath $identities) {
+              if ($identity -match '^[0-9a-fA-F]{40}$') { Remove-Item -LiteralPath "Cert:\CurrentUser\My\$identity" -DeleteKey -ErrorAction SilentlyContinue }
+            }
+            Remove-Item -LiteralPath $identities -Force
+          }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: signed-windows-release
+          if-no-files-found: error
+          path: artifacts/releases/*/*/*

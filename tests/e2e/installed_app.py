@@ -3,6 +3,7 @@ import argparse
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import platform
 import plistlib
@@ -19,6 +20,7 @@ def main():
     parser.add_argument("--dmg", type=Path)
     parser.add_argument("--record", type=Path, required=True)
     parser.add_argument("--previous-app", type=Path)
+    parser.add_argument("--previous-dmg", type=Path, default=os.environ.get("MCPLINK_PREVIOUS_DMG"))
     parser.add_argument("--keep", action="store_true")
     args = parser.parse_args()
     version = json.loads((e2e.ROOT / "package.json").read_text())["version"]
@@ -56,6 +58,18 @@ def main():
 
     try:
         assert sys.platform == "darwin", "DMG lifecycle requires macOS"
+        assert not (args.previous_app and args.previous_dmg), "Select one previous App or DMG"
+        if args.previous_dmg:
+            previous_mount = None
+            try:
+                attached = subprocess.check_output(["hdiutil", "attach", "-readonly", "-nobrowse", "-mountrandom", "/Volumes", "-plist", str(args.previous_dmg.resolve())])
+                previous_mount = next(Path(e["mount-point"]) for e in plistlib.loads(attached)["system-entities"] if "mount-point" in e)
+                args.previous_app = record / "Previous Build/mcplink.app"
+                args.previous_app.parent.mkdir()
+                subprocess.run(["ditto", str(previous_mount / "mcplink.app"), str(args.previous_app)], check=True)
+            finally:
+                if previous_mount:
+                    subprocess.run(["hdiutil", "detach", str(previous_mount)], check=True, capture_output=True)
         attached = subprocess.check_output(["hdiutil", "attach", "-readonly", "-nobrowse", "-mountrandom", "/Volumes", "-plist", str(dmg.resolve())])
         mount = next(Path(e["mount-point"]) for e in plistlib.loads(attached)["system-entities"] if "mount-point" in e)
         application = record / "Test Applications/mcplink.app"
@@ -69,6 +83,41 @@ def main():
         harness.environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
         # Do not inherit a live Claude profile while checking newly added sources.
         harness.environment["CLAUDE_CONFIG_DIR"] = str(harness.home / ".claude")
+        if args.previous_app:
+            # Initialize the older release first; never attempt to downgrade new data.
+            saved = record / "Current Build/mcplink.app"
+            saved.parent.mkdir()
+            shutil.move(application, saved)
+            subprocess.run(["ditto", str(args.previous_app.resolve()), str(application)], check=True)
+            use_app(application)
+            harness.rpc("snapshot")
+            old_connection = harness.rpc("connections.import", {"sourceId":"hermes:user", "name":"office_docs"})["id"]
+            assert harness.rpc("connections.probe", {"id":old_connection})["connection"]["status"] == "ready"
+            harness.changes(old_connection, ["codex:user", "hermes:user"], mode="shared")
+            configs = [harness.home / ".codex/config.toml", harness.home / ".hermes/config.yaml"]
+            before = [p.read_bytes() for p in configs]
+            stop_daemon()
+            shutil.rmtree(application)
+            subprocess.run(["ditto", str(saved), str(application)], check=True)
+            use_app(application)
+            assert harness.rpc("connections.probe", {"id":old_connection})["connection"]["status"] == "ready"
+            assert [p.read_bytes() for p in configs] == before
+            report["previous_binary_sha256"] = hashlib.sha256((args.previous_app / "Contents/MacOS/mcplink").read_bytes()).hexdigest()
+            passed("installing over an older initialized build retains account IDs, credentials and native configurations")
+            stop_daemon()
+            import sqlite3
+            with sqlite3.connect(harness.data / "mcplink.sqlite3") as database:
+                schema = database.execute("PRAGMA user_version").fetchone()[0]
+            report["upgraded_database_semantics"] = schema
+            # Record, rather than assume, how the actual previous executable treats it.
+            previous = subprocess.Popen([str(args.previous_app / "Contents/MacOS/mcplink"), "daemon", "--data-dir", str(harness.data)], env=harness.environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                stdout, stderr = previous.communicate(timeout=2)
+                report["previous_backend_refused_new_data"] = previous.returncode != 0 and "数据库来自较新版本" in stdout + stderr
+            except subprocess.TimeoutExpired:
+                # Same-semantic-version baselines remain usable; stop only this fixture.
+                stop_daemon()
+                previous.communicate(timeout=10)
         initial = harness.rpc("snapshot")
         assert {s["agent"] for s in initial["sources"]} >= {"codex", "hermes"}
         passed("DMG installation under a path with spaces works with minimal Finder PATH")
@@ -104,26 +153,6 @@ def main():
         with_new_path = harness.bridge(connection, "reloaded-after-move")
         assert "result" in with_new_path.call("tools/list")
         passed("moving the app and reapplying preview repairs native shared paths")
-        if args.previous_app:
-            with_new_path.close()
-            harness.clients.clear()
-            stop_daemon()
-            configs = [harness.home / ".codex/config.toml", harness.home / ".hermes/config.yaml"]
-            before = [p.read_bytes() for p in configs]
-            # Replace only this test installation. Keep managed data and config files.
-            saved = record / "Current Build/mcplink.app"
-            saved.parent.mkdir()
-            shutil.move(moved, saved)
-            subprocess.run(["ditto", str(args.previous_app.resolve()), str(moved)], check=True)
-            use_app(moved)
-            assert any(c["id"] == connection for c in harness.rpc("snapshot")["connections"])
-            stop_daemon()
-            shutil.rmtree(moved)
-            subprocess.run(["ditto", str(saved), str(moved)], check=True)
-            use_app(moved)
-            assert harness.rpc("connections.probe", {"id": connection})["connection"]["status"] == "ready"
-            assert [p.read_bytes() for p in configs] == before
-            passed("overwriting the previous build retains managed data, credentials and native configs")
         report.update(conclusion="PASS", binary=str(e2e.BINARY),
                       binary_sha256=hashlib.sha256(e2e.BINARY.read_bytes()).hexdigest(),
                       native_user_config_modified=False,

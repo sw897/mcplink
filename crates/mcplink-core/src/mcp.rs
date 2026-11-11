@@ -2,9 +2,9 @@ use crate::{Engine, config, model::Connection};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use rmcp::{
-    RoleClient, ServiceExt,
+    ClientHandler, RoleClient, ServiceExt,
     model::*,
-    service::{ClientInitializeError, Peer, RunningService},
+    service::{ClientInitializeError, NotificationContext, Peer, RunningService},
     transport::{
         StreamableHttpClientTransport, TokioChildProcess,
         auth::{
@@ -19,12 +19,38 @@ use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     process::Stdio,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 use tokio::{net::TcpListener, sync::Mutex as AsyncMutex};
 
-type Session = RunningService<RoleClient, ClientConfig>;
+type Session = RunningService<RoleClient, CatalogClient>;
+
+#[derive(Default)]
+struct CatalogClock([AtomicU64; 3]);
+
+struct CatalogClient {
+    config: ClientConfig,
+    clock: Arc<CatalogClock>,
+}
+
+impl ClientHandler for CatalogClient {
+    fn get_info(&self) -> ClientConfig {
+        self.config.clone()
+    }
+    async fn on_tool_list_changed(&self, _: NotificationContext<RoleClient>) {
+        self.clock.0[0].fetch_add(1, Ordering::Relaxed);
+    }
+    async fn on_resource_list_changed(&self, _: NotificationContext<RoleClient>) {
+        self.clock.0[1].fetch_add(1, Ordering::Relaxed);
+    }
+    async fn on_prompt_list_changed(&self, _: NotificationContext<RoleClient>) {
+        self.clock.0[2].fetch_add(1, Ordering::Relaxed);
+    }
+}
 
 fn client_config() -> ClientConfig {
     // ServiceExt::serve performs legacy initialize, not 2026 server/discover.
@@ -60,10 +86,33 @@ type SessionSlot = Arc<AsyncMutex<Option<(u64, Session)>>>;
 pub struct McpPool {
     sessions: Mutex<HashMap<String, SessionSlot>>,
     refresh: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
+    catalogs: Mutex<HashMap<String, Arc<CatalogClock>>>,
     shutdown_guard: AsyncMutex<()>,
 }
 
 impl McpPool {
+    fn clock(&self, id: &str) -> Arc<CatalogClock> {
+        self.catalogs
+            .lock()
+            .unwrap()
+            .entry(id.into())
+            .or_default()
+            .clone()
+    }
+
+    pub fn catalog_generation(&self, id: &str) -> [u64; 3] {
+        self.clock(id)
+            .0
+            .each_ref()
+            .map(|v| v.load(Ordering::Relaxed))
+    }
+
+    pub fn refresh_catalog(&self, id: &str) {
+        for generation in &self.clock(id).0 {
+            generation.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     pub fn refresh_lock(&self, id: &str) -> Arc<AsyncMutex<()>> {
         self.refresh
             .lock()
@@ -86,6 +135,7 @@ impl McpPool {
     }
 
     pub async fn invalidate(&self, id: &str) {
+        self.refresh_catalog(id);
         let slot = self.sessions.lock().unwrap().remove(id);
         if let Some(slot) = slot
             && let Some((_, session)) = slot.lock().await.take()
@@ -232,17 +282,23 @@ impl McpPool {
                             AuthClient::new(client, manager),
                             transport,
                         );
-                        Ok(client_config()
-                            .serve(transport)
-                            .await
-                            .map_err(connection_error)?)
+                        Ok(CatalogClient {
+                            config: client_config(),
+                            clock: self.clock(id),
+                        }
+                        .serve(transport)
+                        .await
+                        .map_err(connection_error)?)
                     } else {
                         let transport =
                             StreamableHttpClientTransport::with_client(client, transport);
-                        Ok(client_config()
-                            .serve(transport)
-                            .await
-                            .map_err(connection_error)?)
+                        Ok(CatalogClient {
+                            config: client_config(),
+                            clock: self.clock(id),
+                        }
+                        .serve(transport)
+                        .await
+                        .map_err(connection_error)?)
                     }
                 } else {
                     let executable = definition.command.as_deref().context("未配置启动命令")?;
@@ -311,10 +367,13 @@ impl McpPool {
                     };
                     let transport = TokioChildProcess::new(command)
                         .context("无法启动 MCP 服务，请检查命令和运行环境")?;
-                    Ok(client_config()
-                        .serve(transport)
-                        .await
-                        .map_err(connection_error)?)
+                    Ok(CatalogClient {
+                        config: client_config(),
+                        clock: self.clock(id),
+                    }
+                    .serve(transport)
+                    .await
+                    .map_err(connection_error)?)
                 }
             },
         );

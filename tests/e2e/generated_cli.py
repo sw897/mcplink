@@ -151,8 +151,15 @@ class GeneratedCli(ToolCalls):
         self.passed("existing files, linked destinations, missing/invalid tools and concurrent generation cannot overwrite output")
 
         interrupted=self.record/"interrupted-generation"
+        # Generation now runs in the managed backend; inject the failure at its
+        # process boundary, with no live Bridge able to race daemon startup.
+        for client in self.clients:
+            client.close()
+        self.clients.clear()
+        self.cli("gateway","stop")
         self.cli("cli","generate",connection,"--name","retry-tools","--output",str(interrupted),"--tool","read_document",env=self.environment|{"MCPLINK_FAILPOINT":"cli-after-launchers"},exit_status=1)
         assert not interrupted.exists()
+        self.cli("gateway","stop")
         self.generate(connection,interrupted,name="retry-tools",tools=["read_document"])
         self.passed("an interrupted fixture write removes only newly created files and permits a clean retry")
 

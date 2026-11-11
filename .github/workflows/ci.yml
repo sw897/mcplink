@@ -15,7 +15,7 @@ jobs:
       matrix:
         os: [macos-15, windows-2025]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       PYTHONUTF8: "1"
     steps:
@@ -54,6 +54,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python -u scripts/prepare_windows_bundler.py
       - run: npm run bundle
+      - name: Find a previous successful installer for upgrade acceptance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: python {0}
+        run: |
+          import os, subprocess, sys
+          platform = "windows" if os.name == "nt" else "macos"
+          artifact = "acceptance-windows-2025" if os.name == "nt" else "acceptance-macos-15"
+          subprocess.run([sys.executable, "scripts/prepare_upgrade_baseline.py", "--repo", os.environ["GITHUB_REPOSITORY"], "--artifact", artifact, "--platform", platform, "--record", "artifacts/e2e/ci-upgrade-baseline"], check=True)
       - name: Select acceptance binary
         shell: python {0}
         run: |
@@ -124,6 +133,18 @@ jobs:
       - name: Aggregate routing and shared authentication acceptance
         timeout-minutes: 5
         run: python -u tests/e2e/aggregate_gateway.py --record artifacts/e2e/ci-aggregate --pi-package artifacts/e2e/native-pi/node_modules/@earendil-works/pi-coding-agent
+      - name: Stable aggregate catalog pagination
+        timeout-minutes: 5
+        run: python -u tests/e2e/catalog_pagination.py --record artifacts/e2e/ci-catalog-pagination
+      - name: Independent entry tool policy acceptance
+        timeout-minutes: 5
+        run: python -u tests/e2e/entry_policy.py --record artifacts/e2e/ci-entry-policy
+      - name: Catalog notifications and official Pi live refresh
+        timeout-minutes: 5
+        run: python -u tests/e2e/catalog_refresh.py --record artifacts/e2e/ci-catalog-refresh --pi-package artifacts/e2e/native-pi/node_modules/@earendil-works/pi-coding-agent
+      - name: Desktop and CLI generation contract workflow
+        timeout-minutes: 5
+        run: python -u tests/e2e/cli_workflow.py --record artifacts/e2e/ci-cli-workflow
       - name: Isolated remote transport acceptance
         timeout-minutes: 5
         run: python -u tests/e2e/remote_transports.py --record artifacts/e2e/ci-remote
@@ -134,9 +155,27 @@ jobs:
         if: runner.os == 'Windows'
         timeout-minutes: 5
         run: python -u tests/e2e/windows_background.py --record artifacts/e2e/ci-windows-background
+      - name: Windows signing refusal boundaries
+        if: runner.os == 'Windows'
+        run: python -u tests/e2e/windows_signing.py --record artifacts/e2e/ci-windows-signing
+      - name: Windows installer upgrade and recovery
+        if: runner.os == 'Windows'
+        timeout-minutes: 8
+        shell: python {0}
+        run: |
+          import os, subprocess, sys
+          from pathlib import Path
+          version = __import__('json').loads(Path('package.json').read_text())['version']
+          installer = next(Path('target/release/bundle/nsis').glob(f'*_{version}_*setup.exe'))
+          previous = os.environ.get('MCPLINK_PREVIOUS_INSTALLER')
+          subprocess.run([sys.executable, '-u', 'tests/e2e/windows_installer.py', '--installer', str(installer), '--record', 'artifacts/e2e/ci-windows-installed', *(['--previous-installer', previous] if previous else [])], check=True)
       - name: Daemon exit and process cleanup acceptance
         timeout-minutes: 5
         run: python -u tests/e2e/daemon_lifecycle.py --record artifacts/e2e/ci-lifecycle
+      - name: Windows preview release entry point
+        if: runner.os == 'Windows'
+        timeout-minutes: 12
+        run: npm run release:windows
       - name: macOS DMG acceptance
         if: runner.os == 'macOS'
         run: |
@@ -167,6 +206,16 @@ jobs:
             artifacts/e2e/ci-pi/report.json
             artifacts/e2e/ci-tools/report.json
             artifacts/e2e/ci-generated/report.json
+            artifacts/e2e/ci-aggregate/report.json
+            artifacts/e2e/ci-aggregate/native-pi.json
+            artifacts/e2e/ci-catalog-pagination/report.json
+            artifacts/e2e/ci-entry-policy/report.json
+            artifacts/e2e/ci-catalog-refresh/report.json
+            artifacts/e2e/ci-catalog-refresh/native-pi.json
+            artifacts/e2e/ci-cli-workflow/report.json
+            artifacts/e2e/ci-upgrade-baseline/report.json
+            artifacts/e2e/ci-windows-signing/report.json
+            artifacts/e2e/ci-windows-installed/report.json
             artifacts/e2e/ci-remote/report.json
             artifacts/e2e/ci-oauth/report.json
             artifacts/e2e/ci-windows-background/report.json
@@ -176,6 +225,7 @@ jobs:
             artifacts/e2e/ci-manifest/release-manifest.json
             target/release/bundle/dmg/*.dmg
             target/release/bundle/nsis/*setup.exe
+            artifacts/releases/*/*/*
 
 
   public-source:

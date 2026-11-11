@@ -139,6 +139,8 @@ enum CliCommand {
     },
     /// 离线检查清单，不打开凭据库或后台
     Inspect { manifest: PathBuf },
+    /// 检查当前托管工具契约，不执行工具或修改生成文件
+    Check { manifest: PathBuf },
     /// 核对全部工具契约后，显式绑定当前数据目录的连接
     Rebind {
         manifest: PathBuf,
@@ -273,6 +275,10 @@ enum ChangeCommand {
 
 #[derive(Subcommand)]
 enum GatewayCommand {
+    /// 通知客户端刷新此入口或服务的清单；不调用业务工具
+    Refresh {
+        connection: String,
+    },
     /// 查看已保存的聚合入口及其服务选择
     List,
     /// 保存聚合入口；只引用现有连接，不创建或复制账号授权
@@ -332,7 +338,7 @@ fn schema() -> Value {
                 "definition":{"command":"string (stdio)","args":"string[]","env":"object<string,string>","cwd":"string","url":"string (HTTP)","headers":"object<string,string>","enabled":"boolean (default true)","oauth":"boolean","clientId":"string or null","clientSecret":"string or null; masked on output","oauthScopes":"string[] (empty uses server suggestions)","oauthCallbackPort":"integer 1–65535 or null (automatic)","includeTools":"string[]","excludeTools":"string[]","includeSpecified":"boolean (true to restrict even when includeTools is empty)","timeout":"integer seconds","startupTimeout":"integer seconds","resourcesDisabled":"boolean","promptsDisabled":"boolean"},
                 "semantics":"Edit the normalized definition from connections show. Masked credentials stay with their origin. Changing origin suspends access. Metadata edits preserve connection state."},
             "credentials update":{"required":["value"],"optional":["header (default Authorization)"],"semantics":"Value stored verbatim, no Bearer prefix added"},
-            "gateway save":{"required":["connectionIds"],"optional":["id","editVersion","title"],"semantics":"Create an aggregate entry or replace its service selection. Updates require the returned editVersion. Empty selection exposes nothing. Members must be existing upstream connection IDs; authentication stays with those connections."},
+            "gateway save":{"required":["connectionIds"],"optional":["id","editVersion","title","toolSelections"],"semantics":"Create an aggregate entry or replace its service selection. Updates require editVersion. toolSelections maps selected connection IDs to original tool names: null inherits the service policy, [] exposes no tools; omission retains the saved range. Entry ranges can only narrow service-wide policy. Empty service selection exposes nothing; authentication stays with member connections."},
             "credentials oauth-config":{"optional":{"clientId":"string or null","clientSecret":"string, retained mask or null","scopes":"string[]; empty uses server suggestions","callbackPort":"integer 1–65535 or null"},"semantics":"Partial update. Omitted fields retain values; null clears optional fields. Does not start login or switch Token mode; changes invalidate an existing OAuth grant. Secrets use stdin and the system credential store; direct native export is unavailable for managed OAuth parameters."},
             "mcp request":{"required":["method"],"optional":["params"]},
             "call":{"encoding":"tool arguments JSON object, preserved without string coercion","schema":"upstream inputSchema; drafts 4/6/7/2019-09/2020-12, default 2020-12; external retrieval disabled; format is annotation","invalidArgumentsExitCode":2},
@@ -450,6 +456,16 @@ async fn execute(command: Command, data: PathBuf) -> Result<Value, Failure> {
         } => return install_skill(&agent).map_err(Failure::operation),
         Command::Cli { command } => {
             return match command {
+                CliCommand::Check { manifest } => {
+                    generated::Manifest::read(&manifest).map_err(Failure::operation)?;
+                    let manifest = std::path::absolute(manifest)
+                        .map_err(|error| Failure::operation(error.into()))?;
+                    let client = Client::connect(data).await.map_err(Failure::operation)?;
+                    client
+                        .call("cli.check", json!({"manifest":manifest}))
+                        .await
+                        .map_err(Failure::operation)
+                }
                 CliCommand::Inspect { manifest } => generated::Manifest::read(&manifest)
                     .and_then(|manifest| Ok(serde_json::to_value(manifest)?))
                     .map_err(Failure::operation),
@@ -606,6 +622,9 @@ async fn execute(command: Command, data: PathBuf) -> Result<Value, Failure> {
             }
         },
         Command::Gateway { command } => match command {
+            GatewayCommand::Refresh { connection } => {
+                ("gateway.refresh", json!({"id":connection}), None, false)
+            }
             GatewayCommand::List => ("gateway.list", json!({}), None, false),
             GatewayCommand::Save { .. } => (
                 "gateway.save",

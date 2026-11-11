@@ -10,7 +10,7 @@ mcplink 围绕多 MCP Server 统一接入与 MCP 转 CLI 构建。两种入口�
 
 `gateway.rs` 合并 tools、resources、prompts 清单，为名称及资源 URI 增加命名空间，并将调用派发给成员连接。各成员通过同一 `McpPool` 和 Vault 维护会话及 OAuth 刷新。清单有界分页；成员并行发现，单个故障通过 `_meta.mcplink.upstreamErrors` 报告，其他服务继续提供清单。工具调用固定成员、入口修订及发现时的工具契约，失败不自动重发。
 
-当前不宣告清单变更通知；客户端需要刷新清单，必要时重载 MCP。入口服务选择保存后立即生效，不重写已绑定的 Agent 配置；原生配置迁移仍需预览和应用。
+Bridge 对已支持的清单宣告 listChanged；上游通知更新连接的分类计数器，Bridge 定时比较只含入口/成员修订和计数器的摘要，通知相应客户端刷新。断开时取消监听；不会通过轮询清单或业务工具判断变化。不能处理通知的客户端仍需重载 MCP。入口服务选择保存后立即生效，不重写已绑定的 Agent 配置；原生配置迁移仍需预览和应用。
 
 业务 Skill 由外部分发流程管理；软件只内置自身的管理 Skill。Skill 分发、模型切换及办公平台业务功能不作为产品核心。
 
@@ -19,7 +19,7 @@ mcplink 围绕多 MCP Server 统一接入与 MCP 转 CLI 构建。两种入口�
 - **桌面**：Tauri 2 + React/TypeScript，提供服务盘点、连接编辑、账号维护、按 Agent 查看接入、变更预览和恢复。客户端操作由安装状态和来源能力决定；打开接入窗口不纳管服务，来源导入需明确操作。
 - **管理核心**：Rust `mcplink-core`，维护规范连接、SQLite 元数据、系统凭据库和配置操作日志。客户端适配器处理 TOML、YAML、JSON/JSONC/JSON5 及配置生成，复用同一规范连接和 Bridge。需要在客户端确认的内容不生成虚假的绑定或原生变更记录。完整能力见[Agent 接入](agent-discovery.md)。
 - **Agent 配置来源**：每个来源保留作用域、路径、服务表及权限。编辑复用预览、哈希检查、备份和逐条恢复事务，保留未涉及设置及客户端格式；插件与托管来源保持只读。客户端审批、信任、登录缓存和插件升级由原客户端维护。具体边界见[配置适配](agent-adapters.md)。
-- **工具 CLI 与管理接口**：`call` 调用精确 MCP 工具，`cli generate/inspect/rebind/run` 提供不含凭据的轻量命令入口；管理命令维护服务与配置。两者复用后台 RPC、认证及工具策略，使用 JSON 输出、stdin 和明确退出码。`skill show/install` 从二进制导出或安装管理 Skill，无需后台。详见 [CLI 指南](agent-cli.md)。
+- **工具 CLI 与管理接口**：`call` 调用精确 MCP 工具，`cli generate/inspect/check/rebind/run` 提供不含凭据的轻量命令入口；管理命令维护服务与配置。两者复用后台 RPC、认证及工具策略，使用 JSON 输出、stdin 和明确退出码。`skill show/install` 从二进制导出或安装管理 Skill，无需后台。详见 [CLI 指南](agent-cli.md)。
 - **后台**：独立 `mcplink daemon`，每个数据目录单实例。Windows 关闭窗口后收起到托盘，左键显示窗口，右键可暂停共享、设置登录自启或退出托盘。登录自启使用当前用户启动项和 `--background`，窗口从创建起隐藏；重复启动复用现有桌面实例。托盘每 10 秒检查后台并按需恢复；退出托盘后代理继续运行，由后续调用按需恢复，不安装 Windows 系统服务。
 - **MCP 入口**：Agent 为单服务或聚合入口启动 STDIO Bridge，通过带本地认证的 loopback HTTP 调用后台。Bridge 引用普通连接 ID 时提供单个上游，引用聚合连接 ID 时提供所选多个上游。后台用 rmcp 连接上游 STDIO 或 Streamable HTTP。
 
@@ -35,9 +35,9 @@ Windows 托盘和 macOS 菜单栏共用后台生命周期：关窗隐藏，普�
 
 ## 配置与数据
 
-原生配置是客户端配置现状的来源。SQLite 保存连接摘要、入口成员、来源、绑定、修订号和操作状态，启用 WAL、外键与 schema 版本。完整上游定义及变更计划可能包含 Secret，放在系统凭据库；SQLite 仅保存凭据引用。当前数据库语义版本为 2，旧程序拒绝打开，聚合管理要求 management API 18。桌面、CLI 和后台需要一起升级。用户标签不冒充上游确认的账号身份。
+原生配置是客户端配置现状的来源。SQLite 保存连接摘要、入口成员、来源、绑定、修订号和操作状态，启用 WAL、外键与 schema 版本。完整上游定义及变更计划可能包含 Secret，放在系统凭据库；SQLite 仅保存凭据引用。当前数据库语义版本为 3，旧程序拒绝打开，聚合管理要求 management API 19。桌面、CLI 和后台需要一起升级。用户标签不冒充上游确认的账号身份。
 
-入口选择更新要求 `editVersion`，只保存已有连接引用，不复制凭据。删除入口不删除成员账号，删除成员前须先移出所有入口。明确选择 `replaceShared` 的迁移预览会逐条移除同一来源中所选成员的单服务共享绑定，并添加聚合条目；原生直连及未选择的条目保留。应用与恢复沿用文件哈希和条目归属保护。
+入口选择更新要求 `editVersion`，保存已有连接引用与可选工具白名单，不复制凭据。省略工具策略保留已存范围，null 沿用全局策略，空数组不开放工具；工具发现和调用都执行交集。聚合分页为有上限的内存快照，后续页不重新读取上游，定义或成员认证变更使旧游标失效。删除入口不删除成员账号，删除成员前须先移出所有入口。明确选择 `replaceShared` 的迁移预览会逐条移除同一来源中所选成员的单服务共享绑定，并添加聚合条目；原生直连及未选择的条目保留。应用与恢复沿用文件哈希和条目归属保护。
 
 写入步骤为：预览并绑定连接修订和文件哈希 → 获取配置写锁并重新核对 → 持久化变更意图和备份 → 原子替换文件 → 更新绑定和操作状态。批量操作按同一文件中的前序结果计算后续哈希；各目标分别报告结果。外部编辑或预览后账号更新都使旧预览失效。
 
@@ -57,4 +57,4 @@ HTTP 令牌按上游要求原样保存，不自动添加 Bearer。标准 OAuth �
 
 ## 代码入口
 
-`config.rs` 适配原生格式；`engine.rs` 处理管理操作、变更与恢复；`gateway.rs` 管理聚合入口和路由；`mcp.rs` 管理上游会话和认证；`runtime.rs` 提供后台与管理客户端；`cli.rs` 提供具名 CLI、机器契约和 Skill 安装；`main.rs` 提供程序入口与 Bridge；`src/main.tsx` 是桌面功能入口；入口服务选择位于 `src/GatewayDialog.tsx`，连接编辑、配置来源和接入预览分别位于 src/ConnectionEditor.tsx、src/SourceDialog.tsx 和 src/ConnectDialog.tsx。
+`config.rs` 适配原生格式；`engine.rs` 处理管理操作、变更与恢复；`gateway.rs` 管理聚合入口和路由；`mcp.rs` 管理上游会话和认证；`runtime.rs` 提供后台与管理客户端；`cli.rs` 提供具名 CLI、机器契约和 Skill 安装；`main.rs` 提供程序入口与 Bridge；`src/main.tsx` 是桌面功能入口；入口服务与工具范围位于 `src/GatewayDialog.tsx`，工具 CLI 工作流位于 `src/CliDialog.tsx`，连接编辑、配置来源和接入预览分别位于 src/ConnectionEditor.tsx、src/SourceDialog.tsx 和 src/ConnectDialog.tsx。

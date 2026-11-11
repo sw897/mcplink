@@ -20,7 +20,7 @@ description: 通过 mcplink CLI 管理单服务与聚合入口、托管认证和
 - 若当前 `schema` 包含 `call`，可用 `connections tools ID --tool TOOL` 获取指定工具的输入 Schema 与摘要，再以 `call ID TOOL --stdin` 传入参数对象。对象类型原样保留，校验失败退出 `2`。上游错误退出 `1`，工具结果在 `.result.output`；成功时在 `.ok.output`。
 - 工具调用使用返回的托管连接 ID 和精确工具名，不按显示名选账号；按本次业务授权执行，不因管理连接的授权而扩大到发送消息或修改业务数据。终端入口不继承原生 Agent 的工具确认流程，`readOnlyHint` 不是授权。
 - 需要固定参数契约时传 `--schema-hash HASH`；Schema 或连接变化时停止并重新发现。工具调用超时或通信中断后先核对结果，不自动重发。新 CLI 遇到旧后台时按错误提示使用同一构建重启，不回退绕过校验。
-- 若当前 `schema` 包含 `cli generate`，可按明确的连接、工具选择和新目录生成轻量入口；先 `cli inspect MANIFEST` 和离线 `--help` 核对。复杂或敏感参数用 `--stdin`；自动化可直接以参数数组调用 `cli run --manifest MANIFEST -- TOOL --stdin`。生成物不含凭据，仍依赖本机 mcplink 和当前托管权限；换数据目录须明确选择当地连接后 `cli rebind`，契约变化时重新生成，不按名称自动换账号。
+- 若当前 `schema` 包含 `cli generate`，可按明确的连接、工具选择和新目录生成轻量入口；先 `cli inspect MANIFEST` 和离线 `--help` 核对；`cli check MANIFEST` 对照当前契约，不执行工具、不修改文件。复杂或敏感参数用 `--stdin`；自动化可直接以参数数组调用 `cli run --manifest MANIFEST -- TOOL --stdin`。生成物不含凭据，仍依赖本机 mcplink 和当前托管权限；换数据目录须明确选择当地连接后 `cli rebind`，契约变化时重新生成，不按名称自动换账号。
 - `--data-dir` / `MCPLINK_DATA_DIR` 选择管理数据；`CODEX_HOME` / `HERMES_HOME` 选择原生配置范围。沿用用户指定环境，未经要求不切换到另一套数据。
 - `connections list` 包含 `detected:true` 的未托管条目。此类条目先按 `sourceId` 和 `name` 导入，再使用返回的托管 ID。
 - Claude Code 自动盘点用户 `.claude.json` 与已启用用户插件默认 `.mcp.json`。用户来源可通过配置事务写入；插件来源带 `readOnly:true`，可以导入、检查和复用连接，原文件由插件维护。以每个来源返回的权限为准，不直接改写插件缓存。
@@ -57,11 +57,11 @@ mcplink changes restore OPERATION_ID
 
 `--connection` 和 `--target` 可重复以批量操作；`--action` 支持 `upsert`、`disable`、`enable`、`remove`。先检查预览里的目标路径、名称、方式和动作，再按用户已有授权应用，不因采用 CLI 额外要求一次确认。预览 10 分钟有效，原生文件或连接修订变化后需重新预览。部分失败时核对 `result.results`，仅处理未完成目标，不盲目重放整批。写入后报告对应 Agent 需要重新加载 MCP 或开启新会话。
 
-若 `schema` 包含 `gateway save`，使用 stdin 对象 `{"title":"入口名称","connectionIds":["实际服务连接 ID"]}` 创建聚合入口，返回入口 `id`、`members`、`editVersion`。`gateway list` 查看入口。为不同 Agent 提供不同服务时分别创建入口；成员可以引用同一个账号。入口不单独认证，不能嵌套入口。编辑时传 `id`、原 `editVersion` 和完整 `connectionIds`，省略 title 保留名称；保存后选择立即生效，空数组表示不提供任何服务，不表示全部服务。
+若 `schema` 包含 `gateway save`，使用 stdin 对象 `{"title":"入口名称","connectionIds":["实际服务连接 ID"]}` 创建聚合入口，返回入口 `id`、`members`、`editVersion`。`gateway list` 查看入口。为不同 Agent 提供不同服务时分别创建入口；成员可以引用同一个账号。入口不单独认证，不能嵌套入口。编辑时传 `id`、原 `editVersion` 和完整 `connectionIds`，省略 title 保留名称；保存后选择立即生效，空数组表示不提供任何服务，不表示全部服务。`toolSelections` 可按成员连接 ID 保存原始工具名称数组：null 沿用服务策略，空数组不开放工具，省略保留已存范围。入口只能收窄全局策略，不另建账号。
 
 把返回的入口 ID 作为 `changes preview --connection ENTRY_ID --target SOURCE_ID --mode shared` 的目标。聚合入口不支持 direct。明确需要迁移已有单服务共享条目时加 `--replace-shared`，只替换同一来源中属于入口成员的托管共享条目，保留直连，逐项核对预览与恢复记录。默认不移除已有条目，客户端确认导入的目标需手工核对原有配置。
 
-聚合工具名从 `connections tools ENTRY_ID` 实际发现，不猜服务前缀；可用于 `call` 和 `cli generate`。单服务入口保留原始名称。服务选择更新不重写原生配置，需让客户端刷新或重载清单。删除入口不删除上游账号；删除被入口引用的服务前先从入口移除。
+聚合工具名从 `connections tools ENTRY_ID` 实际发现，不猜服务前缀；可用于 `call` 和 `cli generate`。单服务入口保留原始名称。服务选择更新不重写原生配置，支持的清单会发送变更通知；不能实时刷新的客户端需重载。`gateway refresh ENTRY_ID` 可显式通知指定入口刷新，传服务连接 ID 时通知其引用入口，不调用业务工具。删除入口不删除上游账号；删除被入口引用的服务前先从入口移除。
 
 `changed:true` 表示原生条目有外部修改，核对后可用 `connections adopt --source SOURCE_ID --name NAME` 采用直连来源。`needsUpdate:true` 表示托管连接已更新而直连条目尚未同步，重新预览并应用。共享条目不作为上游来源采用。
 

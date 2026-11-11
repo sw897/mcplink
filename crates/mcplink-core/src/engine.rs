@@ -23,12 +23,29 @@ pub struct Engine {
     pub store: Arc<Store>,
     pub vault: Vault,
     pub pool: McpPool,
+    pub(crate) catalog: crate::gateway::CatalogCache,
     pub mutation: Mutex<()>,
     pub paused: AtomicBool,
     pub shutdown: tokio::sync::watch::Sender<bool>,
 }
 
 impl Engine {
+    pub async fn dataset_id(&self) -> Result<String> {
+        let _guard = self.mutation.lock().await;
+        let path = self.data.join("dataset-id");
+        match fs::read_to_string(&path) {
+            Ok(id) => {
+                uuid::Uuid::parse_str(&id).context("数据目录身份无效，请核对本地数据")?;
+                Ok(id)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let id = uuid::Uuid::new_v4().to_string();
+                private_write(&path, id.as_bytes())?;
+                Ok(id)
+            }
+            Err(_) => bail!("无法读取数据目录身份"),
+        }
+    }
     pub fn open(data: PathBuf) -> Result<Arc<Self>> {
         let store = Arc::new(Store::open(&data)?);
         let paused = store.gateway_paused()?;
@@ -39,6 +56,7 @@ impl Engine {
             store,
             vault,
             pool: McpPool::default(),
+            catalog: crate::gateway::CatalogCache::default(),
             mutation: Mutex::new(()),
             paused: AtomicBool::new(paused),
             shutdown: tokio::sync::watch::channel(false).0,
@@ -1356,6 +1374,32 @@ impl Engine {
                 let _guard = self.mutation.lock().await;
                 crate::gateway::save(self, &p)
             }
+            "mcp.catalog" => crate::gateway::catalog_version(self, required(&p, "id")?),
+            "cli.generate" => {
+                let names: Vec<String> =
+                    serde_json::from_value(p["tools"].clone()).context("请选择工具名称数组")?;
+                crate::generated::generate_managed(
+                    self.clone(),
+                    required(&p, "id")?,
+                    required(&p, "name")?.to_owned(),
+                    Path::new(required(&p, "output")?),
+                    &names,
+                )
+                .await
+            }
+            "cli.inspect" => Ok(serde_json::to_value(crate::generated::Manifest::read(
+                Path::new(required(&p, "manifest")?),
+            )?)?),
+            "cli.check" => {
+                crate::generated::check_managed(self.clone(), Path::new(required(&p, "manifest")?))
+                    .await
+            }
+            "gateway.refresh" => {
+                let id = required(&p, "id")?;
+                self.store.connection(id)?;
+                self.pool.refresh_catalog(id);
+                Ok(json!({"refreshed":true,"connectionId":id}))
+            }
             "snapshot" => self.snapshot(),
             "changes.reconcile" => {
                 let _guard = self.mutation.lock().await;
@@ -1383,23 +1427,7 @@ impl Engine {
                 }
                 Ok(json!(page))
             }
-            "workspace.identity" => {
-                let _guard = self.mutation.lock().await;
-                let path = self.data.join("dataset-id");
-                let id = match fs::read_to_string(&path) {
-                    Ok(id) => {
-                        uuid::Uuid::parse_str(&id).context("数据目录身份无效，请核对本地数据")?;
-                        id
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        let id = uuid::Uuid::new_v4().to_string();
-                        private_write(&path, id.as_bytes())?;
-                        id
-                    }
-                    Err(_) => bail!("无法读取数据目录身份"),
-                };
-                Ok(json!({"id":id}))
-            }
+            "workspace.identity" => Ok(json!({"id":self.dataset_id().await?})),
             "agents.launcher" => {
                 let agent: Agent =
                     serde_json::from_value(p["agent"].clone()).context("无效客户端")?;
