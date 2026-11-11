@@ -142,6 +142,37 @@ if (location.origin === ORIGIN) {
         def button(name):
             browser("find","role","button","click","--name",name,"--exact")
 
+        def card_action_layout(context):
+            for width in [940, 1180, 1280, 1440, 1944]:
+                browser("set", "viewport", str(width), "780")
+                wait_for("innerWidth === " + str(width) + " && document.fonts.status === 'loaded'")
+                metrics = json.loads(browser("eval", """(() => {
+                    const cards = [...document.querySelectorAll('.account-card')].map(card => {
+                        const actions = card.querySelector('.card-actions');
+                        const area = actions.getBoundingClientRect();
+                        const buttons = [...actions.querySelectorAll('button')].map(button => {
+                            const r = button.getBoundingClientRect();
+                            return {label:button.innerText, left:r.left, right:r.right, top:r.top, bottom:r.bottom};
+                        });
+                        return {title:card.querySelector('h2').innerText, left:area.left, right:area.right,
+                            scrollWidth:actions.scrollWidth, clientWidth:actions.clientWidth, buttons};
+                    });
+                    return {width:innerWidth, scrollWidth:document.documentElement.scrollWidth,
+                        clientWidth:document.documentElement.clientWidth, cards};
+                })()"""))
+                result.setdefault("cardLayouts", []).append({"context":context, **metrics})
+                (record / f"layout-{context}-{width}.json").write_text(json.dumps(metrics, indent=2)+"\n")
+                browser("screenshot", str(record / f"layout-{context}-{width}.png"))
+                assert metrics["cards"] and metrics["scrollWidth"] <= metrics["clientWidth"]+1, metrics
+                for card in metrics["cards"]:
+                    assert card["scrollWidth"] <= card["clientWidth"]+1, card
+                    for index, current in enumerate(card["buttons"]):
+                        assert current["left"] >= card["left"]-1 and current["right"] <= card["right"]+1, card
+                        for previous in card["buttons"][:index]:
+                            assert (current["right"] <= previous["left"]+1 or previous["right"] <= current["left"]+1
+                                or current["bottom"] <= previous["top"]+1 or previous["bottom"] <= current["top"]+1), card
+            browser("set", "viewport", "940", "620")
+
         def copy_import_value(label, expected):
             attribute = json.dumps(label, ensure_ascii=False)
             field = '.import-config [aria-label=' + attribute + ']'
@@ -499,6 +530,11 @@ if (location.origin === ORIGIN) {
         wait_for("document.querySelector('dialog')?.innerText.includes('入口中的服务') && document.querySelectorAll('dialog .binding-detail').length === 2")
         browser("press", "Escape")
         wait_for("document.querySelector('article h2')?.textContent === '桌面聚合入口'")
+        card_action_layout("gateway")
+        checks.append("aggregate entry actions stay within their cards without overlap or page overflow at five desktop widths")
+        button("详情与绑定")
+        wait_for("document.querySelector('dialog')?.innerText.includes('入口中的服务')")
+        browser("press", "Escape")
         button("接给 Agent")
         wait_for("document.querySelectorAll('dialog .mode-choices input').length === 1 && document.querySelector('dialog .mode-choices')?.innerText.includes('统一入口')")
         browser("find", "text", "Hermes · 用户配置", "click")
@@ -577,6 +613,8 @@ if (location.origin === ORIGIN) {
         checks.append("a failed tool discovery preserves the entry's saved allowlist through edit and save")
         button("账号")
         wait_for("![...document.querySelectorAll('article h2')].some(h=>h.textContent === '桌面聚合入口') && [...document.querySelectorAll('article')].some(a=>a.querySelector('h2')?.textContent === '聚合服务甲' && a.innerText.includes('Hermes'))")
+        card_action_layout("accounts")
+        checks.append("account card actions preserve their layout at five desktop widths")
         browser("click", "nav button:first-child")
         wait_for("![...document.querySelectorAll('.service-name')].some(b=>b.innerText.includes('桌面聚合入口'))")
         checks.append("desktop creates an aggregate entry, configures Hermes once, updates its service view without rewriting native config and attributes shared accounts correctly")
@@ -586,6 +624,7 @@ if (location.origin === ORIGIN) {
         button("保存入口")
         browser("press", "Escape")
         wait_for("document.querySelectorAll('.account-card').length === 2 && !document.querySelector('dialog[open]')")
+        card_action_layout("multiple-entries")
         checks.append("closing an aggregate editor during an in-flight save refreshes the entry without reopening a dialog")
         result["conclusion"]="PASS"
     finally:

@@ -892,6 +892,7 @@ dd {
 }
 .card-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   align-items: center;
   border-top: 1px solid #edf1e7;
