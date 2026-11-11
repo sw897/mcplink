@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
@@ -23,6 +24,8 @@ if (process.platform === "win32") {
   env._CL_ = [process.env._CL_, `"${trim}"`].filter(Boolean).join(" ");
 }
 
+// Cargo caches may retain installers from earlier versions. Publish only this build.
+rmSync("target/release/bundle", { recursive: true, force: true });
 execFileSync(process.execPath, ["scripts/prepare-sidecar.mjs"], {
   stdio: "inherit",
   env,

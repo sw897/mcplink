@@ -518,6 +518,13 @@ if (location.origin === ORIGIN) {
         button("查看 " + alias + " 参数")
         wait_for("!!document.querySelector('.cli-tool-help textarea')")
         wait_for("document.querySelector('.cli-tool-name small')?.innerText.includes('隔离账号甲') && document.querySelector('.cli-source select option:checked')?.innerText.includes('统一入口')")
+        wait_for("document.querySelector('.cli-tool-help').getBoundingClientRect().bottom <= document.querySelector('.cli-generation').getBoundingClientRect().top")
+        for number in ["9007199254740993", "1e400"]:
+            browser("find", "label", "调用参数（JSON 对象）", "fill", '{"id":"weekly-fixture","delay_ms":' + number + '}')
+            button("实际调用一次")
+            wait_for("document.querySelector('.cli-workflow [role=alert]')?.innerText.includes('精确')")
+            assert stats()["calls"] == calls_before
+        checks.append("unsafe JSON integers and non-finite numbers are refused in the desktop before any upstream dispatch")
         browser("find", "label", "调用参数（JSON 对象）", "fill", '{"id":"weekly-fixture"}')
         audit("tool-cli")
         browser("screenshot", str(record/"tool-cli.png"))

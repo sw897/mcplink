@@ -390,13 +390,30 @@ export function CliDialog({
                   onClick={() =>
                     void run("调用工具", async () => {
                       let argumentsValue: unknown;
+                      let unsafeNumber = false;
                       try {
-                        argumentsValue = JSON.parse(argumentsText);
+                        argumentsValue = JSON.parse(
+                          argumentsText,
+                          (_key, value: unknown) => {
+                            if (
+                              typeof value === "number" &&
+                              (!Number.isFinite(value) ||
+                                (Number.isInteger(value) &&
+                                  !Number.isSafeInteger(value)))
+                            )
+                              unsafeNumber = true;
+                            return value;
+                          },
+                        );
                       } catch {
                         throw new Error(
                           "调用参数须为有效 JSON 对象；工具尚未派发",
                         );
                       }
+                      if (unsafeNumber)
+                        throw new Error(
+                          "数值超出界面可精确处理的范围，请通过 mcplink call --stdin 输入原始 JSON；工具尚未派发",
+                        );
                       if (
                         !argumentsValue ||
                         Array.isArray(argumentsValue) ||

@@ -77,6 +77,9 @@ jobs:
           from pathlib import Path
           binary = Path.cwd() / ("target/release/mcplink.exe" if os.name == "nt" else "target/release/bundle/macos/mcplink.app/Contents/MacOS/mcplink")
           assert binary.is_file(), binary
+          version = __import__('json').loads(Path('package.json').read_text())['version']
+          installers = list(Path('target/release/bundle').rglob('*setup.exe' if os.name == 'nt' else '*.dmg'))
+          assert len(installers) == 1 and f'_{version}_' in installers[0].name, 'Stale or ambiguous installer output'
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
               output.write(f"MCPLINK_E2E_BINARY={binary}\n")
       - name: Configuration integrity and recovery

@@ -51,7 +51,7 @@ Windows 候选包含 NSIS 安装包、含许可文件的规范化 CLI ZIP、源�
 
 ## GitHub Actions
 
-`ci.yml` 为 macOS Apple Silicon 和 Windows x64 分别运行检查、构建和合成 CLI 场景。macOS 另验收 DMG，Windows 另验收 NSIS 安装生命周期。CI 会查找近期 main 推送成功的安装包，报告来源 run、提交和哈希，再做旧版到当前构建的升级；若旧工件不可用，明确记录缺少跨版本基线，不将重装当作跨版本升级。Windows 结果须以实际 workflow 报告和桌面实机验收为准；配置工作流本身不表示通过。CI 不运行需要原生 Agent 登录的真实模型测试，也不上传测试 home、Vault 或原始配置。
+`ci.yml` 为 macOS Apple Silicon 和 Windows x64 分别运行检查、构建和合成 CLI 场景。macOS 另验收 DMG，Windows 另验收 NSIS 安装生命周期。打包前清理生成的 bundle 目录，避免 Cargo 缓存中的旧包混入当前工件。CI 按近期 main 成功运行的源码清单核对安装包版本、按哈希合并相同副本，并优先选不同版本作为升级基线，报告来源 run、提交、版本和哈希，再做旧版到当前构建的升级；若旧工件不可用，明确记录缺少跨版本基线，不将重装当作跨版本升级。Windows 结果须以实际 workflow 报告和桌面实机验收为准；配置工作流本身不表示通过。CI 不运行需要原生 Agent 登录的真实模型测试，也不上传测试 home、Vault 或原始配置。
 
 `release-macos.yml` 仅手动运行，输入必须是与源码版本匹配的已有 tag。仓库需要以下 secrets：
 
