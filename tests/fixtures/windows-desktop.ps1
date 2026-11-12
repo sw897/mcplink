@@ -6,6 +6,7 @@ Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 Add-Type @'
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
 public static class McplinkWindow {
@@ -16,31 +17,71 @@ public static class McplinkWindow {
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hwnd, uint msg, IntPtr w, IntPtr l);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
   [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr hwnd, int x, int y, int width, int height, bool repaint);
-  public static IntPtr WebContent(IntPtr host) {
-    IntPtr content = IntPtr.Zero;
+  public static string ClassName(IntPtr hwnd) {
+    var name = new StringBuilder(256);
+    GetClassName(hwnd, name, name.Capacity);
+    return name.ToString();
+  }
+  public static IntPtr[] Candidates(IntPtr host) {
+    var windows = new List<IntPtr>();
+    windows.Add(host);
     EnumChildWindows(host, delegate(IntPtr child, IntPtr data) {
-      var name = new StringBuilder(256);
-      GetClassName(child, name, name.Capacity);
-      if (name.ToString() == "Chrome_RenderWidgetHostHWND" && IsWindowVisible(child)) {
-        content = child;
-        return false;
-      }
+      windows.Add(child);
       return true;
     }, IntPtr.Zero);
-    return content;
+    return windows.ToArray();
   }
 }
 '@
 $script:handle = [IntPtr]::Zero
+$script:providerHandle = [IntPtr]::Zero
+function Window-State {
+    $counts = @{}
+    $providers = @()
+    foreach ($hwnd in [McplinkWindow]::Candidates($script:handle)) {
+        $name = [McplinkWindow]::ClassName($hwnd)
+        if ($name -notin @('Tauri Window', 'Tao Window', 'WRY_WEBVIEW', 'Chrome_WidgetWin_0', 'Chrome_WidgetWin_1', 'Chrome_RenderWidgetHostHWND', '#32770', 'Static', 'Button')) { $name = 'other' }
+        if (-not $counts.ContainsKey($name)) { $counts[$name] = 0 }
+        $counts[$name]++
+        try {
+            $root = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd)
+            $nodes = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+            $buttons = 0
+            $entry = ''
+            foreach ($node in $nodes) {
+                if ($node.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button) { $buttons++ }
+                if ($node.Current.Name -eq '统一入口') { $entry = $node.Current.ControlType.ProgrammaticName }
+            }
+            $providers += @{class=$name; elements=$nodes.Count; buttons=$buttons; entryType=$entry}
+        } catch { $providers += @{class=$name; unavailable=$true} }
+    }
+    Write-Output ('NATIVE_HWND ' + ($counts | ConvertTo-Json -Compress))
+    Write-Output ('NATIVE_PROVIDERS ' + (ConvertTo-Json -InputObject @($providers) -Compress -Depth 4))
+}
 function Content-Root {
     # wry's top-level HWND may not stitch its child WebView2 provider into UIA.
     # Scope the real native content HWND through the owned host's child chain.
-    $content = [McplinkWindow]::WebContent($script:handle)
-    if ($content -ne [IntPtr]::Zero) {
-        return [System.Windows.Automation.AutomationElement]::FromHandle($content)
+    if ($script:providerHandle -ne [IntPtr]::Zero) {
+        return [System.Windows.Automation.AutomationElement]::FromHandle($script:providerHandle)
+    }
+    foreach ($content in [McplinkWindow]::Candidates($script:handle)) {
+        try {
+            $root = [System.Windows.Automation.AutomationElement]::FromHandle($content)
+            $name = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, '统一入口')
+            $found = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $name)
+            if ($found -and $found.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button) {
+                $script:providerHandle = $content
+                return $root
+            }
+        } catch [System.Windows.Automation.ElementNotAvailableException] {
+            # Read-only discovery can race a renderer's native HWND creation.
+        } catch [System.Runtime.InteropServices.COMException] {
+            # A host/container HWND may not supply an accessibility provider.
+        }
     }
 }
 trap {
+    Window-State
     Write-Output ('NATIVE_ERROR ' + $_.Exception.GetType().Name)
     exit 1
 }
@@ -89,6 +130,7 @@ $script:handle = Wait-Until {
 [McplinkWindow]::MoveWindow($script:handle, 0, 0, 1000, 740, $true) | Out-Null
 [McplinkWindow]::SetForegroundWindow($script:handle) | Out-Null
 Write-Output 'NATIVE_STEP provider'
+Window-State
 Wait-Until { Content-Root } 'owned WebView2 native accessibility provider' | Out-Null
 Write-Output 'NATIVE_STEP navigation'
 Click-Button '统一入口'

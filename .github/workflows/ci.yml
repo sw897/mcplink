@@ -86,6 +86,16 @@ jobs:
           assert len(installers) == 1 and f'_{version}_' in installers[0].name, 'Stale or ambiguous installer output'
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
               output.write(f"MCPLINK_E2E_BINARY={binary}\n")
+      - name: Installed Windows native desktop acceptance
+        if: runner.os == 'Windows'
+        timeout-minutes: 8
+        shell: python {0}
+        run: |
+          import json, subprocess, sys
+          from pathlib import Path
+          version = json.loads(Path('package.json').read_text())['version']
+          installer = next(Path('target/release/bundle/nsis').glob(f'*_{version}_*setup.exe'))
+          subprocess.run([sys.executable, '-u', 'tests/e2e/windows_desktop.py', '--installer', str(installer), '--record', 'artifacts/e2e/ci-windows-native-desktop'], check=True)
       - name: Configuration integrity and recovery
         timeout-minutes: 5
         run: python -u tests/e2e/config_integrity.py --record artifacts/e2e/ci-integrity
@@ -242,16 +252,6 @@ jobs:
           installer = next(Path('target/release/bundle/nsis').glob(f'*_{version}_*setup.exe'))
           previous = os.environ.get('MCPLINK_PREVIOUS_INSTALLER')
           subprocess.run([sys.executable, '-u', 'tests/e2e/windows_installer.py', '--installer', str(installer), '--record', 'artifacts/e2e/ci-windows-installed', *(['--previous-installer', previous] if previous else [])], check=True)
-      - name: Installed Windows native desktop acceptance
-        if: runner.os == 'Windows'
-        timeout-minutes: 8
-        shell: python {0}
-        run: |
-          import json, subprocess, sys
-          from pathlib import Path
-          version = json.loads(Path('package.json').read_text())['version']
-          installer = next(Path('target/release/bundle/nsis').glob(f'*_{version}_*setup.exe'))
-          subprocess.run([sys.executable, '-u', 'tests/e2e/windows_desktop.py', '--installer', str(installer), '--record', 'artifacts/e2e/ci-windows-native-desktop'], check=True)
       - name: Daemon exit and process cleanup acceptance
         timeout-minutes: 5
         run: python -u tests/e2e/daemon_lifecycle.py --record artifacts/e2e/ci-lifecycle
