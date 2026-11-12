@@ -597,7 +597,11 @@ if (location.origin === ORIGIN) {
         manifest = record / "desktop-tools/desktop-tools.mcplink.json"
         assert manifest.is_file() and "synthetic-fixture-authorization" not in manifest.read_text()
         button("复制清单位置")
-        wait_for("window.__fixtureClipboard === " + json.dumps(str(manifest)))
+        wait_for("document.querySelector('.cli-workflow')?.innerText.includes('已复制清单位置')")
+        # Windows accepts either separator, and the renderer appends a child to
+        # the native dialog path. Verify the copied path opens the generated
+        # file, rather than demanding one equivalent path spelling.
+        assert Path(json.loads(browser("eval", "window.__fixtureClipboard"))).samefile(manifest)
         button("检查已有 CLI")
         wait_for("document.querySelector('.cli-contract')?.innerText.includes('工具契约一致')")
         browser("screenshot", str(record/"tool-cli-generated.png"))
