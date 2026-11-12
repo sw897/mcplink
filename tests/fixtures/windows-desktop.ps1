@@ -13,6 +13,7 @@ public static class McplinkWindow {
   private delegate bool ChildCallback(IntPtr hwnd, IntPtr data);
   [DllImport("user32.dll")] private static extern bool EnumChildWindows(IntPtr hwnd, ChildCallback callback, IntPtr data);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetClassName(IntPtr hwnd, StringBuilder name, int count);
+  [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint process);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hwnd, uint msg, IntPtr w, IntPtr l);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
@@ -22,8 +23,12 @@ public static class McplinkWindow {
     GetClassName(hwnd, name, name.Capacity);
     return name.ToString();
   }
-  public static IntPtr[] Candidates(IntPtr host) {
+  public static IntPtr[] Candidates(IntPtr host, uint owner) {
     var windows = new List<IntPtr>();
+    uint process;
+    if (host == IntPtr.Zero || GetWindowThreadProcessId(host, out process) == 0 || process != owner) {
+      return windows.ToArray();
+    }
     windows.Add(host);
     EnumChildWindows(host, delegate(IntPtr child, IntPtr data) {
       windows.Add(child);
@@ -38,7 +43,7 @@ $script:providerHandle = [IntPtr]::Zero
 function Window-State {
     $counts = @{}
     $providers = @()
-    foreach ($hwnd in [McplinkWindow]::Candidates($script:handle)) {
+    foreach ($hwnd in [McplinkWindow]::Candidates($script:handle, $DesktopProcess)) {
         $name = [McplinkWindow]::ClassName($hwnd)
         if ($name -notin @('Tauri Window', 'Tao Window', 'WRY_WEBVIEW', 'Chrome_WidgetWin_0', 'Chrome_WidgetWin_1', 'Chrome_RenderWidgetHostHWND', '#32770', 'Static', 'Button')) { $name = 'other' }
         if (-not $counts.ContainsKey($name)) { $counts[$name] = 0 }
@@ -61,10 +66,12 @@ function Window-State {
 function Content-Root {
     # wry's top-level HWND may not stitch its child WebView2 provider into UIA.
     # Scope the real native content HWND through the owned host's child chain.
-    if ($script:providerHandle -ne [IntPtr]::Zero) {
+    $candidates = [McplinkWindow]::Candidates($script:handle, $DesktopProcess)
+    if ($script:providerHandle -ne [IntPtr]::Zero -and $script:providerHandle -in $candidates) {
         return [System.Windows.Automation.AutomationElement]::FromHandle($script:providerHandle)
     }
-    foreach ($content in [McplinkWindow]::Candidates($script:handle)) {
+    $script:providerHandle = [IntPtr]::Zero
+    foreach ($content in $candidates) {
         try {
             $root = [System.Windows.Automation.AutomationElement]::FromHandle($content)
             $name = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, '统一入口')
