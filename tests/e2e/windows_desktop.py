@@ -54,9 +54,14 @@ def main():
                 str(native_script), "-DesktopProcess", str(process.pid),
                 "-DesktopPath", str(desktop)], env=environment, stdout=log, stderr=subprocess.STDOUT, timeout=240)
         # Only these fixed assertions enter public logs. The UI dump/log is private.
-        phases = [line.strip() for line in (record / "native-ui.log").read_text(errors="replace").splitlines()
-                  if line.strip() in {"NATIVE_STEP " + step for step in ["window", "navigation", "http-probe", "background", "tray-reopen"]}]
-        print("NATIVE_DESKTOP " + json.dumps({"phases": phases, "exit_status": result.returncode}), flush=True)
+        lines = (record / "native-ui.log").read_text(encoding="utf-8", errors="replace").splitlines()
+        phases = [line.strip() for line in lines if line.strip() in {"NATIVE_STEP " + step
+                  for step in ["window", "provider", "navigation", "http-probe", "background", "tray-reopen"]}]
+        known_controls = {"统一入口", "创建统一入口", "取消", "MCP 服务", "Windows API 验收 详情", "运行探测",
+                          "确认并运行一次", "关闭", "后台运行", "暂停共享", "恢复共享"}
+        actions = [line.removeprefix("NATIVE_ACTION ") for line in lines
+                   if line.removeprefix("NATIVE_ACTION ") in known_controls]
+        print("NATIVE_DESKTOP " + json.dumps({"phases": phases, "actions": actions, "exit_status": result.returncode}), flush=True)
         assert result.returncode == 0, "Native Windows desktop interaction failed; see private native-ui.log"
         assert len(api.requests) == 1, "Opening/cancelling or confirmation dispatched an unexpected number of API requests"
         assert harness.rpc("connections.detail", {"id": connection})["connection"]["status"] == "ready"

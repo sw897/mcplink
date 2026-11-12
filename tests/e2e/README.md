@@ -50,6 +50,8 @@ Hermes 和 Pi 验收实时清单刷新。Codex 的现有 thread 会缓存工具�
 
 Chrome renderer 与原生桌面是两层独立检查。agent-browser 0.41.2 需要 Node.js 24+；CI 仅为浏览器驱动选择 Node 24，随后恢复项目固定的 Node 22。`--browser-driver` 可指定对应平台的原生驱动文件；Windows 使用实际 `.exe`，避免 npm Shell 启动器差异。等待目标输入控件加载并检查选中状态，不重试可能产生业务副作用的调用。
 
+Windows UI Automation 通过已验证归属的 Tauri 主窗口枚举 WebView2 原生内容 HWND，再访问其实际可访问性 provider；不使用浏览器 renderer 代替安装应用。wry 的父 HWND 与 WebView2 UIA 树衔接存在[上游已报告的限制](https://github.com/tauri-apps/tauri/issues/15624)，因此这项验收不证明所有屏幕阅读器都能从父窗口自动遍历整个应用。测试不关闭 UIA 或改变系统辅助功能设置。
+
 原生 MCP 连接成功不代表模型业务回合通过。测试真实客户端、系统凭据库或业务账号时，使用独立配置与合成数据，明确实际范围并清理测试资源。不要把账号凭据、业务正文、原生数据库或原始登录日志加入仓库。
 
 CI 为 macOS 和 Windows 分别构建并运行适用场景，只上传 `packages-*` 中明确选择的安装包、CLI 与公开构建清单。原始报告、截图、浏览器资料、凭据库、配置和日志保存在忽略的本地工件目录；失败日志仅输出固定场景和阶段摘要。平台专属测试只证明对应平台；本地检查不能替代另一平台的结果。

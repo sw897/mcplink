@@ -1,17 +1,49 @@
 param([Parameter(Mandatory=$true)][int]$DesktopProcess,
       [Parameter(Mandatory=$true)][string]$DesktopPath)
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 public static class McplinkWindow {
+  private delegate bool ChildCallback(IntPtr hwnd, IntPtr data);
+  [DllImport("user32.dll")] private static extern bool EnumChildWindows(IntPtr hwnd, ChildCallback callback, IntPtr data);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetClassName(IntPtr hwnd, StringBuilder name, int count);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hwnd, uint msg, IntPtr w, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
+  [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr hwnd, int x, int y, int width, int height, bool repaint);
+  public static IntPtr WebContent(IntPtr host) {
+    IntPtr content = IntPtr.Zero;
+    EnumChildWindows(host, delegate(IntPtr child, IntPtr data) {
+      var name = new StringBuilder(256);
+      GetClassName(child, name, name.Capacity);
+      if (name.ToString() == "Chrome_RenderWidgetHostHWND" && IsWindowVisible(child)) {
+        content = child;
+        return false;
+      }
+      return true;
+    }, IntPtr.Zero);
+    return content;
+  }
 }
 '@
 $script:handle = [IntPtr]::Zero
+function Content-Root {
+    # wry's top-level HWND may not stitch its child WebView2 provider into UIA.
+    # Scope the real native content HWND through the owned host's child chain.
+    $content = [McplinkWindow]::WebContent($script:handle)
+    if ($content -ne [IntPtr]::Zero) {
+        return [System.Windows.Automation.AutomationElement]::FromHandle($content)
+    }
+}
+trap {
+    Write-Output ('NATIVE_ERROR ' + $_.Exception.GetType().Name)
+    exit 1
+}
 function Wait-Until([scriptblock]$Condition, [string]$Description) {
     $deadline = [DateTime]::UtcNow.AddSeconds(35)
     do {
@@ -22,13 +54,15 @@ function Wait-Until([scriptblock]$Condition, [string]$Description) {
     throw "Native desktop did not reach state: $Description"
 }
 function Find-Button([string]$Name) {
-    $root = [System.Windows.Automation.AutomationElement]::FromHandle($script:handle)
+    $root = Content-Root
+    if (-not $root) { return $null }
     $condition = New-Object System.Windows.Automation.AndCondition(
         (New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, $Name)),
         (New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)))
     return $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition)
 }
 function Click-Button([string]$Name) {
+    Write-Output ('NATIVE_ACTION ' + $Name)
     $element = Wait-Until {
         $button = Find-Button $Name
         if ($button -and $button.Current.IsEnabled -and -not $button.Current.IsOffscreen) { $button }
@@ -37,11 +71,13 @@ function Click-Button([string]$Name) {
     $pattern.Invoke()
 }
 function Wait-Text([string]$Text) {
+    Write-Output ('NATIVE_EXPECT ' + $Text)
     Wait-Until {
-        $root = [System.Windows.Automation.AutomationElement]::FromHandle($script:handle)
+        $root = Content-Root
+        if (-not $root) { return $false }
         $nodes = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
         $names = foreach ($node in $nodes) { $node.Current.Name }
-        ($names -join ' ').Contains($Text)
+        (($names -join ' ') -replace '\s+', ' ').Contains($Text)
     } $Text | Out-Null
 }
 Write-Output 'NATIVE_STEP window'
@@ -50,6 +86,10 @@ $script:handle = Wait-Until {
     $process.Refresh()
     if ($process.MainWindowHandle -ne 0 -and [McplinkWindow]::IsWindowVisible($process.MainWindowHandle)) { $process.MainWindowHandle }
 } 'visible owned Tauri window (interactive Windows desktop required)'
+[McplinkWindow]::MoveWindow($script:handle, 0, 0, 1000, 740, $true) | Out-Null
+[McplinkWindow]::SetForegroundWindow($script:handle) | Out-Null
+Write-Output 'NATIVE_STEP provider'
+Wait-Until { Content-Root } 'owned WebView2 native accessibility provider' | Out-Null
 Write-Output 'NATIVE_STEP navigation'
 Click-Button '统一入口'
 Wait-Until { Find-Button '创建统一入口' } 'entry navigation' | Out-Null
