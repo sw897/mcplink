@@ -245,7 +245,7 @@ class GeneratedCli(ToolCalls):
         class Legacy(BaseHTTPRequestHandler):
             def log_message(self,*_): pass
             def do_GET(self):
-                data=json.dumps({"application":"mcplink","instance":runtime["instance"],"managementApi":2}).encode()
+                data=json.dumps({"application":"mcplink","instance":runtime["instance"],"managementApi":legacy_api}).encode()
                 self.send_response(200);self.send_header("Content-Length",str(len(data)));self.end_headers();self.wfile.write(data)
             def do_POST(self): posts.append(True);self.send_response(500);self.end_headers()
         class LegacyServer(ThreadingHTTPServer):
@@ -253,13 +253,17 @@ class GeneratedCli(ToolCalls):
                 TCPServer.server_bind(self);self.server_name,self.server_port=self.server_address
         legacy=LegacyServer(("127.0.0.1",0),Legacy);thread=threading.Thread(target=legacy.serve_forever,daemon=True);thread.start()
         try:
+            legacy_api = 2
             runtime_path.write_text(json.dumps(runtime|{"port":legacy.server_port}))
             failed=self.launch(manifest,"search_documents","--query","fixture",exit_status=1)
             assert "旧后台" in failed["error"]["message"] and not posts
             self.launch(manifest,"--help",help_text=True)
+            legacy_api = 21
+            failed = self.cli("cli", "check", str(manifest), exit_status=1)
+            assert "旧后台不支持 CLI 契约诊断" in failed["error"]["message"] and not posts, failed
         finally:
             runtime_path.write_bytes(runtime_bytes);legacy.shutdown();legacy.server_close();thread.join()
-        self.passed("a backend without dataset support is rejected before any execution RPC; generated help still works")
+        self.passed("old backends are rejected before execution or unsupported contract checks; generated help still works")
 
         oauth=self.cli("connections","save","--stdin",value={"name":"generated_oauth","definition":{"url":self.url,"oauth":True}})["id"]
         authorization=self.cli("credentials","login",oauth)

@@ -8,7 +8,7 @@ MCP 转 CLI 是 mcplink 的核心能力之一：从工具 Schema 发现参数，
 
 `mcplink` CLI 与桌面使用同一个管理核心、后台、系统凭据库和配置事务。命令不启动桌面或浏览器；后台在首次管理调用时按需启动。`schema` 和 `skill` 离线可用。
 
-客户端与来源支持范围见[Agent 兼容矩阵](agent-discovery.md)。原生文件写入需要客户端已安装，当前聚合管理与桌面快照要求 management API 21；桌面、CLI 和后台应使用同一构建。管理 Skill 的复制安装目标另见下文。
+客户端与来源支持范围见[Agent 兼容矩阵](agent-discovery.md)。原生文件写入需要客户端已安装，当前 management API 为 22，新的 CLI 契约诊断要求 API 22；桌面、CLI 和后台应使用同一构建。管理 Skill 的复制安装目标另见下文。
 
 ## 安装与发现
 
@@ -174,9 +174,24 @@ mcplink cli check ./notes-cli/notes.mcplink.json
 
 版本 1 清单只保存生成器版本、命令名称、数据目录 UUID、托管连接 ID、精确工具名、Schema 摘要及参数名称/类型/必填性；不保存端点、认证头、Token、OAuth grant、完整 Schema、描述、默认值、样例、枚举值或机器路径。清单不是授权凭据，仍须妥善管理命令和工具名称等元数据。检查命令拒绝未知字段、未知版本、损坏或超过 1 MiB 的清单。
 
-`cli inspect` 离线检查文件结构；`cli check` 连接后台，比对当前连接与选定工具的契约，返回 `compatible`、`datasetMatches` 和各工具的 `current` / `changed` / `unavailable` 状态，不执行工具、不修改文件。契约变化时先查看当前参数，生成到新目录；旧命令保持原样并在调用时拒绝过期契约。
+`cli inspect` 离线检查文件结构；`cli check` 连接后台，比对当前连接与选定工具的契约，不执行工具、不修改文件。结果包含 `compatible`、`datasetMatches`、`discovery` 及各工具状态：
+
+| 工具状态 | 含义与后续操作 |
+| --- | --- |
+| `current` | 已完成核验，契约一致。 |
+| `changed` | 当前 Schema 或参数契约已变化；查看 `changes` 或无效 Schema 的 `reason`，核对后生成到新目录。 |
+| `unavailable` | 该服务已完成发现，但清单不含此工具；检查工具是否移除或被服务/入口范围排除。 |
+| `unchecked` | 无法完成核验；先按 `reason` 恢复授权、连接或后台，或明确执行 `cli rebind`，再重新检查。不能据此判断工具已删除。 |
+
+`discovery.status` 为 `complete`、`partial`、`failed` 或 `not_checked`。`diagnostics` 仅返回固定诊断码和安全说明，聚合成员故障另含 `connectionId` 和 `namespace`。常见代码包括 `authentication_required`、`transport_failed`（通信中断或协议不兼容）、`discovery_timeout`、`gateway_paused`、`connection_inactive`、`connection_missing`、`connection_changed`、`tool_discovery_failed` 和 `dataset_mismatch`。不会返回原始上游错误正文、地址或认证值。
+
+聚合发现部分失败时，健康成员仍可核验；故障成员的工具为 `unchecked`。`compatible` 只表示清单中所选工具均为 `current`，所以与所选工具无关的上游故障不使这些命令失效。调用时仍按当前契约和权限再次检查。`cli check` 以退出码 0 返回检查报告；脚本须读取 `compatible`、`discovery` 及逐工具状态，操作本身失败才退出 1。
+
+`changes.parameters` 按参数名返回 `added`、`removed`、`modified` 及可用的 `before` / `after`（名称、类型、必填性）；`stdinOnly` 标明输入方式变化，`schemaChanged` 标明摘要变化。清单不保存完整 Schema，摘要变化但参数未变时仍须核对当前约束；仅 stdin 模式省略参数元数据，不虚构字段差异。契约变化后生成到新目录，旧命令保持原样并在调用时拒绝过期契约。
 
 桌面“工具 CLI”使用同一生成与调用核心。可从托管服务或统一入口打开，查看工具的参数与 Schema、明确勾选工具、选取输出父目录生成，或检查已有清单。实际调用单独触发且一次只派发一次；结果仅保留在当前窗口，不自动重试。
+
+桌面统一入口的工具范围与“工具 CLI”均提供“选择搜索结果”“取消搜索结果”和“清空全部选择”。搜索忽略大小写，前两项只影响当前匹配工具，保留隐藏选择；无匹配项时禁用。发现失败时保留入口已存范围，不根据故障清单自动删除选择。
 
 界面调用拒绝超出 JavaScript 安全整数范围的整数及非有限数，防止解析后改变数值再派发。此类输入使用 `mcplink call --stdin` 或生成 CLI 的 stdin 通道，由核心解析原始 JSON 并校验；界面不会将它改成舍入值或 null 后发送。
 

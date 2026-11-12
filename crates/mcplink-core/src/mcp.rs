@@ -26,6 +26,25 @@ use tokio::{net::TcpListener, sync::Mutex as AsyncMutex};
 
 type Session = RunningService<RoleClient, CatalogClient>;
 
+#[derive(Debug)]
+pub(crate) enum ConnectionFailure {
+    Authentication,
+    Transport,
+    Timeout,
+}
+
+impl std::fmt::Display for ConnectionFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Authentication => "服务要求认证，请在账号页设置凭据或重新登录",
+            Self::Transport => "MCP 连接中断或协议不兼容，请检查端点与服务状态",
+            Self::Timeout => "MCP 请求超时，请检查服务状态；工具执行结果需另行核对",
+        })
+    }
+}
+
+impl std::error::Error for ConnectionFailure {}
+
 #[derive(Default)]
 struct CatalogClock([AtomicU64; 3]);
 
@@ -211,7 +230,7 @@ impl McpPool {
             bail!("HTTP API 通过 Adapter 派发，不能建立 MCP 上游会话");
         }
         if definition.oauth && connection.status == "needs_auth" {
-            bail!("需要 OAuth 授权，请在账号页登录");
+            bail!(ConnectionFailure::Authentication);
         }
         let started = tokio::time::timeout(
             Duration::from_secs(definition.startup_timeout.unwrap_or(40).clamp(5, 300)),
@@ -257,7 +276,7 @@ impl McpPool {
                             .await
                             .context("无法读取 OAuth 授权，请重新登录")?
                         {
-                            bail!("需要 OAuth 授权，请在账号页登录");
+                            bail!(ConnectionFailure::Authentication);
                         }
                         drop(guard);
                         let (stored_client, _) = manager
@@ -385,7 +404,7 @@ impl McpPool {
         );
         let started = tokio::select! {
             _ = shutdown.wait_for(|stopping| *stopping) => bail!("共享后台正在退出"),
-            result = started => result.context("MCP 连接超时，请检查服务状态")??,
+            result = started => result.map_err(|_| ConnectionFailure::Timeout)??,
         };
         let current = engine.store.connection(id)?;
         if !current.active || current.revision != connection.revision {
@@ -502,7 +521,7 @@ impl McpPool {
                     Err(diagnostic)
                 }
             }
-            Err(_) => bail!("工具请求超时，执行结果待核对，请确认结果后再决定是否重试"),
+            Err(_) => bail!(ConnectionFailure::Timeout),
         }
     }
 }
@@ -553,9 +572,9 @@ fn requires_authentication(error: &(dyn std::error::Error + 'static)) -> bool {
 
 fn connection_error(error: impl std::error::Error + 'static) -> anyhow::Error {
     if requires_authentication(&error) {
-        anyhow::anyhow!("服务要求认证，请在账号页设置凭据或重新登录")
+        ConnectionFailure::Authentication.into()
     } else {
-        anyhow::anyhow!("MCP 连接中断或协议不兼容，请检查端点与服务状态")
+        ConnectionFailure::Transport.into()
     }
 }
 

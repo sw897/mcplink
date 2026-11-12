@@ -302,6 +302,10 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version-file: .node-version
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - run: python3 scripts/third-party-notices.py --check
       - run: npm audit --package-lock-only --audit-level=high
       - run: brew install gitleaks cargo-audit
       - run: gitleaks git --log-opts=HEAD --redact --no-banner

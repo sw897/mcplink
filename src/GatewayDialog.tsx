@@ -23,6 +23,7 @@ function ToolRange({
     if (!expanded) return;
     let active = true;
     setError("");
+    setTools(null);
     void rpc<{
       tools: { name: string; description?: string }[];
       error?: unknown;
@@ -46,6 +47,13 @@ function ToolRange({
   const names = [
     ...new Set([...(tools || []).map((t) => t.name), ...(value || [])]),
   ];
+  const visibleNames = names.filter((name) =>
+    name.toLowerCase().includes(search.toLowerCase()),
+  );
+  const availableNames = new Set((tools || []).map((tool) => tool.name));
+  const selectableNames = visibleNames.filter((name) =>
+    availableNames.has(name),
+  );
   return (
     <div className="tool-range">
       <button
@@ -104,50 +112,60 @@ function ToolRange({
               <div className="toolbar compact">
                 <button
                   className="button small"
-                  disabled={!tools}
+                  disabled={
+                    !!error ||
+                    !selectableNames.some((name) => !value.includes(name))
+                  }
                   onClick={() =>
                     onChange([
-                      ...new Set([
-                        ...(value || []),
-                        ...(tools || []).map((t) => t.name),
-                      ]),
+                      ...new Set([...(value || []), ...selectableNames]),
                     ])
                   }
                 >
-                  选择当前全部工具
+                  选择搜索结果（{selectableNames.length}）
+                </button>
+                <button
+                  className="button small"
+                  disabled={!visibleNames.some((name) => value.includes(name))}
+                  onClick={() =>
+                    onChange(
+                      value.filter((name) => !visibleNames.includes(name)),
+                    )
+                  }
+                >
+                  取消搜索结果
                 </button>
                 <button className="button small" onClick={() => onChange([])}>
-                  清空选择
+                  清空全部选择
                 </button>
               </div>
               <div className="tool-range-list">
-                {names
-                  .filter((name) =>
-                    name.toLowerCase().includes(search.toLowerCase()),
-                  )
-                  .map((name) => (
-                    <label key={name}>
-                      <input
-                        type="checkbox"
-                        checked={value.includes(name)}
-                        onChange={(e) =>
-                          onChange(
-                            e.target.checked
-                              ? [...value, name]
-                              : value.filter((n) => n !== name),
-                          )
-                        }
-                      />
-                      <span>
-                        {name}
-                        {tools && !tools.some((t) => t.name === name) && (
-                          <small className="muted">
-                            当前不可用，保留已保存选择
-                          </small>
-                        )}
-                      </span>
-                    </label>
-                  ))}
+                {!visibleNames.length && (
+                  <p className="muted">没有匹配的工具</p>
+                )}
+                {visibleNames.map((name) => (
+                  <label key={name}>
+                    <input
+                      type="checkbox"
+                      checked={value.includes(name)}
+                      onChange={(e) =>
+                        onChange(
+                          e.target.checked
+                            ? [...value, name]
+                            : value.filter((n) => n !== name),
+                        )
+                      }
+                    />
+                    <span>
+                      {name}
+                      {tools && !tools.some((t) => t.name === name) && (
+                        <small className="muted">
+                          当前不可用，保留已保存选择
+                        </small>
+                      )}
+                    </span>
+                  </label>
+                ))}
               </div>
             </>
           )}

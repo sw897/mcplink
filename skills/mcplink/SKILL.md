@@ -20,7 +20,7 @@ description: 通过 mcplink CLI 管理单服务与聚合入口、托管认证和
 - 若当前 `schema` 包含 `call`，可用 `connections tools ID --tool TOOL` 获取指定工具的输入 Schema 与摘要，再以 `call ID TOOL --stdin` 传入参数对象。对象类型原样保留，校验失败退出 `2`。上游错误退出 `1`，工具结果在 `.result.output`；成功时在 `.ok.output`。
 - 工具调用使用返回的托管连接 ID 和精确工具名，不按显示名选账号；按本次业务授权执行，不因管理连接的授权而扩大到发送消息或修改业务数据。终端入口不继承原生 Agent 的工具确认流程，`readOnlyHint` 不是授权。
 - 需要固定参数契约时传 `--schema-hash HASH`；Schema 或连接变化时停止并重新发现。工具调用超时或通信中断后先核对结果，不自动重发。新 CLI 遇到旧后台时按错误提示使用同一构建重启，不回退绕过校验。
-- 若当前 `schema` 包含 `cli generate`，可按明确的连接、工具选择和新目录生成轻量入口；先 `cli inspect MANIFEST` 和离线 `--help` 核对；`cli check MANIFEST` 对照当前契约，不执行工具、不修改文件。复杂或敏感参数用 `--stdin`；自动化可直接以参数数组调用 `cli run --manifest MANIFEST -- TOOL --stdin`。生成物不含凭据，仍依赖本机 mcplink 和当前托管权限；换数据目录须明确选择当地连接后 `cli rebind`，契约变化时重新生成，不按名称自动换账号。
+- 若当前 `schema` 包含 `cli generate`，可按明确的连接、工具选择和新目录生成轻量入口；先 `cli inspect MANIFEST` 和离线 `--help` 核对；`cli check MANIFEST` 对照当前契约，不执行工具、不修改文件。读取 `compatible`、`discovery` 和逐工具状态；`unchecked` 表示发现故障或数据目录不符，不能当作工具已移除。按安全诊断先恢复连接/授权，`changed` 的参数摘要须结合当前 Schema 核对，再生成到新目录。复杂或敏感参数用 `--stdin`；自动化可直接以参数数组调用 `cli run --manifest MANIFEST -- TOOL --stdin`。生成物不含凭据，仍依赖本机 mcplink 和当前托管权限；换数据目录须明确选择当地连接后 `cli rebind`，不按名称自动换账号。
 - `--data-dir` / `MCPLINK_DATA_DIR` 选择管理数据；`CODEX_HOME` / `HERMES_HOME` 选择原生配置范围。沿用用户指定环境，未经要求不切换到另一套数据。
 - `connections list` 包含 `detected:true` 的未托管条目。此类条目先按 `sourceId` 和 `name` 导入，再使用返回的托管 ID。
 - Claude Code 自动盘点用户 `.claude.json` 与已启用用户插件默认 `.mcp.json`。用户来源可通过配置事务写入；插件来源带 `readOnly:true`，可以导入、检查和复用连接，原文件由插件维护。以每个来源返回的权限为准，不直接改写插件缓存。

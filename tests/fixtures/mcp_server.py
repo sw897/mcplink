@@ -90,7 +90,7 @@ def handle(request, endpoint="", origin=""):
             page = {"tools": tools[offset:offset+10]}
             if offset + 10 < len(tools): page["nextCursor"] = str(offset + 10)
             return page
-        if endpoint in {"/mcp-tools", "/mcp-slow", "/mcp-cycle", "/mcp-duplicates", "/mcp-generated", "/mcp-generated-changed"}:
+        if endpoint in {"/mcp-tools", "/mcp-slow", "/mcp-cycle", "/mcp-duplicates"} or endpoint.startswith("/mcp-generated"):
             if endpoint == "/mcp-cycle":
                 return {"tools":[],"nextCursor":"repeat"}
             if endpoint == "/mcp-duplicates":
@@ -100,6 +100,14 @@ def handle(request, endpoint="", origin=""):
                 tools = tools + GENERATED_TOOLS
             if endpoint == "/mcp-generated-changed":
                 tools = [{**tool,"inputSchema":{**tool["inputSchema"],"properties":{**tool["inputSchema"]["properties"],"newOptionalFlag":{"type":"boolean"}}}} if tool["name"]=="read_document" else tool for tool in tools]
+            replacements = {
+                "/mcp-generated-contract-v2": {"type": "object", "properties": {"id": {"type": "integer"}, "revision": {"type": "integer"}}, "required": ["id", "revision"]},
+                "/mcp-generated-constraints": {"type": "object", "properties": {"id": {"type": "string", "minLength": 1}, "delay_ms": {"type": "integer"}}, "required": ["id"]},
+                "/mcp-generated-stdin": {"type": "object", "properties": {"stdin": {"type": "string"}}},
+                "/mcp-generated-invalid": {"type": "object", "properties": {"id": {"type": "not-a-type"}}},
+            }
+            if endpoint in replacements:
+                tools = [{**tool, "inputSchema": replacements[endpoint]} if tool["name"] == "read_document" else tool for tool in tools]
             if origin:
                 tools = [{**tool,"inputSchema":{"type":"object","properties":{"value":{"$ref":origin+"/schema-external"}}}} if tool["name"]=="external_schema" else tool for tool in tools]
             offset = int(params.get("cursor", "0"))

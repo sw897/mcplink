@@ -36,9 +36,9 @@ flowchart LR
 
 ## 安装与构建 / Install and build
 
-下载 **[0.3.0 预览版 / Preview](https://github.com/sw897/mcplink/releases/tag/v0.3.0)**，支持 macOS Apple Silicon 和 Windows x64。Release 提供安装包、独立 CLI、SHA-256 校验值和公开构建清单。
+下载 **[0.3.1 预览版 / Preview](https://github.com/sw897/mcplink/releases/tag/v0.3.1)**，支持 macOS Apple Silicon 和 Windows x64。Release 提供安装包、独立 CLI、SHA-256 校验值和公开构建清单。
 
-Download the **[0.3.0 preview](https://github.com/sw897/mcplink/releases/tag/v0.3.0)** for macOS Apple Silicon or Windows x64. The release includes installers, standalone CLIs, SHA-256 checksums, and public build manifests.
+Download the **[0.3.1 preview](https://github.com/sw897/mcplink/releases/tag/v0.3.1)** for macOS Apple Silicon or Windows x64. The release includes installers, standalone CLIs, SHA-256 checksums, and public build manifests.
 
 | 平台 / Platform | 安装方式 / Installation |
 | --- | --- |
@@ -46,9 +46,9 @@ Download the **[0.3.0 preview](https://github.com/sw897/mcplink/releases/tag/v0.
 | Windows x64 | 运行 NSIS 安装包，也可使用独立 CLI ZIP。<br>Run the NSIS installer. A standalone CLI ZIP is also available. |
 | 独立 CLI / Standalone CLI | 使用对应平台的 CLI 归档；或在源码目录运行 `cargo install --path crates/mcplink-core --locked`，将 Cargo 的可执行目录加入 PATH。<br>Use the platform's CLI archive, or run `cargo install --path crates/mcplink-core --locked` from a source checkout and add Cargo's executable directory to PATH. |
 
-将应用与 CLI 保留在固定路径。升级时同步更新桌面和独立 CLI，并重启后台。0.3.0 使用数据语义版本 5、management API 21；旧程序拒绝打开新数据目录。
+将应用与 CLI 保留在固定路径。升级时同步更新桌面和独立 CLI，并重启后台。0.3.1 沿用数据语义版本 5，management API 升为 22；新契约诊断要求新版后台，较早的程序仍不能打开其不支持的数据目录。
 
-Keep the application and CLI at permanent paths. Upgrade the desktop and standalone CLI together, then restart the background process. Version 0.3.0 uses data semantics 5 and management API 21; older binaries refuse the newer data directory.
+Keep the application and CLI at permanent paths. Upgrade the desktop and standalone CLI together, then restart the background process. Version 0.3.1 retains data semantics 5 and raises management API to 22. The new contract diagnostics require the updated backend; older binaries still refuse unsupported data directories.
 
 macOS 预览包采用 ad-hoc 签名、未公证，Windows 包未签名。Intel Mac 和 Linux 暂无已验收的安装包。兼容性、签名和校验值见[发布说明](docs/release-notes.md)与[发布指南](docs/release.md)；成功的 [CI 构建](https://github.com/sw897/mcplink/actions/workflows/ci.yml)也提供 `packages-*` 工件。
 
@@ -72,6 +72,10 @@ For development and packaging commands, see [Build from source](#build-from-sour
    Create a unified entry, select services and tool ranges, then connect it to the target agent. Review and apply the proposed configuration changes.
 5. 重新加载 Agent 的 MCP 配置，实际调用一次工具确认可用。<br>
    Reload the agent's MCP configuration and make a tool call to confirm access.
+
+入口工具范围和工具 CLI 均支持按搜索结果批量选择或取消，保留搜索范围之外的选择；“清空全部选择”单独作用于全部工具。
+
+Entry tool ranges and Tool CLI support selecting or deselecting search results in bulk while preserving selections outside the search. **Clear all selections** applies to the entire list.
 
 后续在 mcplink 中调整服务选择，保留同一个 Agent 入口。支持实时刷新的客户端会收到清单变更通知，其他客户端需要重载 MCP。也可点击“通知 Agent 刷新”或运行 `mcplink gateway refresh ENTRY_ID`。
 
@@ -124,9 +128,9 @@ mcplink cli generate CONNECTION_ID --name notes --output ./notes-cli --tool TOOL
 mcplink cli check ./notes-cli/notes.mcplink.json
 ```
 
-通过 stdin 传入工具参数 JSON。生成的命令清单不含凭据，调用时复用托管认证。在服务或统一入口中打开“工具 CLI”，可以查看参数、生成命令、检查契约，或明确执行一次工具调用。输入格式、退出码和重新绑定见 [CLI 指南](docs/agent-cli.md)。
+通过 stdin 传入工具参数 JSON。生成的命令清单不含凭据，调用时复用托管认证。在服务或统一入口中打开“工具 CLI”，可以查看参数、生成命令、检查契约，或明确执行一次工具调用。契约检查区分工具变化、移除或范围排除，以及授权或连接故障导致的未能核验，并展示已保存参数的变化摘要。输入格式、退出码和重新绑定见 [CLI 指南](docs/agent-cli.md)。
 
-Pass the tool's argument JSON to stdin. Generated commands keep credentials out of their manifests and reuse managed authentication. Open **Tool CLI** from a service or unified entry to inspect parameters, generate commands, check contracts, or explicitly invoke a tool once. See the [CLI guide](docs/agent-cli.md) for input formats, exit codes, and rebinding.
+Pass the tool's argument JSON to stdin. Generated commands keep credentials out of their manifests and reuse managed authentication. Open **Tool CLI** from a service or unified entry to inspect parameters, generate commands, check contracts, or explicitly invoke a tool once. Checks distinguish changed, removed or filtered tools from contracts left unchecked by authentication or connection failures, and summarize changes to saved parameters. See the [CLI guide](docs/agent-cli.md) for input formats, exit codes, and rebinding.
 
 <a id="http-api-to-mcp"></a>
 

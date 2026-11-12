@@ -2,6 +2,14 @@
 import json
 from pathlib import Path
 import subprocess
+import sys
+
+if sys.argv[1:] == ['--check']:
+    from release_manifest import release_version
+    print('Verified locked dependency notices for mcplink', release_version())
+    raise SystemExit(0)
+if sys.argv[1:]:
+    raise SystemExit('Usage: python3 scripts/third-party-notices.py [--check]')
 
 root=Path(__file__).resolve().parents[1]
 metadata=json.loads(subprocess.check_output(['cargo','metadata','--locked','--format-version','1'],cwd=root,stderr=subprocess.DEVNULL))

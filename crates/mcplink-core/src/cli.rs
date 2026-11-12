@@ -332,6 +332,9 @@ fn schema() -> Value {
     command.build();
     json!({"schemaVersion":1,"version":env!("CARGO_PKG_VERSION"),"executable":std::env::current_exe().ok(),
         "output":{"success":{"ok":"result"},"failure":{"error":{"code":"error category","message":"safe diagnostic"},"result":"optional partial result"}},
+        "cliCheck":{"managementApi":22,"fields":["compatible","datasetMatches","connectionId","discovery","tools"],
+            "discoveryStatus":["complete","partial","failed","not_checked"],"toolStatus":["current","changed","unavailable","unchecked"],
+            "semantics":"Inspection only, no tool calls or file changes. Read the report, not just exit code 0. Partial discovery keeps healthy tools checkable; failed members are unchecked, not removed. Changes compare saved parameter metadata, not complete schemas."},
         "exitCodes":{"0":"success","1":"operation failure, non-ready probe, upstream error or partial apply","2":"invalid CLI arguments or stdin"},
         "httpApi":{"definitionField":"httpApi","transport":"http-api","baseUrlField":"url","authentication":"managed definition.headers; no MCP OAuth; shared connections only",
             "tools":{"required":["name","description","inputSchema","method","path","response"],"optional":["pathParams","query","body","annotations"],"methods":["GET","POST","PUT","PATCH","DELETE","HEAD"]},

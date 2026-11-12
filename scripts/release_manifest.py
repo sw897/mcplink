@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import platform
+import re
 import subprocess
 import tomllib
 
@@ -25,7 +26,21 @@ def release_version():
                 "cargo": cargo["workspace"]["package"]["version"], "tauri": tauri["version"]}
     if len(set(versions.values())) != 1:
         raise ValueError(f"Release versions differ: {versions}")
+    verify_notices(package["version"], lock)
     return package["version"]
+
+
+def verify_notices(version, npm_lock):
+    notices = (ROOT / "THIRD_PARTY_NOTICES.txt").read_text()
+    if notices.splitlines()[0] != f"Third-party notices for mcplink {version}":
+        raise ValueError("Third-party notice version differs from the release version")
+    cargo_lock = tomllib.loads((ROOT / "Cargo.lock").read_text())
+    expected = {f"{item['name']} {item['version']}" for item in cargo_lock["package"] if item.get("source")}
+    expected.update(f"{name.removeprefix('node_modules/')} {item['version']}"
+                    for name, item in npm_lock["packages"].items() if name and not item.get("dev"))
+    names = re.findall(r"^={72}\n([^\n]+)\nSPDX: ", notices, re.MULTILINE)
+    if len(names) != len(set(names)) or set(names) != expected:
+        raise ValueError("Third-party notices do not match the locked dependency names and versions; regenerate them before release")
 
 
 def main():

@@ -25,14 +25,14 @@ python3 tests/e2e/run.py --record artifacts/e2e/core-local
 | `claude_sources.py`、`claude_writable.py`、`opencode_sources.py` | 客户端作用域、只读边界、格式及可写事务 |
 | `native_clients.py` | Codex app-server 与 Hermes 官方 MCP 发现/工具注册表：一个原生入口调用两个独立上游、范围变化、授权故障隔离、恢复及条目还原；不启动模型推理 |
 | `claude_native.py` | Claude 原生 CLI 加载生成的原生配置，并调用两个独立上游；模型 Messages 响应来自 loopback 合成服务，不使用真实模型账号 |
-| `tool_calls.py`、`generated_cli.py`、`cli_workflow.py` | 工具发现、Schema 校验、错误与退出码、命令生成及重新绑定 |
+| `tool_calls.py`、`generated_cli.py`、`cli_workflow.py` | 工具发现、Schema 校验、错误与退出码、命令生成及重新绑定；契约参数差异、单服务/聚合发现故障归因、旧后台拒绝及零调用核对 |
 | `http_api.py` | HTTP API 的路径/query/JSON 映射、图片与 Base64 转换、发现与核验区分、聚合路由、CLI 与凭据生命周期 |
 | `aggregate_gateway.py` | 单入口多上游、重名路由、分页、资源与提示、服务选择、配置迁移和三路径共用 OAuth；可用 `--pi-package` 验证官方 Pi MCP 运行时 |
 | `entry_policy.py` | 同一账号的独立入口白名单、空与继承语义、全局上限和拒绝伪造调用 |
 | `catalog_refresh.py` | 工具/资源/提示变更通知、入口隔离、手动刷新、断开清理及官方 Pi 实时工具刷新（`--pi-package`） |
 | `catalog_pagination.py` | 动态上游的聚合分页快照、跨入口游标隔离、认证与成员变更后的游标失效 |
 | `remote_transports.py`、`oauth_clients.py` | 远程传输、协议会话、OAuth 注册与刷新、并发和失效处理 |
-| `desktop_ui.py` | 构建后界面流程与可访问性，包括 HTTP API 只读发现、探测确认、修订冲突、重复提交和异步关闭；需要 Chrome 和 agent-browser |
+| `desktop_ui.py` | 构建后界面流程与可访问性，包括搜索结果批量选择/取消、契约变更及未能核验提示，HTTP API 只读发现、探测确认、修订冲突、重复提交和异步关闭；需要 Chrome 和 agent-browser |
 | `windows_desktop.py` | NSIS 隔离安装后的真实 Tauri/WebView2 窗口：Windows UI Automation 导航、弹窗取消、HTTP 探测、暂停/恢复、关闭到托盘及单实例重开；交互桌面不可用时失败 |
 | `windows_background.py`、`daemon_lifecycle.py` | 暂停持久化、退出、重连与进程树清理 |
 | `windows_signing.py`、`windows_installer.py` | 签名拒绝边界，NSIS 隔离安装、旧版升级、重装及卸载保留数据；有旧包时明确记录基线 |

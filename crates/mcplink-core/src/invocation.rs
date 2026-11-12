@@ -116,8 +116,16 @@ impl ToolContract {
 }
 
 pub(crate) async fn contracts(engine: Arc<Engine>, id: &str) -> Result<Vec<ToolContract>> {
-    let (_, tools, _) = contracts_with_pool(engine.clone(), id, &engine.pool).await?;
+    let (tools, _) = contract_report(engine, id).await?;
     Ok(tools)
+}
+
+pub(crate) async fn contract_report(
+    engine: Arc<Engine>,
+    id: &str,
+) -> Result<(Vec<ToolContract>, Vec<Value>)> {
+    let (_, tools, diagnostics) = contracts_with_pool(engine.clone(), id, &engine.pool).await?;
+    Ok((tools, diagnostics))
 }
 
 async fn contracts_with_pool(

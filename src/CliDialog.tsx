@@ -14,8 +14,31 @@ type Generated = {
 type ContractCheck = {
   compatible: boolean;
   datasetMatches: boolean;
-  tools: { name: string; status: string }[];
+  discovery: {
+    status: "complete" | "partial" | "failed" | "not_checked";
+    diagnostics: { code: string; message: string; connectionId?: string }[];
+  };
+  tools: {
+    name: string;
+    status: string;
+    reason?: { code: string; message: string };
+    changes?: {
+      schemaChanged: boolean;
+      stdinOnly: { before: boolean; after: boolean } | null;
+      parameters: {
+        name: string;
+        change: "added" | "removed" | "modified";
+        before?: Parameter;
+        after?: Parameter;
+      }[];
+    };
+  }[];
 };
+type Parameter = { kind: string; required: boolean };
+const parameterLabel = (parameter?: Parameter) =>
+  parameter
+    ? `${parameter.kind.toUpperCase()}，${parameter.required ? "必填" : "可选"}`
+    : "";
 type Manifest = {
   name: string;
   connectionId: string;
@@ -172,6 +195,9 @@ export function CliDialog({
         }
       : { name: tool, service: undefined };
   };
+  const visibleTools = tools.filter((tool) =>
+    tool.name.toLowerCase().includes(search.toLowerCase()),
+  );
   return (
     <Modal title="工具 CLI" wide className="cli-modal" onClose={onClose}>
       <div className="modal-body cli-workflow">
@@ -223,12 +249,30 @@ export function CliDialog({
             className={check.compatible ? "cli-contract" : "warning-banner"}
           >
             <strong>
-              {check.compatible
-                ? "工具契约一致"
-                : check.datasetMatches
-                  ? "工具契约需要核对"
-                  : "此 CLI 属于另一数据目录，请先用 cli rebind 绑定本机连接"}
+              {!check.datasetMatches
+                ? "此 CLI 属于另一数据目录，请先用 cli rebind 绑定本机连接"
+                : check.discovery.status === "failed"
+                  ? "工具契约尚未核验"
+                  : check.compatible
+                    ? "工具契约一致"
+                    : "工具契约需要核对"}
             </strong>
+            {check.discovery.diagnostics.length > 0 && (
+              <div className="cli-discovery">
+                {check.discovery.status === "partial" && (
+                  <p>部分上游未能核验，健康服务的检查结果仍有效。</p>
+                )}
+                <ul>
+                  {check.discovery.diagnostics.map((diagnostic, index) => (
+                    <li key={index}>
+                      {diagnostic.connectionId &&
+                        `${connectionLabel(connections.find((c) => c.id === diagnostic.connectionId))}：`}
+                      {diagnostic.message}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             <ul>
               {check.tools.map((tool) => (
                 <li key={tool.name}>
@@ -237,14 +281,60 @@ export function CliDialog({
                     current: "一致",
                     changed: "已变化",
                     unavailable: "当前不可用",
+                    unchecked: "未能核验",
                   }[tool.status] || tool.status}
+                  {tool.reason && <p>{tool.reason.message}</p>}
+                  {tool.changes && (
+                    <>
+                      <ul>
+                        {tool.changes.parameters.map((parameter) => (
+                          <li key={parameter.name}>
+                            {
+                              {
+                                added: "新增",
+                                removed: "移除",
+                                modified: "修改",
+                              }[parameter.change]
+                            }{" "}
+                            --{parameter.name}：
+                            {parameter.before &&
+                              parameterLabel(parameter.before)}
+                            {parameter.before && parameter.after && " → "}
+                            {parameter.after && parameterLabel(parameter.after)}
+                          </li>
+                        ))}
+                        {tool.changes.stdinOnly && (
+                          <li>
+                            输入方式：
+                            {tool.changes.stdinOnly.before
+                              ? "仅 JSON stdin"
+                              : "支持参数标志"}{" "}
+                            →{" "}
+                            {tool.changes.stdinOnly.after
+                              ? "仅 JSON stdin"
+                              : "支持参数标志"}
+                          </li>
+                        )}
+                      </ul>
+                      {tool.changes.schemaChanged && (
+                        <p>
+                          Schema
+                          摘要已变化。这里仅比较已保存的参数类型、必填性及输入方式，请刷新工具并核对当前完整
+                          Schema。
+                        </p>
+                      )}
+                    </>
+                  )}
                 </li>
               ))}
             </ul>
             <small>{manifestPath}</small>
-            {!check.compatible && check.datasetMatches && (
-              <p>核对当前参数后，选择新输出目录重新生成。原 CLI 文件将保留。</p>
-            )}
+            {check.tools.some((tool) => tool.status === "changed") &&
+              check.datasetMatches && (
+                <p>
+                  核对当前参数后，选择新输出目录重新生成。原 CLI 文件将保留。
+                </p>
+              )}
           </div>
         )}
         <div className="cli-columns">
@@ -257,6 +347,51 @@ export function CliDialog({
                 placeholder="工具名称"
               />
             </label>
+            <div className="toolbar compact">
+              <button
+                className="button small"
+                disabled={
+                  !!pending ||
+                  loading ||
+                  !visibleTools.some((tool) => !selected.includes(tool.name))
+                }
+                onClick={() =>
+                  setSelected((previous) => [
+                    ...new Set([
+                      ...previous,
+                      ...visibleTools.map((tool) => tool.name),
+                    ]),
+                  ])
+                }
+              >
+                选择搜索结果（{visibleTools.length}）
+              </button>
+              <button
+                className="button small"
+                disabled={
+                  !!pending ||
+                  loading ||
+                  !visibleTools.some((tool) => selected.includes(tool.name))
+                }
+                onClick={() =>
+                  setSelected((previous) =>
+                    previous.filter(
+                      (name) =>
+                        !visibleTools.some((tool) => tool.name === name),
+                    ),
+                  )
+                }
+              >
+                取消搜索结果
+              </button>
+              <button
+                className="button small"
+                disabled={!!pending || loading || !selected.length}
+                onClick={() => setSelected([])}
+              >
+                清空全部选择
+              </button>
+            </div>
             {loading ? (
               <p role="status">正在获取工具…</p>
             ) : !tools.length ? (
@@ -265,42 +400,41 @@ export function CliDialog({
               </p>
             ) : (
               <div className="cli-tools">
-                {tools
-                  .filter((t) =>
-                    t.name.toLowerCase().includes(search.toLowerCase()),
-                  )
-                  .map((tool) => (
-                    <div
-                      key={tool.name}
-                      className={active === tool.name ? "active" : ""}
+                {!visibleTools.length && (
+                  <p className="muted">没有匹配的工具</p>
+                )}
+                {visibleTools.map((tool) => (
+                  <div
+                    key={tool.name}
+                    className={active === tool.name ? "active" : ""}
+                  >
+                    <input
+                      aria-label={`导出 ${tool.name}`}
+                      type="checkbox"
+                      disabled={!!pending}
+                      checked={selected.includes(tool.name)}
+                      onChange={(e) =>
+                        setSelected(
+                          e.target.checked
+                            ? [...selected, tool.name]
+                            : selected.filter((n) => n !== tool.name),
+                        )
+                      }
+                    />
+                    <button
+                      className="cli-tool-name"
+                      aria-label={`查看 ${tool.name} 参数`}
+                      aria-pressed={active === tool.name}
+                      disabled={!!pending}
+                      onClick={() => setActive(tool.name)}
                     >
-                      <input
-                        aria-label={`导出 ${tool.name}`}
-                        type="checkbox"
-                        disabled={!!pending}
-                        checked={selected.includes(tool.name)}
-                        onChange={(e) =>
-                          setSelected(
-                            e.target.checked
-                              ? [...selected, tool.name]
-                              : selected.filter((n) => n !== tool.name),
-                          )
-                        }
-                      />
-                      <button
-                        className="cli-tool-name"
-                        aria-label={`查看 ${tool.name} 参数`}
-                        aria-pressed={active === tool.name}
-                        disabled={!!pending}
-                        onClick={() => setActive(tool.name)}
-                      >
-                        {toolLabel(tool.name).name}
-                        {toolLabel(tool.name).service && (
-                          <small>{toolLabel(tool.name).service}</small>
-                        )}
-                      </button>
-                    </div>
-                  ))}
+                      {toolLabel(tool.name).name}
+                      {toolLabel(tool.name).service && (
+                        <small>{toolLabel(tool.name).service}</small>
+                      )}
+                    </button>
+                  </div>
+                ))}
               </div>
             )}
             {selected.some((n) => !tools.some((t) => t.name === n)) &&
@@ -336,7 +470,7 @@ export function CliDialog({
                   </p>
                 )}
                 {descriptor.tool.description && (
-                  <p className="tool-description">
+                  <p className="tool-description" tabIndex={0}>
                     {descriptor.tool.description}
                   </p>
                 )}
@@ -365,7 +499,7 @@ export function CliDialog({
                 )}
                 <details>
                   <summary>调用名称与输入 Schema</summary>
-                  <pre>
+                  <pre tabIndex={0} aria-label="调用名称与输入 Schema 内容">
                     {descriptor.tool.name}
                     {"\n"}
                     {JSON.stringify(descriptor.tool.inputSchema, null, 2)}
@@ -440,7 +574,11 @@ export function CliDialog({
                   实际调用一次
                 </button>
                 {output && (
-                  <pre className="cli-result" aria-label="调用结果">
+                  <pre
+                    className="cli-result"
+                    aria-label="调用结果"
+                    tabIndex={0}
+                  >
                     {JSON.stringify(output, null, 2)}
                   </pre>
                 )}

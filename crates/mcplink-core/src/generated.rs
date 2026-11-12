@@ -528,22 +528,91 @@ try {{
     )
 }
 
+fn changes(previous: &Tool, current: &Tool) -> Value {
+    let mut parameters = Vec::new();
+    // A stdin-only manifest intentionally omits parameter metadata.
+    if !previous.stdin_only && !current.stdin_only {
+        let names: std::collections::BTreeSet<_> = previous
+            .parameters
+            .iter()
+            .chain(&current.parameters)
+            .map(|parameter| &parameter.name)
+            .collect();
+        for name in names {
+            let before = previous.parameters.iter().find(|p| &p.name == name);
+            let after = current.parameters.iter().find(|p| &p.name == name);
+            if before == after {
+                continue;
+            }
+            let value = match (before, after) {
+                (None, Some(after)) => json!({"name":name,"change":"added","after":after}),
+                (Some(before), None) => json!({"name":name,"change":"removed","before":before}),
+                (Some(before), Some(after)) => {
+                    json!({"name":name,"change":"modified","before":before,"after":after})
+                }
+                (None, None) => unreachable!(),
+            };
+            parameters.push(value);
+        }
+    }
+    json!({"schemaChanged":previous.schema_hash != current.schema_hash,
+        "stdinOnly":if previous.stdin_only == current.stdin_only {Value::Null} else {json!({"before":previous.stdin_only,"after":current.stdin_only})},
+        "parameters":parameters})
+}
+
 pub async fn check_managed(engine: Arc<Engine>, path: &Path) -> Result<Value> {
     let manifest = Manifest::read(path)?;
     let dataset_matches = engine.dataset_id().await? == manifest.dataset_id;
-    let discovered = if dataset_matches {
-        invocation::contracts(engine, &manifest.connection_id)
-            .await
-            .ok()
+    let (discovery_status, discovered, diagnostics) = if dataset_matches {
+        let result = async {
+            let fingerprint = crate::gateway::catalog_version(&engine, &manifest.connection_id)?;
+            let report =
+                invocation::contract_report(engine.clone(), &manifest.connection_id).await?;
+            if crate::gateway::catalog_version(&engine, &manifest.connection_id)? != fingerprint {
+                bail!(invocation::ToolFailure {
+                    code: invocation::ToolErrorCode::ConnectionChanged,
+                    details: Value::Null
+                });
+            }
+            Ok::<_, anyhow::Error>(report)
+        }
+        .await;
+        match result {
+            Ok((tools, diagnostics)) => (
+                if diagnostics.is_empty() {
+                    "complete"
+                } else {
+                    "partial"
+                },
+                tools,
+                diagnostics,
+            ),
+            Err(error) => (
+                "failed",
+                Vec::new(),
+                vec![crate::catalog::discovery_diagnostic(
+                    &engine,
+                    &manifest.connection_id,
+                    &error,
+                )],
+            ),
+        }
     } else {
-        None
+        (
+            "not_checked",
+            Vec::new(),
+            vec![
+                json!({"code":"dataset_mismatch","message":"此 CLI 属于另一数据目录，请明确选择本机连接后 cli rebind"}),
+            ],
+        )
     };
     let mut results = Vec::new();
     for tool in &manifest.tools {
         let actual = discovered
-            .as_ref()
-            .and_then(|tools| tools.iter().find(|actual| actual.tool["name"] == tool.name));
-        let status = match actual {
+            .iter()
+            .find(|actual| actual.tool["name"] == tool.name);
+        let mut result = json!({"name":tool.name});
+        match actual {
             Some(actual) => {
                 let current = contract(
                     tool.name.clone(),
@@ -551,18 +620,39 @@ pub async fn check_managed(engine: Arc<Engine>, path: &Path) -> Result<Value> {
                     actual.schema_hash.clone(),
                 )
                 .await;
-                if current.as_ref().is_ok_and(|current| current == tool) {
-                    "current"
-                } else {
-                    "changed"
+                match current {
+                    Ok(current) if &current == tool => result["status"] = json!("current"),
+                    Ok(current) => {
+                        result["status"] = json!("changed");
+                        result["changes"] = changes(tool, &current);
+                    }
+                    Err(_) => {
+                        result["status"] = json!("changed");
+                        result["reason"] = json!({"code":"invalid_tool_schema","message":"当前工具 Schema 无法验证，请修复上游后重新检查"});
+                    }
                 }
             }
-            None => "unavailable",
-        };
-        results.push(json!({"name":tool.name,"status":status}));
+            None => {
+                let diagnostic = diagnostics.iter().find(|diagnostic| {
+                    matches!(discovery_status, "failed" | "not_checked")
+                        || diagnostic["namespace"].as_str().is_some_and(|namespace| {
+                            tool.name.starts_with(&format!("{namespace}__"))
+                        })
+                });
+                if let Some(diagnostic) = diagnostic {
+                    result["status"] = json!("unchecked");
+                    result["reason"] = diagnostic.clone();
+                } else {
+                    result["status"] = json!("unavailable");
+                    result["reason"] = json!({"code":"tool_unavailable","message":"当前工具清单不含此工具：已移除或被工具范围排除"});
+                }
+            }
+        }
+        results.push(result);
     }
     Ok(
-        json!({"compatible":dataset_matches && results.iter().all(|tool| tool["status"] == "current"),"datasetMatches":dataset_matches,"connectionId":manifest.connection_id,"tools":results}),
+        json!({"compatible":dataset_matches && results.iter().all(|tool| tool["status"] == "current"),"datasetMatches":dataset_matches,"connectionId":manifest.connection_id,
+            "discovery":{"status":discovery_status,"diagnostics":diagnostics},"tools":results}),
     )
 }
 

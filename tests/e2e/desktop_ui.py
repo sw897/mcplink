@@ -71,9 +71,13 @@ if (location.origin === ORIGIN) {
   window.__TAURI_INTERNALS__ = {
     transformCallback() { return ++sequence; },
     async invoke(cmd, args) {
-      if (cmd === "rpc") return (await fetch("/rpc", {
-        method:"POST", headers:{"Content-Type":"application/json","X-Fixture":KEY},body:JSON.stringify(args)
-      })).json();
+      if (cmd === "rpc") {
+        const result = await (await fetch("/rpc", {
+          method:"POST", headers:{"Content-Type":"application/json","X-Fixture":KEY},body:JSON.stringify(args)
+        })).json();
+        if (args.method === "connections.tools") window.__fixtureToolDiscoveryCompleted = (window.__fixtureToolDiscoveryCompleted || 0) + 1;
+        return result;
+      }
       if (cmd.startsWith("plugin:event|")) return ++sequence;
       if (cmd === "plugin:dialog|open") {
         if (args?.options?.directory) return CLI_PARENT;
@@ -99,6 +103,13 @@ if (location.origin === ORIGIN) {
 
     def wait_for(expression):
         browser("wait","--fn",expression)
+
+    def clear_field(selector):
+        # Empty fill and editing shortcuts are not equivalent across the
+        # native CDP drivers. Delete one actual character to emit input.
+        browser("fill", selector, " ")
+        browser("press", "Backspace")
+        wait_for("document.querySelector(" + json.dumps(selector) + ")?.value === ''")
 
     try:
         harness.rpc("connections.save", {"name":"public_http","title":"免认证服务","definition":{"url":url}})
@@ -529,8 +540,22 @@ if (location.origin === ORIGIN) {
         browser("find", "label", "仅开放所选工具", "click")
         wait_for("!![...document.querySelectorAll('.tool-range-list label')].find(l=>l.innerText==='read_document')")
         browser("find", "label", "read_document", "click")
+        browser("fill", '.tool-range-body input[placeholder="搜索工具名称"]', "SEARCH")
+        button("选择搜索结果（1）")
+        wait_for("document.querySelector('.tool-range-list input')?.checked === true")
+        browser("fill", '.tool-range-body input[placeholder="搜索工具名称"]', "read")
+        button("取消搜索结果")
+        wait_for("document.querySelector('.tool-range-list input')?.checked === false")
+        browser("fill", '.tool-range-body input[placeholder="搜索工具名称"]', "no-matching-tool")
+        wait_for("document.querySelector('.tool-range-list')?.innerText.includes('没有匹配') && [...document.querySelectorAll('.tool-range-body button')].filter(b=>b.innerText.includes('搜索结果')).every(b=>b.disabled)")
+        browser("fill", '.tool-range-body input[placeholder="搜索工具名称"]', "read")
+        button("选择搜索结果（1）")
+        browser("fill", '.tool-range-body input[placeholder="搜索工具名称"]', "search")
+        button("取消搜索结果")
+        clear_field('.tool-range-body input[placeholder="搜索工具名称"]')
+        wait_for("[...document.querySelectorAll('.tool-range-list input:checked')].length===1 && [...document.querySelectorAll('.tool-range-list label')].find(l=>l.innerText==='read_document')?.querySelector('input').checked")
         audit("gateway-selection")
-        checks.append("entry editor selects a per-service allowlist without nesting interactive controls")
+        checks.append("entry bulk selection and removal affect only case-insensitive search results, preserve hidden selections and disable empty matches")
         button("保存入口")
         wait_for("document.querySelector('dialog')?.innerText.includes('入口中的服务') && document.querySelectorAll('dialog .binding-detail').length === 2")
         browser("press", "Escape")
@@ -573,6 +598,21 @@ if (location.origin === ORIGIN) {
         button("工具 CLI")
         wait_for("!!document.querySelector('.cli-tools button')")
         assert stats()["calls"] == calls_before
+        browser("select", ".cli-source select", entry["members"][0]["connectionId"])
+        wait_for("document.querySelectorAll('.cli-tools input').length === 2")
+        browser("find", "label", "导出 read_document", "click")
+        browser("fill", ".cli-tool-selection > label input", "SEARCH")
+        button("选择搜索结果（1）")
+        browser("fill", ".cli-tool-selection > label input", "read")
+        button("取消搜索结果")
+        browser("fill", ".cli-tool-selection > label input", "no-matching-tool")
+        wait_for("document.querySelector('.cli-tools')?.innerText.includes('没有匹配') && [...document.querySelectorAll('.cli-tool-selection button')].filter(b=>b.innerText.includes('搜索结果')).every(b=>b.disabled)")
+        clear_field(".cli-tool-selection > label input")
+        wait_for("document.querySelectorAll('.cli-tools input:checked').length === 1 && document.querySelector('input[aria-label=\"导出 search_documents\"]')?.checked === true")
+        assert stats()["calls"] == calls_before
+        checks.append("CLI bulk selection and removal preserve hidden selections and do not execute tools")
+        browser("select", ".cli-source select", entry["id"])
+        wait_for("document.querySelectorAll('.cli-tools input').length === 1 && !!document.querySelector('.cli-tools button')")
         browser("find", "label", "导出 " + alias, "click")
         button("查看 " + alias + " 参数")
         wait_for("!!document.querySelector('.cli-tool-help textarea')")
@@ -605,6 +645,31 @@ if (location.origin === ORIGIN) {
         button("检查已有 CLI")
         wait_for("document.querySelector('.cli-contract')?.innerText.includes('工具契约一致')")
         browser("screenshot", str(record/"tool-cli-generated.png"))
+        original_manifest = manifest.read_bytes()
+        member_id = entry["members"][0]["connectionId"]
+        detail = harness.rpc("connections.detail", {"id": member_id})
+        harness.rpc("connections.save", {"id": member_id, "name": detail["connection"]["name"], "title": detail["connection"]["title"], "accountLabel": detail["connection"]["accountLabel"], "definition": detail["definition"] | {"url": f"http://127.0.0.1:{harness.port}/mcp-generated-changed"}})
+        button("检查已有 CLI")
+        wait_for("[...document.querySelectorAll('.cli-workflow [role=status]')].some(e=>e.innerText.includes('已变化') && e.innerText.includes('newOptionalFlag') && e.innerText.includes('BOOLEAN，可选'))")
+        audit("cli-contract-changed")
+        browser("screenshot", str(record/"tool-cli-contract-changed.png"))
+        completed = json.loads(browser("eval", "window.__fixtureToolDiscoveryCompleted || 0"))
+        button("刷新工具")
+        wait_for("window.__fixtureToolDiscoveryCompleted > " + str(completed) + " && !!document.querySelector('.cli-tools button') && !document.querySelector('.cli-source > button').disabled")
+        button("查看 " + alias + " 参数")
+        wait_for("document.querySelector('.cli-parameters')?.innerText.includes('newOptionalFlag')")
+        harness.rpc("credentials.update", {"id": member_id, "value": "synthetic-invalid-authorization"})
+        button("检查已有 CLI")
+        wait_for("[...document.querySelectorAll('.cli-workflow [role=status]')].some(e=>e.innerText.includes('未能核验') && e.innerText.includes('授权不可用') && !e.innerText.includes('当前不可用'))")
+        audit("cli-contract-unchecked")
+        browser("screenshot", str(record/"tool-cli-contract-unchecked.png"))
+        harness.rpc("credentials.update", {"id": member_id, "value": "synthetic-fixture-authorization"})
+        current_detail = harness.rpc("connections.detail", {"id": member_id})
+        harness.rpc("connections.save", {"id": member_id, "name": current_detail["connection"]["name"], "title": current_detail["connection"]["title"], "accountLabel": current_detail["connection"]["accountLabel"], "definition": current_detail["definition"] | {"url": harness.url}})
+        button("检查已有 CLI")
+        wait_for("document.querySelector('.cli-contract')?.innerText.includes('工具契约一致')")
+        assert manifest.read_bytes() == original_manifest and stats()["calls"] == calls_before + 1
+        checks.append("contract UI shows parameter differences and distinguishes a failed member from removed tools, without calling or rewriting files")
         button("关闭")
         checks.append("desktop shows service/account ownership, explains a tool, guards double submission, generates and checks a credential-free CLI with explicit directory selection")
         button("通知 Agent 刷新")

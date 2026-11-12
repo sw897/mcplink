@@ -2,6 +2,8 @@
 
 使用 `.node-version` 固定 Node.js 22 LTS（最低支持 22.12.0），`rust-toolchain.toml` 固定 Rust 工具链，`npm ci` 和 Cargo `--locked` 固定依赖。开发、CI 和发布入口使用同一 Node 版本。Python 3.11+ 运行验收脚本。锁定环境便于重跑；签名时间和平台工具链会影响产物字节，不宣称二进制逐字节可重现。
 
+发布前运行 `python3 scripts/third-party-notices.py --check`。检查许可声明标题与应用版本一致，并逐项比对 Cargo 锁文件及 npm 生产依赖的名称和版本；CI 与发布版本预检均执行该检查。依赖变更后，在安装锁定依赖的环境运行不带 `--check` 的同一脚本重新收集许可正文，再审查差异。
+
 ## 本地 macOS 候选
 
 ```sh

@@ -448,7 +448,13 @@ pub(crate) async fn collect_entry(
                 crate::catalog::collect(engine.clone(), &engine.pool, &member.connection_id, kind),
             )
             .await;
-            (index, member, result.ok().and_then(Result::ok))
+            let result = result
+                .map_err(|_| anyhow::Error::new(crate::mcp::ConnectionFailure::Timeout))
+                .and_then(|result| result)
+                .map_err(|error| {
+                    crate::catalog::discovery_diagnostic(&engine, &member.connection_id, &error)
+                });
+            (index, member, result)
         });
     }
     let mut results = Vec::new();
@@ -461,9 +467,14 @@ pub(crate) async fn collect_entry(
     let mut routes = HashMap::new();
     let mut names = HashSet::new();
     for (_, member, result) in results {
-        let Some(catalog) = result else {
-            errors.push(json!({"connectionId":member.connection_id,"namespace":member.namespace,"message":"上游暂不可用或未启用此能力，请检查服务状态与账号授权"}));
-            continue;
+        let catalog = match result {
+            Ok(catalog) => catalog,
+            Err(mut diagnostic) => {
+                diagnostic["connectionId"] = json!(member.connection_id);
+                diagnostic["namespace"] = json!(member.namespace);
+                errors.push(diagnostic);
+                continue;
+            }
         };
         let revision = catalog.revision;
         for mut item in catalog.items {
