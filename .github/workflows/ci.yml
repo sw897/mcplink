@@ -91,7 +91,7 @@ jobs:
       - name: Select supported browser-driver Node runtime
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
-          node-version: "24"
+          node-version: "24.22.2"
       - name: Prepare pinned browser driver
         run: npm install --prefix artifacts/e2e/ui-driver --no-save --package-lock=false --ignore-scripts agent-browser@0.41.2
       - name: Desktop renderer acceptance on Chrome
@@ -104,6 +104,9 @@ jobs:
           chrome = Path(os.environ['PROGRAMFILES']) / 'Google/Chrome/Application/chrome.exe' if windows else Path('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')
           driver = Path('artifacts/e2e/ui-driver/node_modules/agent-browser/bin') / ('agent-browser-win32-x64.exe' if windows else 'agent-browser-darwin-arm64')
           assert chrome.is_file() and driver.is_file(), 'Required Chrome or native browser driver is missing'
+          if not windows:
+              driver.chmod(driver.stat().st_mode | 0o111)
+          subprocess.run([str(driver.resolve()), '--version'], check=True)
           subprocess.run(['node', '--version'], check=True)
           subprocess.run([sys.executable, '-u', 'tests/e2e/desktop_ui.py', '--record', 'artifacts/e2e/ci-renderer', '--session', 'mcplink-ci-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}', '--chrome', str(chrome), '--browser-driver', str(driver.resolve())], check=True)
       - name: Restore project Node runtime
@@ -163,6 +166,8 @@ jobs:
           codex = Path('artifacts/e2e/native-codex/node_modules/@openai')
           binaries = list(codex.rglob('bin/codex.exe' if os.name == 'nt' else 'bin/codex'))
           assert len(binaries) == 1, 'Missing or ambiguous native Codex binary'
+          if os.name != 'nt':
+              binaries[0].chmod(binaries[0].stat().st_mode | 0o111)
           with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
               output.write(f'MCPLINK_E2E_CODEX={binaries[0].resolve()}\nMCPLINK_E2E_HERMES_SOURCE={source}\nMCPLINK_E2E_HERMES_PYTHON={python}\n')
       - name: Native Codex and Hermes single-entry calls, refresh and recovery

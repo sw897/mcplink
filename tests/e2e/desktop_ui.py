@@ -740,9 +740,14 @@ if (location.origin === ORIGIN) {
                 try:
                     (record/"failure-snapshot.txt").write_text(browser("snapshot"))
                     browser("screenshot", str(record/"failure.png"))
-                except subprocess.SubprocessError:
+                except (OSError, subprocess.SubprocessError):
                     pass
-            browser("close")
+                try:
+                    browser("close")
+                except (OSError, subprocess.SubprocessError):
+                    pass
+            else:
+                browser("close")
         finally:
             server.shutdown()
             server.server_close()
