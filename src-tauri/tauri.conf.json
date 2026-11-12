@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "mcplink",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "identifier": "io.mcplink.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",

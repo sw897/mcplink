@@ -36,9 +36,9 @@ flowchart LR
 
 ## 安装与构建 / Install and build
 
-下载 **[0.3.1 预览版 / Preview](https://github.com/sw897/mcplink/releases/tag/v0.3.1)**，支持 macOS Apple Silicon 和 Windows x64。Release 提供安装包、独立 CLI、SHA-256 校验值和公开构建清单。
+下载 **[0.3.2 预览版 / Preview](https://github.com/sw897/mcplink/releases/tag/v0.3.2)**，支持 macOS Apple Silicon 和 Windows x64。Release 提供安装包、独立 CLI、SHA-256 校验值和公开构建清单。
 
-Download the **[0.3.1 preview](https://github.com/sw897/mcplink/releases/tag/v0.3.1)** for macOS Apple Silicon or Windows x64. The release includes installers, standalone CLIs, SHA-256 checksums, and public build manifests.
+Download the **[0.3.2 preview](https://github.com/sw897/mcplink/releases/tag/v0.3.2)** for macOS Apple Silicon or Windows x64. The release includes installers, standalone CLIs, SHA-256 checksums, and public build manifests.
 
 | 平台 / Platform | 安装方式 / Installation |
 | --- | --- |
@@ -46,9 +46,9 @@ Download the **[0.3.1 preview](https://github.com/sw897/mcplink/releases/tag/v0.
 | Windows x64 | 运行 NSIS 安装包，也可使用独立 CLI ZIP。<br>Run the NSIS installer. A standalone CLI ZIP is also available. |
 | 独立 CLI / Standalone CLI | 使用对应平台的 CLI 归档；或在源码目录运行 `cargo install --path crates/mcplink-core --locked`，将 Cargo 的可执行目录加入 PATH。<br>Use the platform's CLI archive, or run `cargo install --path crates/mcplink-core --locked` from a source checkout and add Cargo's executable directory to PATH. |
 
-将应用与 CLI 保留在固定路径。升级时同步更新桌面和独立 CLI，并重启后台。0.3.1 沿用数据语义版本 5，management API 升为 22；新契约诊断要求新版后台，较早的程序仍不能打开其不支持的数据目录。
+将应用与 CLI 保留在固定路径。升级时同步更新桌面和独立 CLI，并重启后台。0.3.2 沿用数据语义版本 5，management API 升为 22；新契约诊断要求新版后台，较早的程序仍不能打开其不支持的数据目录。
 
-Keep the application and CLI at permanent paths. Upgrade the desktop and standalone CLI together, then restart the background process. Version 0.3.1 retains data semantics 5 and raises management API to 22. The new contract diagnostics require the updated backend; older binaries still refuse unsupported data directories.
+Keep the application and CLI at permanent paths. Upgrade the desktop and standalone CLI together, then restart the background process. Version 0.3.2 retains data semantics 5 and raises management API to 22. The new contract diagnostics require the updated backend; older binaries still refuse unsupported data directories.
 
 macOS 预览包采用 ad-hoc 签名、未公证，Windows 包未签名。Intel Mac 和 Linux 暂无已验收的安装包。兼容性、签名和校验值见[发布说明](docs/release-notes.md)与[发布指南](docs/release.md)；成功的 [CI 构建](https://github.com/sw897/mcplink/actions/workflows/ci.yml)也提供 `packages-*` 工件。
 

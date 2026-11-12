@@ -7,7 +7,7 @@
 | 能力 | 当前实现与验收入口 |
 | --- | --- |
 | HTTP API 核验交互 | 桌面分开只读“查看工具”与显式“运行探测”；确认显示工具及 HTTP 操作，核对连接修订，一次确认只调用一次。无 probe、取消、失败及异步关闭由 `http_api.py`、`desktop_ui.py` 验证。 |
-| 跨平台 CI | Chrome renderer 在 macOS、Windows 分别运行；等待实际输入控件并检查选中结果。浏览器驱动使用其要求的 Node 24，项目构建与发布恢复固定 Node 22；不重试业务调用。 |
+| 跨平台 CI | Chrome renderer 在 macOS、Windows 分别运行；等待实际输入控件并检查选中结果，以持久错误确认失败状态。浏览器驱动使用其要求的 Node 24，项目构建与发布恢复固定 Node 22；不重试业务调用。tag 复用精确提交的双平台成功记录，避免重复作业。 |
 | 关键客户端单入口 | 固定版本的 Codex、Hermes、Claude 和 Pi 原生运行时加载一个 mcplink 入口并调用独立上游。Hermes/Pi 覆盖实时清单刷新；Codex 覆盖显式重载及新 thread。Claude 使用合成模型 provider；不等同真实模型账号验收。 |
 | Windows 原生桌面 | 独立于 Chrome renderer 的 NSIS 安装窗口验收，使用 Windows UI Automation 检查导航、探测弹窗、后台控制、关闭到托盘与单实例重开。交互桌面不可用按失败处理。 |
 | CLI 契约诊断与批量选择 | 区分完整/部分/失败/未执行发现、工具变化/不可用/未能核验；显示参数与 stdin 模式差异。入口工具范围和 CLI 按搜索结果批量选择/取消，保留隐藏选择。验收入口为 `cli_workflow.py`、`generated_cli.py` 与 `desktop_ui.py`。 |

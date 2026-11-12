@@ -797,7 +797,13 @@ if (location.origin === ORIGIN) {
         button("HTTP API 桌面验收 详情")
         button("查看工具")
         wait_for("[...document.querySelectorAll('dialog details summary code')].some(n=>n.textContent==='echo')")
-        wait_for("document.querySelector('.toast.error')?.innerText.includes('上次上游调用未通过')")
+        # Toasts intentionally expire after seven seconds. The service detail
+        # is the persistent state, including on a slow browser runner.
+        browser("eval", "document.querySelector('.toast button')?.click()")
+        wait_for("!document.querySelector('.toast')")
+        wait_for("document.querySelector('dialog .warning-banner')?.innerText.includes('HTTP 401')")
+        failed_detail = harness.rpc("connections.detail", {"id": api_id})["connection"]
+        assert failed_detail["status"] != "ready" and "HTTP 401" in failed_detail["lastError"]
         assert len(api.requests) == 3
         checks.append("a failed real probe remains failed, cannot replay from its confirmation, and local inspection still shows tools plus the last upstream failure")
         result["conclusion"]="PASS"

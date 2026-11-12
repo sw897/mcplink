@@ -79,6 +79,8 @@ Windows CI 在打包前用 `scripts/prepare_windows_bundler.py` 通过 GitHub Re
 
 固定源码提交后，在干净的公开源码检出目录构建，并等待同一提交的两平台 CI 完成。Windows 安装包从对应的成功 CI 获取，核对 CLI、桌面程序、许可及编译路径；Tauri 会将桌面 PE 内唯一的 bundle-type 标记从 `UNK` 改为 `NSS`，其余内容应与构建清单一致。
 
+分支推送和 Pull Request 运行完整 CI，tag 推送不重复执行同一套检查。创建 tag 前确认其源码提交已有成功的 macOS、Windows 和源码审计结果；附件构建清单的修订必须与 tag 解引用后的提交一致。没有对应成功记录时，可用 `workflow_dispatch` 对该引用运行完整验收，不能用其他提交或未完成作业替代。分支与 tag 过滤规则见 [GitHub 工作流语法](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#onpushbranchestagsbranches-ignoretags-ignore)。
+
 为两平台产物汇总 `release-manifest.json` 和 `SHA256SUMS`，记录相同的源码提交、逐文件哈希、平台验收范围与签名状态。公开清单只保留版本、源码相对路径和产物元数据，不附测试 home、系统凭据库、机器绝对路径或原始日志。
 
 发布说明统一维护在 `docs/release-notes.md`。核对 tag 与源码构建版本一致后，先创建 Release 草稿并上传已验证产物，检查说明及校验值后发布为 Pre-release。发布后重新下载附件核对哈希，并确认 tag 指向、Release 状态和下载入口。签名状态不同的产物应单独标明来源及校验值。
