@@ -1500,7 +1500,11 @@ impl Engine {
                 )
             }
             "connections.probe" | "connections.tools" => {
-                self.probe(required(&p, "id")?, method == "connections.probe")
+                let revision = p
+                    .get("expectedRevision")
+                    .map(|value| value.as_u64().context("连接修订须为非负整数"))
+                    .transpose()?;
+                self.probe(required(&p, "id")?, method == "connections.probe", revision)
                     .await
             }
             "credentials.update" => {
@@ -1679,10 +1683,20 @@ impl Engine {
         }
     }
 
-    async fn probe(self: &Arc<Self>, id: &str, execute_probe: bool) -> Result<Value> {
+    async fn probe(
+        self: &Arc<Self>,
+        id: &str,
+        execute_probe: bool,
+        expected_revision: Option<u64>,
+    ) -> Result<Value> {
         let connection = self.store.connection(id)?;
+        anyhow::ensure!(
+            expected_revision.is_none_or(|revision| revision == connection.revision),
+            "连接已变化，请重新查看探测操作后确认"
+        );
         if connection.members.is_none() && self.definition(&connection)?.http_api.is_some() {
-            return crate::http_api::probe(self.clone(), id, execute_probe).await;
+            return crate::http_api::probe(self.clone(), id, execute_probe, expected_revision)
+                .await;
         }
         let expected_revision = self.store.connection(id)?.revision;
         let temporary = McpPool::default();

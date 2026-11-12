@@ -232,6 +232,7 @@ export function Editor({
                 <label className="field">
                   <span>工具与请求映射 · JSON</span>
                   <textarea
+                    aria-label="HTTP API 工具与请求映射"
                     rows={12}
                     value={httpApi}
                     onChange={(event) => setHttpApi(event.target.value)}

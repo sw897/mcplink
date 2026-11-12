@@ -11,6 +11,7 @@ import time
 import tomllib
 
 from run import BINARY, Harness, ROOT
+from http_api import ApiServer, tool as http_tool
 
 
 def main():
@@ -19,16 +20,19 @@ def main():
     parser.add_argument("--session", required=True)
     parser.add_argument("--profile")
     parser.add_argument("--chrome", required=True)
+    parser.add_argument("--browser-driver", default="agent-browser")
     args = parser.parse_args()
     record = args.record.resolve()
     record.mkdir(parents=True)
     harness = Harness(record)
+    api = ApiServer()
     secret = secrets.token_urlsafe(24)
     url = harness.url + "?tenant=sample&key=fixture"
     extra = harness.home / "second.toml"
     extra.write_text("# fixture source\n")
     result = {"conclusion":"FAIL"}
     checks = []
+    current_action = []
 
     class Handler(http.server.SimpleHTTPRequestHandler):
         def do_POST(self):
@@ -84,7 +88,8 @@ if (location.origin === ORIGIN) {
 """.replace("ORIGIN",json.dumps(origin)).replace("KEY",json.dumps(secret)).replace("SOURCE_PATH", json.dumps(str(extra))).replace("CLI_PARENT",json.dumps(str(record))).replace("CLI_MANIFEST",json.dumps(str(record/"desktop-tools/desktop-tools.mcplink.json"))))
 
     def browser(*command):
-        return subprocess.check_output(["agent-browser","--session",args.session,*command],
+        current_action[:] = [command[0]]
+        return subprocess.check_output([args.browser_driver,"--session",args.session,*command],
                                        text=True,timeout=55).strip()
 
     def audit(name):
@@ -537,7 +542,9 @@ if (location.origin === ORIGIN) {
         browser("press", "Escape")
         button("接给 Agent")
         wait_for("document.querySelectorAll('dialog .mode-choices input').length === 1 && document.querySelector('dialog .mode-choices')?.innerText.includes('统一入口')")
-        browser("find", "label", "Hermes · 用户配置", "check")
+        hermes_target = 'dialog[open] .target input[type=checkbox][value="hermes:user"]'
+        wait_for("!!document.querySelector(" + json.dumps(hermes_target) + ") && !document.querySelector(" + json.dumps(hermes_target) + ").disabled")
+        browser("check", hermes_target)
         wait_for("document.querySelectorAll('dialog[open] .target input:checked').length === 1 && document.querySelector('dialog[open] .target input:checked')?.closest('label').innerText.includes('Hermes · 用户配置')")
         button("预览变更")
         browser("wait", "--text", "核对配置变更")
@@ -627,10 +634,109 @@ if (location.origin === ORIGIN) {
         wait_for("document.querySelectorAll('.account-card').length === 2 && !document.querySelector('dialog[open]')")
         card_action_layout("multiple-entries")
         checks.append("closing an aggregate editor during an in-flight save refreshes the entry without reopening a dialog")
+
+        # HTTP definition inspection must remain separate from real API calls.
+        browser("click", "nav button:first-child")
+        button("添加 MCP")
+        browser("find", "label", "显示名称", "fill", "HTTP API 桌面验收")
+        browser("find", "label", "接入名称", "fill", "desktop_http_api")
+        browser("select", "dialog[open] select", "http-api")
+        browser("find", "label", "HTTP API 基础 URL", "fill", api.endpoint)
+        definition = {"tools": [http_tool()]}
+        browser("fill", 'dialog textarea[aria-label="HTTP API 工具与请求映射"]', json.dumps(definition))
+        browser("find", "label", "Authorization 值", "fill", "Bearer fixture-http-api")
+        button("保存连接")
+        wait_for("!document.querySelector('dialog[open]')")
+        button("HTTP API 桌面验收 详情")
+        button("查看工具")
+        wait_for("[...document.querySelectorAll('dialog details summary code')].some(n=>n.textContent==='echo')")
+        wait_for("document.querySelector('.toast')?.innerText.includes('尚未核验') || document.body.innerText.includes('本地工具定义有效')")
+        assert not api.requests
+        button("运行探测")
+        wait_for("document.querySelector('dialog')?.innerText.includes('未配置探测操作')")
+        assert not api.requests
+        button("取消")
+        checks.append("HTTP API editor saves a definition, and unverified local tools remain visible without a network call or invented probe")
+
+        button("HTTP API 桌面验收 详情")
+        button("编辑")
+        wait_for("!!document.querySelector('dialog textarea[aria-label=\"HTTP API 工具与请求映射\"]') && !document.querySelector('dialog button.primary').disabled")
+        payload = {"id":"desktop-probe","count":1,"enabled":False,"items":[1]}
+        definition["probe"] = {"tool":"echo","arguments":payload}
+        browser("fill", 'dialog textarea[aria-label="HTTP API 工具与请求映射"]', json.dumps(definition))
+        button("保存连接")
+        wait_for("!document.querySelector('dialog[open]')")
+        button("HTTP API 桌面验收 详情")
+        button("运行探测")
+        wait_for("document.querySelector('dialog')?.innerText.includes('POST /echo/{id}')")
+        assert "fixture-http-api" not in browser("get", "text", "dialog")
+        assert not api.requests
+        button("取消")
+        assert not api.requests
+        checks.append("probe confirmation identifies the saved HTTP operation, hides managed credentials, and cancelling sends no request")
+
+        api_id = next(c["id"] for c in harness.rpc("snapshot")["connections"] if c["name"] == "desktop_http_api")
+        button("HTTP API 桌面验收 详情")
+        button("运行探测")
+        wait_for("document.querySelector('dialog')?.innerText.includes('POST /echo/{id}')")
+        harness.rpc("credentials.update", {"id":api_id,"value":"Bearer fixture-http-api"})
+        button("确认并运行一次")
+        wait_for("document.querySelector('dialog [role=alert]')?.innerText.includes('变化')")
+        assert not api.requests
+        button("关闭")
+        checks.append("a changed connection rejects the pending desktop probe before any HTTP dispatch")
+
+        button("HTTP API 桌面验收 详情")
+        button("运行探测")
+        wait_for("document.querySelector('dialog')?.innerText.includes('POST /echo/{id}')")
+        browser("eval", "(()=>{const b=document.querySelector('dialog button.primary');b.click();b.click()})()")
+        wait_for("document.querySelector('dialog')?.innerText.includes('真实探测调用已通过')")
+        assert len(api.requests) == 1
+        audit("http-probe")
+        button("关闭")
+        checks.append("one explicit desktop confirmation performs exactly one authenticated HTTP probe and updates the verified state")
+
+        detail = harness.rpc("connections.detail", {"id":api_id})
+        definition["tools"][0]["path"] = "/slow/{id}"
+        detail["definition"]["httpApi"] = definition
+        harness.rpc("connections.save", {"id":api_id,"name":"desktop_http_api","title":"HTTP API 桌面验收","definition":detail["definition"]})
+        button("刷新本机配置")
+        button("HTTP API 桌面验收 详情")
+        button("运行探测")
+        wait_for("document.querySelector('dialog')?.innerText.includes('POST /slow/{id}')")
+        button("确认并运行一次")
+        browser("press", "Escape")
+        wait_for("!document.querySelector('dialog[open]') && document.body.innerText.includes('HTTP API 桌面验收')")
+        deadline = time.monotonic() + 8
+        while harness.rpc("connections.detail", {"id":api_id})["connection"]["status"] != "ready":
+            assert time.monotonic() < deadline
+            time.sleep(.05)
+        assert len(api.requests) == 2
+        wait_for("!document.querySelector('dialog[open]')")
+        checks.append("closing an in-flight probe keeps the dialog closed after completion and does not replay the operation")
+
+        harness.rpc("credentials.update", {"id":api_id,"value":"Bearer synthetic-invalid-api"})
+        button("刷新本机配置")
+        button("HTTP API 桌面验收 详情")
+        button("运行探测")
+        wait_for("document.querySelector('dialog')?.innerText.includes('POST /slow/{id}')")
+        button("确认并运行一次")
+        wait_for("document.querySelector('dialog')?.innerText.includes('HTTP 401')")
+        assert len(api.requests) == 3
+        wait_for("document.querySelector('dialog button.primary').disabled")
+        button("关闭")
+        button("HTTP API 桌面验收 详情")
+        button("查看工具")
+        wait_for("[...document.querySelectorAll('dialog details summary code')].some(n=>n.textContent==='echo')")
+        wait_for("document.querySelector('.toast.error')?.innerText.includes('上次上游调用未通过')")
+        assert len(api.requests) == 3
+        checks.append("a failed real probe remains failed, cannot replay from its confirmation, and local inspection still shows tools plus the last upstream failure")
         result["conclusion"]="PASS"
     finally:
         try:
             if result["conclusion"] != "PASS":
+                # Public logs contain only allowlisted, synthetic state; raw diagnostics stay private.
+                print("RENDERER_FAILURE " + json.dumps({"action":current_action,"completedChecks":len(checks),"lastPassed":checks[-1] if checks else None}), flush=True)
                 try:
                     (record/"failure-snapshot.txt").write_text(browser("snapshot"))
                     browser("screenshot", str(record/"failure.png"))
@@ -640,6 +746,7 @@ if (location.origin === ORIGIN) {
         finally:
             server.shutdown()
             server.server_close()
+            api.close()
             harness.close(False)
             shim.unlink(missing_ok=True)
             (record/"report.json").write_text(json.dumps({**result,"checks":checks},indent=2)+"\n")

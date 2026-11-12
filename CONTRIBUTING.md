@@ -43,7 +43,7 @@ python3 scripts/third-party-notices.py
 
 不要附上真实凭据、原生配置、数据库或文档正文。请用合成的最小样例描述配置问题，安全问题按 [SECURITY.md](SECURITY.md) 处理。
 
-配置完整性和桌面流程可用 `tests/e2e/config_integrity.py` 和 `tests/e2e/desktop_ui.py` 验收，运行参数见各脚本的 `--help`。桌面脚本需要已构建的前端、CLI、Chrome 与 agent-browser 0.41.2（测试工具，Apache-2.0），使用合成配置和浏览器内的 Tauri 调用适配器。完整入口见[端到端验证](tests/e2e/README.md)。CI 另检查 npm、RustSec 公告和当前公开分支历史中的凭据。
+配置完整性和桌面流程可用 `tests/e2e/config_integrity.py` 和 `tests/e2e/desktop_ui.py` 验收，运行参数见各脚本的 `--help`。桌面脚本需要已构建的前端、CLI、Chrome 与 agent-browser 0.41.2（测试工具，Apache-2.0，驱动要求 Node.js 24+），使用合成配置和浏览器内的 Tauri 调用适配器。Windows 原生安装窗口另由 `windows_desktop.py` 通过 UI Automation 验收。项目构建仍使用固定的 Node 22。完整入口与原生客户端验证边界见[端到端验证](tests/e2e/README.md)。CI 另检查 npm、RustSec 公告和当前公开分支历史中的凭据。
 
 ## 文档与公开资料
 

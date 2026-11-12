@@ -366,6 +366,7 @@ export function ConnectDialog({
               <label className="target" key={source.id}>
                 <input
                   type="checkbox"
+                  value={source.id}
                   checked={targets.includes(source.id)}
                   disabled={!isAvailable(source)}
                   onChange={(event) =>

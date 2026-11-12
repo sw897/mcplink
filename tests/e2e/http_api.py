@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import threading
+import time
 import traceback
 import urllib.parse
 
@@ -24,9 +25,8 @@ def tool(name="echo", path="/echo/{id}", response=None):
             "response": response or {"type": "json"}}
 
 
-class HttpApi(AgentCli):
-    def __init__(self, record):
-        super().__init__(record)
+class ApiServer:
+    def __init__(self):
         self.requests = []
         harness = self
 
@@ -44,6 +44,8 @@ class HttpApi(AgentCli):
                 raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
                 path = urllib.parse.urlsplit(self.path)
                 harness.requests.append({"path": path.path, "query": urllib.parse.parse_qs(path.query), "body": json.loads(raw) if raw else None, "authorization": self.headers.get("Authorization")})
+                if path.path.startswith("/slow/"):
+                    time.sleep(1)
                 status, mime, body = 200, "application/json", json.dumps(harness.requests[-1]).encode()
                 if self.headers.get("Authorization") != "Bearer fixture-http-api":
                     status, body = 401, b'{"secret":"upstream-private-body"}'
@@ -74,6 +76,18 @@ class HttpApi(AgentCli):
         threading.Thread(target=self.http.serve_forever, daemon=True).start()
         self.endpoint = f"http://127.0.0.1:{self.http.server_port}"
 
+    def close(self):
+        self.http.shutdown()
+        self.http.server_close()
+
+
+class HttpApi(AgentCli):
+    def __init__(self, record):
+        super().__init__(record)
+        self.api = ApiServer()
+        self.requests = self.api.requests
+        self.endpoint = self.api.endpoint
+
     def save_api(self, name, tools, **options):
         return self.cli("connections", "save", "--stdin", value={"name": name, "definition": {
             "url": self.endpoint, "headers": {"Authorization": "Bearer fixture-http-api"},
@@ -93,10 +107,27 @@ class HttpApi(AgentCli):
         listed = self.cli("connections", "tools", connection)
         assert len(listed["tools"]) == 2 and len(self.requests) == before
         assert listed["verification"]["upstream"] == "not_checked"
+        assert listed["verification"]["probe"] is None
         self.cli("connections", "probe", connection, exit_status=1)
         self.cli("credentials", "login", connection, exit_status=1)
         assert len(self.requests) == before
         self.passed("HTTP tool discovery is local and never claims network/authentication verification")
+
+        probed = self.save_api("confirmed_probe", [tools[0]], probe={"tool": "echo", "arguments": payload})["id"]
+        before = len(self.requests)
+        preview = self.rpc("connections.tools", {"id": probed})
+        assert len(self.requests) == before
+        assert preview["verification"]["probe"] == {"tool": "echo", "method": "POST", "path": "/echo/{id}"}
+        assert "fixture-http-api" not in json.dumps(preview)
+        revision = preview["connection"]["revision"]
+        self.cli("credentials", "update", probed, "--stdin", value={"value": "Bearer fixture-http-api"})
+        error = self.rpc("connections.probe", {"id": probed, "expectedRevision": revision}, error=True)
+        assert "变化" in error and len(self.requests) == before
+        preview = self.rpc("connections.tools", {"id": probed})
+        verified = self.rpc("connections.probe", {"id": probed, "expectedRevision": preview["connection"]["revision"]})
+        assert len(self.requests) == before + 1
+        assert verified["verification"]["upstream"] == "probe_call" and verified["connection"]["status"] == "ready"
+        self.passed("probe preparation exposes only the operation identity and stale confirmation fails before HTTP dispatch")
 
         result = self.cli("call", connection, "echo", "--stdin", value=payload)
         actual = json.loads(result["output"]["content"][0]["text"])
@@ -169,8 +200,7 @@ class HttpApi(AgentCli):
         self.passed("base64 mapping, masked edit, credential recovery and shared pause use the existing lifecycle")
 
     def close_http(self):
-        self.http.shutdown()
-        self.http.server_close()
+        self.api.close()
 
 
 def main():

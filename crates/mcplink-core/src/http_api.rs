@@ -568,8 +568,17 @@ pub(crate) async fn request(
     outcome
 }
 
-pub(crate) async fn probe(engine: Arc<Engine>, id: &str, execute_probe: bool) -> Result<Value> {
+pub(crate) async fn probe(
+    engine: Arc<Engine>,
+    id: &str,
+    execute_probe: bool,
+    expected_revision: Option<u64>,
+) -> Result<Value> {
     let original = engine.store.connection(id)?;
+    ensure!(
+        expected_revision.is_none_or(|revision| revision == original.revision),
+        "连接已变化，请重新查看探测操作后确认"
+    );
     let definition = engine.definition(&original)?;
     let api = definition.http_api.as_ref().context("缺少 HTTP API 配置")?;
     let listed = engine
@@ -586,9 +595,15 @@ pub(crate) async fn probe(engine: Arc<Engine>, id: &str, execute_probe: bool) ->
         "not_checked"
     };
     if execute_probe && let Some(probe) = &api.probe {
-        engine.pool.request(engine.clone(), id, json!({"method":"tools/call","params":{"name":probe.tool,"arguments":probe.arguments}})).await?;
+        engine.pool.request_at_revision(engine.clone(), id, json!({"method":"tools/call","params":{"name":probe.tool,"arguments":probe.arguments}}), Some(original.revision)).await?;
         verification = "probe_call";
     }
+    let probe = api.probe.as_ref().and_then(|probe| {
+        api.tools
+            .iter()
+            .find(|tool| tool.name == probe.tool)
+            .map(|tool| json!({"tool":tool.name,"method":tool.method,"path":tool.path}))
+    });
     let connection = engine.store.connection(id)?;
     ensure!(
         connection.revision == original.revision,
@@ -596,6 +611,6 @@ pub(crate) async fn probe(engine: Arc<Engine>, id: &str, execute_probe: bool) ->
     );
     Ok(
         json!({"connection":connection.public_value(),"tools":listed["tools"],
-        "verification":{"configuration":"valid","upstream":verification},"schemaHash":digest(&serde_json::to_vec(&listed["tools"])?) }),
+        "verification":{"configuration":"valid","upstream":verification,"probe":probe},"schemaHash":digest(&serde_json::to_vec(&listed["tools"])?) }),
     )
 }

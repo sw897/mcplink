@@ -152,6 +152,16 @@ export type Plan = {
   connection: Connection;
 };
 export type Tool = { name: string; description?: string; inputSchema?: Json };
+export type ToolInventory = {
+  connection: Connection;
+  tools: Tool[];
+  error?: unknown;
+  verification?: {
+    configuration: "valid";
+    upstream: "not_checked" | "previous_call" | "probe_call";
+    probe?: { tool: string; method: string; path: string } | null;
+  };
+};
 export type Definition = {
   command?: string;
   args: string[];
@@ -189,6 +199,7 @@ export type Dialog =
   | { kind: "editor"; connection?: Connection }
   | { kind: "gateway"; connection?: Connection }
   | { kind: "cli"; connection: Connection }
+  | { kind: "httpProbe"; connection: Connection }
   | {
       kind: "connect";
       connections: Connection[];

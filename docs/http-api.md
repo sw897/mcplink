@@ -93,6 +93,12 @@ This adapter does not perform MCP OAuth discovery against ordinary APIs. It does
 
 Tool discovery is local. A fresh connection remains `configured` until a real operation succeeds. `connections tools` reports `verification.upstream: not_checked`; it can still list valid tools. A successful actual operation marks the member `ready`, and later checks report `previous_call`. An optional `httpApi.probe` is an explicit operation name and argument object. Only `connections probe` executes that sample; it may have the operation's cost or side effects. Without a configured probe or a prior successful call, probe returns a non-ready result. Discovery is never evidence that a key, network route, or business permission has been verified.
 
+In the desktop, **查看工具 / View tools** reads the saved definition without sending an HTTP request. Unverified tools remain visible. **运行探测 / Run probe** opens a separate confirmation showing the saved tool, HTTP method and path, without exposing managed credentials or argument values. Opening or cancelling it makes no API call. If no probe is configured, the dialog offers editing or an explicit call through Tool CLI.
+
+Confirming performs one actual request against the previewed connection revision. A changed definition or credential rejects that confirmation before dispatch; reopen it to inspect the current operation. Each confirmation is single-use, including after a failure. Closing a running probe does not cancel or roll back an upstream request and does not reopen the dialog when it finishes. Check the service-side outcome before deliberately trying again. A failed actual call stays a failure even though the local tools remain inspectable.
+
+Management callers can inspect `connections.tools`'s `verification.probe` (`null`, or `{tool, method, path}`) and pass its connection's `revision` as `expectedRevision` to `connections.probe` through RPC. This protects an explicit confirmation from configuration changes; it is not a replacement for authorization to execute the operation. The CLI's explicit `connections probe` command retains its existing behavior.
+
 ## Limits and validation
 
 - HTTPS is required, except for loopback HTTP. Requests stay on the configured origin, do not follow redirects, and are not automatically retried.

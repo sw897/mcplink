@@ -40,6 +40,7 @@ import {
   Snapshot,
   DesktopStatus,
   Tool,
+  ToolInventory,
   Dialog,
   agentLabel,
   time,
@@ -50,6 +51,7 @@ import { SourceDialog } from "./SourceDialog";
 import { ConnectDialog, ChangeDiff } from "./ConnectDialog";
 import { GatewayDialog } from "./GatewayDialog";
 import { CliDialog } from "./CliDialog";
+import { HttpProbeDialog } from "./HttpProbeDialog";
 import { importInstructions } from "./ImportConfigCard";
 import { Editor, CredentialDialog } from "./ConnectionEditor";
 import "./style.css";
@@ -109,7 +111,10 @@ function App() {
       setData(next);
       const validKeys = new Set(
         next.connections
-          .filter((c) => c.active && c.status === "ready")
+          .filter(
+            (c) =>
+              c.active && (c.status === "ready" || c.transport === "http-api"),
+          )
           .map(toolKey),
       );
       setTools((previous) =>
@@ -225,11 +230,11 @@ function App() {
       setDialog({ kind: "adopt", intent: "probe", connections: [connection] });
       return;
     }
-    const result = await action<{
-      tools: Tool[];
-      connection: Connection;
-      error?: unknown;
-    }>("检查连接", "connections.probe", { id: connection.id });
+    const result = await action<ToolInventory>(
+      "查看工具",
+      "connections.tools",
+      { id: connection.id },
+    );
     if (result) {
       setTools((previous) => ({
         ...previous,
@@ -237,20 +242,27 @@ function App() {
       }));
       setNotice({
         text:
-          result.connection.status === "ready"
-            ? result.connection.lastError ||
-              `已连接，发现 ${result.tools.length} 个工具`
-            : result.connection.lastError || "上游返回错误，请查看连接详情",
+          result.verification?.upstream === "not_checked"
+            ? result.connection.lastError
+              ? `本地工具定义有效；上次上游调用未通过：${result.connection.lastError}`
+              : "本地工具定义有效，尚未核验上游访问；查看工具不会执行 HTTP API。"
+            : result.verification?.upstream === "previous_call"
+              ? "已读取本地工具定义；上游状态来自最近一次实际调用。"
+              : result.connection.status === "ready"
+                ? result.connection.lastError ||
+                  `已连接，发现 ${result.tools.length} 个工具`
+                : result.connection.lastError || "上游返回错误，请查看连接详情",
         error:
-          result.connection.status !== "ready" || !!result.connection.lastError,
+          result.verification?.upstream === "not_checked"
+            ? !!result.connection.lastError
+            : result.connection.status !== "ready" ||
+              !!result.connection.lastError,
       });
       setDialog({ kind: "detail", connection: result.connection });
     }
   };
   const visibleTools =
-    dialog?.kind === "detail" &&
-    dialog.connection.active &&
-    dialog.connection.status === "ready"
+    dialog?.kind === "detail" && dialog.connection.active
       ? tools[toolKey(dialog.connection)]
       : undefined;
   const ownBindings = (connection: Connection) =>
@@ -481,6 +493,7 @@ function App() {
           ).map((item) => (
             <button
               key={item.id}
+              aria-label={item.label}
               className={page === item.id ? "active" : ""}
               onClick={() => {
                 setPage(item.id);
@@ -1064,7 +1077,9 @@ function App() {
                           disabled={!!busy}
                           onClick={() => void probe(connection)}
                         >
-                          检查连接
+                          {connection.transport === "http-api"
+                            ? "查看工具"
+                            : "检查连接"}
                         </button>
                         <button
                           className="button small"
@@ -1757,8 +1772,25 @@ function App() {
                 onClick={() => void probe(dialog.connection)}
               >
                 <RefreshCw size={15} />
-                检查工具
+                {dialog.connection.transport === "http-api"
+                  ? "查看工具"
+                  : "检查工具"}
               </button>
+              {dialog.connection.transport === "http-api" &&
+                !dialog.connection.detected && (
+                  <button
+                    className="button"
+                    disabled={!!busy || !dialog.connection.active}
+                    onClick={() =>
+                      setDialog({
+                        kind: "httpProbe",
+                        connection: dialog.connection,
+                      })
+                    }
+                  >
+                    运行探测
+                  </button>
+                )}
               {!dialog.connection.detected && (
                 <button
                   className="button"
@@ -1932,7 +1964,10 @@ function App() {
               </div>
             ))}
             <h3 className="section-label">
-              实际工具 {visibleTools ? `· ${visibleTools.length}` : ""}
+              {dialog.connection.transport === "http-api"
+                ? "本地工具定义"
+                : "实际工具"}{" "}
+              {visibleTools ? `· ${visibleTools.length}` : ""}
             </h3>
             {visibleTools?.map((tool) => (
               <details className="tool" key={tool.name}>
@@ -1947,7 +1982,9 @@ function App() {
             {!visibleTools && (
               <p className="muted">
                 {dialog.connection.active
-                  ? "点击“检查工具”读取当前服务暴露的工具与参数。"
+                  ? dialog.connection.transport === "http-api"
+                    ? "点击“查看工具”读取本地定义。上游访问需实际调用或明确运行探测。"
+                    : "点击“检查工具”读取当前服务暴露的工具与参数。"
                   : "重新连接并检查后，可查看当前账号的工具。"}
               </p>
             )}
@@ -1971,6 +2008,25 @@ function App() {
               )}
           </div>
         </Modal>
+      )}
+      {dialog?.kind === "httpProbe" && (
+        <HttpProbeDialog
+          connection={dialog.connection}
+          onClose={() => setDialog(undefined)}
+          onEdit={() =>
+            setDialog({ kind: "editor", connection: dialog.connection })
+          }
+          onCall={() =>
+            setDialog({ kind: "cli", connection: dialog.connection })
+          }
+          onResult={async (result) => {
+            await load();
+            setTools((previous) => ({
+              ...previous,
+              [toolKey(result.connection)]: result.tools || [],
+            }));
+          }}
+        />
       )}
       {dialog?.kind === "adopt" && (
         <Modal title="纳入托管" onClose={() => setDialog(undefined)}>

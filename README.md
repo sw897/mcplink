@@ -66,8 +66,8 @@ For development and packaging commands, see [Build from source](#build-from-sour
    Install mcplink and open it, or use the management CLI.
 2. 导入已有服务，添加本地 STDIO 命令、远程 MCP 地址，或注册 HTTP API 定义。<br>
    Import an existing service, add a local STDIO command or remote MCP URL, or register an HTTP API definition.
-3. 提供所需认证并查看工具。HTTP API 使用托管请求头，通过实际调用或显式 probe 验证访问。<br>
-   Supply any required authentication and inspect the tools. For HTTP APIs, use managed headers and an actual call or explicit probe to verify access.
+3. 提供所需认证并查看工具。HTTP API 的“查看工具”只读本地定义；“运行探测”单独确认后才发出真实请求，也可通过工具 CLI 明确调用。<br>
+   Supply any required authentication and inspect the tools. For HTTP APIs, “View tools” reads the local definition; “Run probe” sends a real request only after separate confirmation. Tool CLI also supports an explicit call.
 4. 创建统一入口，选择服务和工具范围，再接给目标 Agent。核对并应用配置预览。<br>
    Create a unified entry, select services and tool ranges, then connect it to the target agent. Review and apply the proposed configuration changes.
 5. 重新加载 Agent 的 MCP 配置，实际调用一次工具确认可用。<br>

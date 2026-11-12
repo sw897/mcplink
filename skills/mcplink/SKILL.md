@@ -25,6 +25,14 @@ description: 通过 mcplink CLI 管理单服务与聚合入口、托管认证和
 - `connections list` 包含 `detected:true` 的未托管条目。此类条目先按 `sourceId` 和 `name` 导入，再使用返回的托管 ID。
 - Claude Code 自动盘点用户 `.claude.json` 与已启用用户插件默认 `.mcp.json`。用户来源可通过配置事务写入；插件来源带 `readOnly:true`，可以导入、检查和复用连接，原文件由插件维护。以每个来源返回的权限为准，不直接改写插件缓存。
 
+## HTTP API 工具与核验
+
+若定义含 `httpApi`，它是普通 HTTP API Adapter，不是 HTTP MCP 上游。用 `connections save --stdin` 保存基础 URL、工具参数 Schema、请求/结果映射及托管 headers；不要把凭据放入工具模板或默认值，也不对普通 API 运行 MCP OAuth 发现。
+
+`connections tools ID` 只读取本地工具定义，不执行 HTTP API。`verification.upstream: not_checked` 表示配置有效但上游尚未核验，不是网络错误；`previous_call` 表示最近一次实际调用通过。`verification.probe` 只描述已保存探测的工具、方法和路径，不含托管凭据或参数值。
+
+`connections probe ID` 可能按已保存的 probe 参数执行一次真实业务请求，产生费用或变更。先核对探测操作及本次任务授权，再明确执行；未配置 probe 时不能自行选择工具代替探测。管理连接、保存配置或更新凭据的授权不自动涵盖业务调用。需要显式工具调用时按 `call ID TOOL --stdin` 的同一授权边界处理。桌面“查看工具”和取消探测不执行请求，“运行探测”需要单独确认。超时或结果不明时先核对，不自动重试。
+
 ## 盘点和接入
 
 先盘点连接与来源，按具体目标支持的操作完成接入。原生来源通过配置事务维护；需要客户端确认的目标使用当前 Schema 中的 `connections export-config` 生成内容。共享前先检查连接成功；明确需要直连时传 `--mode direct`，此时内容可能含完整凭据，只交给目标客户端，不打印到聊天或报告。配置写入、复制及生成成功都不代表客户端已加载或调用通过。
@@ -34,7 +42,6 @@ mcplink sources list
 mcplink connections list
 mcplink connections import --source codex:user --name local_notes
 mcplink connections show CONNECTION_ID
-mcplink connections probe CONNECTION_ID
 mcplink connections tools CONNECTION_ID
 ```
 
@@ -69,7 +76,7 @@ mcplink changes restore OPERATION_ID
 
 `credentials update CONNECTION_ID --stdin` 接受 `{"value":"上游要求的原样凭据","header":"Authorization"}`，默认 header 为 Authorization，不自动加 Bearer。凭据由可信本机来源经 stdin 传入；不要放在命令参数、Shell 历史、聊天回复、临时文件或报告里。`connections save` 中的 headers/env 同样走 stdin。管理输出保留掩码，不尝试读回秘密。
 
-同一本机数据目录内，同一服务、账号和授权范围的托管连接，认证一次供单服务入口、多个聚合入口与 CLI 复用。更新一次凭据共同生效；直连绑定需另行通过预览／应用同步，不承诺共用托管 OAuth 登录态。更新后重新 `probe`。`credentials disconnect CONNECTION_ID` 停止该连接的托管调用；它不会清除原生客户端已保存的直连凭据。不同服务、账号、数据目录或设备分别维护授权，撤销或无法续期时重新认证。
+同一本机数据目录内，同一服务、账号和授权范围的托管连接，认证一次供单服务入口、多个聚合入口与 CLI 复用。更新一次凭据共同生效；直连绑定需另行通过预览／应用同步，不承诺共用托管 OAuth 登录态。更新后先查看工具与核验状态；普通 MCP 可重新 `probe`，HTTP API 按下述调用边界核验。`credentials disconnect CONNECTION_ID` 停止该连接的托管调用；它不会清除原生客户端已保存的直连凭据。不同服务、账号、数据目录或设备分别维护授权，撤销或无法续期时重新认证。
 
 OAuth 用 `credentials login CONNECTION_ID` 返回 URL，CLI 不打开浏览器；若上游要求用户交互，交给用户完成，随后检查连接。系统凭据库首次访问也可能需要用户在系统安全窗口授权，不能承诺绕过。
 
