@@ -1,6 +1,6 @@
 # 路线图
 
-路线图围绕两项核心能力：多 MCP Server 统一接入、MCP 转 CLI。目标与验收标准见[产品定位](docs/product.md)，现有功能见 [README](README.zh-CN.md)，当前边界见[兼容说明](docs/compatibility.md)。
+路线图围绕两项核心能力：多 MCP Server 统一接入、MCP 转 CLI。目标与验收标准见[产品定位](docs/product.md)，现有功能见[中英文 README](README.md)，当前边界见[兼容说明](docs/compatibility.md)。
 
 ## 统一入口
 

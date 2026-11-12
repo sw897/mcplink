@@ -28,4 +28,4 @@ Only installers, standalone CLI archives, checksums and public build provenance 
 
 桌面、独立 CLI 和后台应一起升级，当前数据语义为 5、management API 为 21；旧程序拒绝打开新数据目录。升级后重载客户端 MCP 并实际调用。macOS Apple Silicon 预览包采用 ad-hoc 签名、未公证，Windows x64 预览包未签名；实际状态、源码修订与校验值以公开构建清单为准。
 
-公开附件只包含安装包、CLI、校验值和构建来源信息，不包含私有配置、凭据或原始验收材料。使用说明见 [README](https://github.com/sw897/mcplink/blob/v0.3.0/README.zh-CN.md)。
+公开附件只包含安装包、CLI、校验值和构建来源信息，不包含私有配置、凭据或原始验收材料。使用说明见[中英文 README](https://github.com/sw897/mcplink/blob/main/README.md)。
