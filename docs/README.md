@@ -12,6 +12,9 @@
 - [后台运行](macos-background.md)：macOS 菜单栏、登录启动和退出；另见 [Windows 托盘与后台](windows-background.md)。
 - [端到端验证](../tests/e2e/README.md)：合成场景、可选原生客户端与跨平台测试入口。
 - [发布指南](release.md)：构建、签名与发布流程。
+- [代码签名政策 / Code signing policy](../CODE_SIGNING.md)：发布角色、构建来源与签名审批边界。
+- [隐私说明 / Privacy policy](../PRIVACY.md)：本机数据、网络请求与第三方服务。
+- [卸载与数据保留 / Uninstall and data retention](uninstall.md)：停止后台、移除程序与清理范围。
 - [依赖与许可](DEPENDENCIES.md)。
 - [路线图](../ROADMAP.md)：发布重点与后续方向。
 - [贡献指南](../CONTRIBUTING.md)：开发环境与可复现验证。

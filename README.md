@@ -54,6 +54,10 @@ macOS 预览包采用 ad-hoc 签名、未公证，Windows 包未签名。Intel M
 
 The macOS preview uses ad-hoc signing and is not notarized; Windows packages are unsigned. Intel Mac and Linux do not have validated installer packages. See the [release notes](docs/release-notes.md) and [release guide](docs/release.md) for compatibility, signing, and checksum details. Successful [CI builds](https://github.com/sw897/mcplink/actions/workflows/ci.yml) also provide `packages-*` artifacts.
 
+[代码签名政策 / Code signing policy](CODE_SIGNING.md) · [隐私说明 / Privacy policy](PRIVACY.md) · [卸载与数据保留 / Uninstall and data retention](docs/uninstall.md)。SignPath 开源 Windows 签名正在申请准备中，获批及完成验证前保持上述预览包状态。
+
+The SignPath open-source Windows signing application is being prepared. The preview signing status above remains in effect until approval and verification are complete.
+
 开发与打包命令见[从源码构建 / Build from source](#build-from-source)。
 
 For development and packaging commands, see [Build from source](#build-from-source).

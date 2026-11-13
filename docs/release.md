@@ -51,6 +51,16 @@ Windows x64 使用 `npm run release:windows` 生成未签名预览候选；`npm 
 
 Windows 候选包含 NSIS 安装包、含许可文件的规范化 CLI ZIP、源码及产物哈希、签名和验收摘要。正式签名不保证 SmartScreen 对新发布者或新文件已建立信誉。
 
+### SignPath 开源签名
+
+项目正在准备 SignPath Foundation 申请，政策与审批角色见 [Code signing policy](../CODE_SIGNING.md)。当前 Windows Release 仍未签名；已有 `release-windows.yml` 是本机证书／PFX 路径，不是已接通的 SignPath 工作流。
+
+SignPath 接入须使用其[可信 GitHub 构建流程](https://docs.signpath.io/trusted-build-systems/github)：在 GitHub 托管 runner 构建，将明确选定的文件上传为工作流工件，再按 artifact ID 请求签名。提交身份只允许申请，正式签名由维护者批准；服务凭据使用 CI Secret，项目及策略标识使用配置变量。不得向签名服务上传验收 home、用户配置、凭据库、截图或原始日志。
+
+签名顺序须覆盖独立 CLI、安装包中的 sidecar 和桌面程序，以及 NSIS 安装／卸载程序；最终安装后的文件仍需核验。Tauri 打包会更新桌面 PE 的 bundle-type 标记，不能在签名后修改该内容。产品名和版本资源、允许的文件范围、来源提交和签名返回结果都须校验。当前 CLI 预览包尚缺 Windows 版本资源，必须在正式接入中补齐；NSIS 卸载程序的签名路径也须实际验证，不能只签最终 setup.exe 就宣称完整覆盖。
+
+此接入尚未启用。获批并完成构建、签名、安装验收后，才更新 Release 的签名状态和最终 SHA-256；未获得真实服务结果的检查不算签名成功。
+
 ## GitHub Actions
 
 `ci.yml` 为 macOS Apple Silicon 和 Windows x64 分别运行检查、构建和合成 CLI 场景。macOS 另验收 DMG，Windows 另验收 NSIS 安装生命周期。打包前清理生成的 bundle 目录，避免 Cargo 缓存中的旧包混入当前工件。CI 按近期 main 成功运行的源码清单核对安装包版本、按哈希合并相同副本，并优先选不同版本作为升级基线，报告来源 run、提交、版本和哈希，再做旧版到当前构建的升级；若旧工件不可用，明确记录缺少跨版本基线，不将重装当作跨版本升级。Windows 结果须以实际 workflow 报告和桌面实机验收为准；配置工作流本身不表示通过。CI 不运行需要原生 Agent 登录的真实模型测试。`packages-*` 工件仅保留安装包、CLI、校验值与公开构建来源清单，不上传测试报告、失败截图、home、Vault、原始配置或原始日志。新升级基线读取该清单，同时兼容旧 `acceptance-*` 工件及其清单路径。
