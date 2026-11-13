@@ -64,7 +64,8 @@ Cargo 默认将程序放入 `~/.cargo/bin`，该目录需在 PATH 中。也可�
 | `connections adopt --source SOURCE_ID --name NAME` | 明确采用已绑定直连条目的外部修改。 |
 | `connections save --stdin` | 新建或完整替换托管定义，不写原生配置。 |
 | `connections export-config --agent AGENT --connection ID [--mode direct\|shared]` | 为需要客户端确认的目标生成配置，默认共享，`--connection` 可重复；不写客户端或建立绑定。直连输出包含完整凭据。 |
-| `connections probe ID` / `connections tools ID` | 连接上游、检查认证并返回工具 Schema；非 `ready` 退出 `1`。 |
+| `connections tools ID` | 返回工具 Schema。MCP 连接会连上游并检查认证，非 `ready` 退出 `1`；HTTP API 连接只读本地定义、不访问上游，配置有效时不因尚未核验而退出 `1`（`verification.upstream: not_checked` 不是网络错误）。 |
+| `connections probe ID` | 连接上游并检查认证；HTTP API 连接按已配置的探测发出一次真实请求，可能产生费用或副作用。非 `ready` 退出 `1`。 |
 | `connections delete ID [--keep-native]` | 默认只删除无绑定连接。使用 `--keep-native` 时，所有已登记的绑定都须为直连，且原生条目仍存在、内容与登记时一致。成功后移除托管连接及其凭据，保留原生文件。 |
 | `credentials update ID --stdin` / `credentials disconnect ID` | 更新原样 HTTP 凭据，或断开托管认证。 |
 | `credentials login ID` | 返回 OAuth URL 和过期时间，不打开浏览器。 |

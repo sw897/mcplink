@@ -1,6 +1,6 @@
 # 项目文档
 
-- [项目说明 / Project overview](../README.md)：中英文同页 / Chinese and English on one page.
+- [项目说明 / Project overview](../README.md)：中文为主，附英文概述 / Mainly Chinese, with an English summary.
 - [产品定位](product.md)：多 MCP Server 统一接入、MCP 转 CLI 的目标、当前进度与验收标准。
 - [当前构建说明](release-notes.md)：功能、安装及交付清单。
 - [MCP 转 CLI 与管理接口](agent-cli.md)：工具调用、命令生成、JSON 契约和管理流程。
