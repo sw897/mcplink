@@ -321,6 +321,33 @@ pub fn menu_event(app: &AppHandle, event: MenuEvent) {
         _ => {}
     }
 }
+
+#[cfg(target_os = "macos")]
+fn install_app_menu(
+    app: &AppHandle,
+    quit: &MenuItem<tauri::Wry>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let menu = Menu::default(app)?;
+    let native_quit_text = PredefinedMenuItem::quit(app, None)?.text()?;
+    for item in menu.items()? {
+        if let Some(submenu) = item.as_submenu() {
+            for (position, item) in submenu.items()?.into_iter().enumerate() {
+                if let Some(native) = item.as_predefined_menuitem()
+                    && native.text()? == native_quit_text
+                {
+                    // Native Quit bypasses ExitRequested on macOS.
+                    // Use the same cleanup action as the tray menu instead.
+                    submenu.remove(native)?;
+                    submenu.insert(quit, position)?;
+                    app.set_menu(menu)?;
+                    return Ok(());
+                }
+            }
+        }
+    }
+    Err("无法定位 macOS 应用退出菜单".into())
+}
+
 pub fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "macos")]
     app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -347,6 +374,8 @@ pub fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         true,
         Some("CmdOrCtrl+Q"),
     )?;
+    #[cfg(target_os = "macos")]
+    install_app_menu(app.handle(), &quit_item)?;
     let keep = MenuItem::with_id(
         app,
         "tray.quit_keep",
