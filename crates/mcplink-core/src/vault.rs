@@ -5,6 +5,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(any(windows, test))]
+mod windows;
+
 #[derive(Clone)]
 pub struct Vault {
     namespace: String,
@@ -162,6 +165,11 @@ impl Vault {
                 Err(_) => bail!("无法读取测试凭据库"),
             };
         }
+        #[cfg(windows)]
+        {
+            windows::get(self, key)
+        }
+        #[cfg(not(windows))]
         match self.entry(key)?.get_password() {
             Ok(value) => Ok(Some(value)),
             Err(keyring::Error::NoEntry) => Ok(None),
@@ -173,6 +181,11 @@ impl Vault {
         if let Some(root) = &self.fixture {
             return private_write(&root.join(digest(key.as_bytes())), value.as_bytes());
         }
+        #[cfg(windows)]
+        {
+            windows::set(self, key, value)
+        }
+        #[cfg(not(windows))]
         self.entry(key)?
             .set_password(value)
             .context("无法保存到系统凭据库")
@@ -186,6 +199,11 @@ impl Vault {
             }
             return Ok(());
         }
+        #[cfg(windows)]
+        {
+            windows::delete(self, key)
+        }
+        #[cfg(not(windows))]
         match self.entry(key)?.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(_) => bail!("无法清理系统凭据库中的连接"),
