@@ -42,7 +42,11 @@ flowchart LR
 | Windows x64 | 运行 NSIS 安装包；也可使用独立 CLI ZIP。 |
 | 独立 CLI | 使用对应平台的 CLI 归档；或在源码目录运行 `cargo install --path crates/mcplink-core --locked`，并把 Cargo 的可执行目录加入 PATH。 |
 
-将应用与 CLI 保留在固定路径。升级时同步更新桌面和独立 CLI，并重启后台。0.3.2 沿用数据语义版本 5，management API 升为 22；新的契约诊断要求新版后台。较早的程序仍会拒绝它不支持的数据目录。
+将应用与 CLI 保留在固定路径。桌面源码已提供「软件更新」：按需从 GitHub Releases 检查、下载签名更新包，确认后安装并重启后台，自动同步可识别的独立 CLI。其余 CLI 需手动更新。当前已发布 0.3.2 尚无该功能，首个带更新功能的版本须手动安装；操作与边界见[软件更新 / Software updates](docs/updates.md)。
+
+The desktop source includes on-demand GitHub Release updates with signed packages, explicit install confirmation and synchronization of recognized standalone CLIs. Install the first updater-enabled release manually; the existing published 0.3.2 does not include this feature.
+
+0.3.2 沿用数据语义版本 5，management API 升为 22；新的契约诊断要求新版后台。较早的程序仍会拒绝它不支持的数据目录。
 
 macOS 预览包为 **ad-hoc 签名、未公证**，Windows 包 **未签名**。本版本不宣称正式发布者签名或系统信任；实际状态和源码提交见平台构建清单，下载后按平台 SHA256SUMS 核对。Intel Mac 和 Linux 暂无已验收的安装包。兼容性、签名和校验详见[发布说明](docs/release-notes.md)与[发布指南](docs/release.md)。成功的 [CI 构建](https://github.com/sw897/mcplink/actions/workflows/ci.yml)也提供 `packages-*` 工件。
 

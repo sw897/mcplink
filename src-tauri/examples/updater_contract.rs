@@ -1,0 +1,118 @@
+#[cfg(all(debug_assertions, any(windows, target_os = "macos")))]
+#[tokio::main]
+async fn main() {
+    use mcplink_desktop::{UPDATE_PUBLIC_KEY, cli_sync, update_catalog::Catalog};
+    use serde_json::{Value, json};
+    use std::{fs, io::Read, path::PathBuf, time::Duration};
+    let result = async {
+        let mut input = String::new();
+        std::io::stdin()
+            .take(256 * 1024)
+            .read_to_string(&mut input)
+            .map_err(|_| "Invalid stdin")?;
+        let args: Value = serde_json::from_str(&input).map_err(|_| "Invalid JSON")?;
+        let get = |key: &str| args[key].as_str().ok_or_else(|| format!("Missing {key}"));
+        let current = get("version")?
+            .parse()
+            .map_err(|_| "Invalid current version")?;
+        if matches!(args["action"].as_str(), Some("sync" | "discover")) {
+            let home = PathBuf::from(get("home")?);
+            if !home.join(".mcplink-test-fixture").is_file() {
+                return Err("Missing fixture marker".into());
+            }
+            let sidecar = PathBuf::from(get("sidecar")?);
+            if !sidecar
+                .canonicalize()
+                .map_err(|_| "Missing sidecar")?
+                .starts_with(home.canonicalize().map_err(|_| "Missing home")?)
+            {
+                return Err("Sidecar outside fixture".into());
+            }
+            return if args["action"] == "discover" {
+                Ok(json!({"targets": cli_sync::discover(&home, &sidecar, &current).await}))
+            } else {
+                Ok(json!({"synced": cli_sync::apply_receipt(
+                    &home.join("desktop-updates/pending.json"), &home, &sidecar, &current
+                )?}))
+            };
+        }
+        let target = get("target")?.to_owned();
+        let catalog = if args["live"] == true {
+            Catalog::github(current, target, UPDATE_PUBLIC_KEY.trim().into())
+        } else {
+            let home = PathBuf::from(get("home")?);
+            let key = PathBuf::from(get("publicKey")?);
+            if !key
+                .canonicalize()
+                .map_err(|_| "Missing public key")?
+                .starts_with(home.canonicalize().map_err(|_| "Missing home")?)
+            {
+                return Err("Public key outside fixture".into());
+            }
+            Catalog::fixture(
+                current,
+                target,
+                fs::read_to_string(key)
+                    .map_err(|_| "Missing public key")?
+                    .trim()
+                    .into(),
+                &home,
+                get("api")?.parse().map_err(|_| "Invalid API")?,
+                get("downloads")?.parse().map_err(|_| "Invalid downloads")?,
+            )?
+        };
+        let Some(release) = catalog
+            .latest(args["preview"].as_bool().unwrap_or(true))
+            .await?
+        else {
+            return Ok(json!({"phase": "no-release"}));
+        };
+        if !release.version.cmp_precedence(&catalog.current).is_gt() {
+            return Ok(json!({"phase": "current", "release": release}));
+        }
+        let Some(package) = catalog.package(&release).await? else {
+            return Ok(json!({"phase": "unavailable", "release": release}));
+        };
+        let mut result = json!({"phase": "available", "release": release, "package": {
+            "version": package.version, "sha256": package.sha256, "bytes": package.bytes
+        }});
+        if args["action"] == "download" {
+            let (cancel, receiver) = tokio::sync::watch::channel(false);
+            let task_cancel = cancel.clone();
+            let task = args["cancelAfterMs"].as_u64().map(|ms| {
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(ms)).await;
+                    task_cancel.send_replace(true);
+                })
+            });
+            let mut progress = Vec::new();
+            let bytes = catalog
+                .download(&package, receiver, |done, total| {
+                    progress.push((done, total));
+                })
+                .await?;
+            if let Some(task) = task {
+                task.abort();
+            }
+            drop(cancel);
+            result["phase"] = json!("verified");
+            result["bytes"] = json!(bytes.len());
+            result["progressEvents"] = json!(progress.len());
+        }
+        Ok::<_, String>(result)
+    }
+    .await;
+    match result {
+        Ok(value) => println!("{value}"),
+        Err(error) => {
+            println!("{}", serde_json::json!({"error":error}));
+            std::process::exit(2);
+        }
+    }
+}
+
+#[cfg(not(all(debug_assertions, any(windows, target_os = "macos"))))]
+fn main() {
+    eprintln!("The updater contract driver is only available in debug fixture builds");
+    std::process::exit(2);
+}

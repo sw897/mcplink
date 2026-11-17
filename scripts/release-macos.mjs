@@ -3,9 +3,12 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from
 import { join, resolve } from "node:path";
 
 const signed = process.argv.includes("--signed");
-if (process.argv.slice(2).some((arg) => arg !== "--signed")) {
-  throw new Error("Usage: npm run release:macos -- [--signed]");
+const withUpdates = process.argv.includes("--with-updates");
+if (process.argv.slice(2).some((arg) => !["--signed", "--with-updates"].includes(arg))) {
+  throw new Error("Usage: npm run release:macos -- [--signed] [--with-updates]");
 }
+if (withUpdates && !process.env.TAURI_SIGNING_PRIVATE_KEY && !process.env.TAURI_SIGNING_PRIVATE_KEY_PATH)
+  throw new Error("--with-updates requires an updater signing key in the environment");
 if (process.platform !== "darwin" || process.arch !== "arm64") {
   throw new Error("The release entry point currently supports macOS Apple Silicon");
 }
@@ -77,4 +80,5 @@ const packageReport = JSON.parse(readFileSync(join(record, "package/package-repo
 const installedReport = JSON.parse(readFileSync(join(record, "installed/report.json"), "utf8"));
 const lifecycleReport = JSON.parse(readFileSync(join(record, "lifecycle/report.json"), "utf8"));
 writeFileSync(join(output, "verification.json"), JSON.stringify({ version, signed, developer_id_signed: packageReport.developer_id_signed, notarized: packageReport.notarized, package: packageReport.conclusion, installed: installedReport.conclusion, installed_scenarios: installedReport.scenarios, agent_cli: JSON.parse(readFileSync(join(record, "agent-cli/report.json"), "utf8")).conclusion, lifecycle: lifecycleReport.conclusion, lifecycle_scenarios: lifecycleReport.scenarios, limits: installedReport.limits }, null, 2) + "\n");
+if (withUpdates) run("python3", ["scripts/prepare_updater.py", "--directory", output, "--platform", "macos"]);
 console.log(`Release candidate: ${output}`);

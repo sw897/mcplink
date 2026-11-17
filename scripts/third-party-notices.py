@@ -24,7 +24,7 @@ for relative,package in packages.items():
 version=json.loads((root/'package.json').read_text())['version']
 blocks=[f'Third-party notices for mcplink {version}\nGenerated from installed locked dependencies.\n']
 for name,license_name,directory in sorted(items,key=lambda item:item[0]):
-    files=sorted({p for pattern in ['LICENSE*','LICENCE*','COPYING*','NOTICE*','OFL*'] for p in directory.glob(pattern) if p.is_file()})
+    files=sorted(p for p in directory.iterdir() if p.is_file() and p.name.casefold().startswith(('license','licence','copying','notice','ofl')))
     blocks.append('\n'+'='*72+'\n'+name+'\nSPDX: '+str(license_name)+'\n')
     for file in files:
         blocks.append('\n--- '+file.name+' ---\n'+file.read_text(errors='replace')+'\n')

@@ -195,6 +195,10 @@ fn start_monitor(app: &AppHandle) {
             if is_quitting(&handle) {
                 break;
             }
+            if crate::updater::needs_backend_reset(&handle) {
+                let reset = gateway(&handle, "gateway.stop").await;
+                crate::updater::finish_startup(&handle, reset.map(|_| ()));
+            }
             if gateway(&handle, "gateway.status").await.is_err() {
                 let state = handle.state::<Background>();
                 state.state.store(0, Ordering::SeqCst);
@@ -212,6 +216,55 @@ fn start_monitor(app: &AppHandle) {
     });
     *app.state::<Background>().monitor.lock().unwrap() = Some(task);
 }
+async fn cleanup(
+    app: &AppHandle,
+    monitor: Option<tauri::async_runtime::JoinHandle<()>>,
+) -> Result<(), String> {
+    // An accepted startup helper may still be creating a daemon. Wait for it, drain
+    // desktop requests, and stop once more so neither exit nor installation leaves it behind.
+    if let Some(monitor) = monitor {
+        monitor
+            .await
+            .map_err(|_| "后台巡检未能正常结束".to_string())?;
+    }
+    gateway(app, "gateway.stop").await?;
+    tokio::time::timeout(std::time::Duration::from_secs(30), drain_requests(app))
+        .await
+        .map_err(|_| "桌面管理请求尚未结束，请等待后重试".to_string())?;
+    gateway(app, "gateway.stop").await?;
+    Ok(())
+}
+
+pub fn resume_after_update_failure(app: &AppHandle) {
+    let state = app.state::<Background>();
+    state.allow_exit.store(false, Ordering::SeqCst);
+    state.quitting.store(false, Ordering::SeqCst);
+    let _ = state.quit.set_enabled(true);
+    let _ = state.keep.set_enabled(true);
+    start_monitor(app);
+    show(app);
+}
+
+pub async fn prepare_update(app: &AppHandle) -> Result<(), String> {
+    let state = app.state::<Background>();
+    {
+        let _active = state.requests.lock().unwrap();
+        if state.quitting.swap(true, Ordering::SeqCst) {
+            return Err("应用正在退出或安装更新，请稍候".into());
+        }
+    }
+    let _ = state.quit.set_enabled(false);
+    let _ = state.keep.set_enabled(false);
+    let _ = state.health.set_text("正在准备软件升级…");
+    let monitor = stop_monitor(app);
+    if let Err(error) = cleanup(app, monitor).await {
+        resume_after_update_failure(app);
+        return Err(format!("升级前未能清理共享后台：{error}"));
+    }
+    state.allow_exit.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
 pub fn quit(app: &AppHandle) {
     let state = app.state::<Background>();
     {
@@ -226,24 +279,7 @@ pub fn quit(app: &AppHandle) {
     let _ = state.keep.set_enabled(false);
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let cleaned = async {
-            // Let an in-progress startup finish before stopping its daemon.
-            // Aborting its helper here could leave a newly spawned daemon behind.
-            if let Some(monitor) = monitor {
-                monitor
-                    .await
-                    .map_err(|_| "后台巡检未能正常结束".to_string())?;
-            }
-            gateway(&app, "gateway.stop").await?;
-            tokio::time::timeout(std::time::Duration::from_secs(30), drain_requests(&app))
-                .await
-                .map_err(|_| "桌面管理请求尚未结束，请等待后重试".to_string())?;
-            // A helper accepted before quitting may have just finished starting
-            // a daemon. No new desktop requests can enter after the drain.
-            gateway(&app, "gateway.stop").await?;
-            Ok::<_, String>(())
-        }
-        .await;
+        let cleaned = cleanup(&app, monitor).await;
         match cleaned {
             Ok(_) => {
                 app.state::<Background>()

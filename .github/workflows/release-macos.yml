@@ -57,6 +57,8 @@ jobs:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           export APPLE_API_KEY_PATH="$RUNNER_TEMP/mcplink-notarization.p8"
           trap 'rm -f "$APPLE_API_KEY_PATH"' EXIT
@@ -68,7 +70,7 @@ jobs:
           with os.fdopen(fd, 'w') as f:
               f.write(key)
           PY
-          npm run release:macos -- --signed
+          npm run release:macos -- --signed --with-updates
       - name: Create draft with verified artifacts
         env:
           GH_TOKEN: ${{ github.token }}

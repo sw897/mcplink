@@ -196,6 +196,7 @@ export type Dialog =
   | { kind: "addSource"; agent: Agent }
   | { kind: "history" }
   | { kind: "background" }
+  | { kind: "updates" }
   | { kind: "editor"; connection?: Connection }
   | { kind: "gateway"; connection?: Connection }
   | { kind: "cli"; connection: Connection }

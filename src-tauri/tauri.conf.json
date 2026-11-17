@@ -26,26 +26,23 @@
   },
   "bundle": {
     "active": true,
-    "targets": [
-      "app",
-      "dmg"
-    ],
-    "externalBin": [
-      "binaries/mcplink"
-    ],
+    "targets": ["app", "dmg"],
+    "externalBin": ["binaries/mcplink"],
     "category": "DeveloperTool",
     "shortDescription": "Desktop MCP manager and local gateway for AI agents",
-    "resources": [
-      "../LICENSE",
-      "../THIRD_PARTY_NOTICES.txt"
-    ],
-    "icon": [
-      "icons/icon.png",
-      "icons/icon.icns",
-      "icons/icon.ico"
-    ],
+    "resources": ["../LICENSE", "../THIRD_PARTY_NOTICES.txt"],
+    "icon": ["icons/icon.png", "icons/icon.icns", "icons/icon.ico"],
     "macOS": {
       "signingIdentity": "-"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDdDODBCNTZGRjk3M0QxRTYKUldUbTBYUDViN1dBZkFramluOXVsem9KQU9GWmgrZlhQWHV5RGhpdE5uNGRVZFZXVzlrNmFCK1QK",
+      "requireSignedVersion": true,
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }

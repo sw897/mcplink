@@ -147,6 +147,14 @@ Wait-Until { Find-Button '保存入口' } 'native WebView modal' | Out-Null
 Click-Button '取消'
 Wait-Until { -not (Find-Button '保存入口') } 'modal closed' | Out-Null
 Write-Output 'PASS native Tauri window, navigation and modal cancellation'
+Write-Output 'NATIVE_STEP software-updates'
+Click-Button '软件更新'
+Wait-Text '当前版本'
+Wait-Text 'Windows x64'
+Wait-Text '检查新版本，选择合适的时间升级'
+Wait-Until { Find-Button '检查更新' } 'software updater ready without a network check' | Out-Null
+Click-Button '关闭'
+Write-Output 'PASS native software update panel opens without automatic download'
 Write-Output 'NATIVE_STEP http-probe'
 Click-Button 'MCP 服务'
 Click-Button 'Windows API 验收 详情'

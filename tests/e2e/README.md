@@ -36,6 +36,7 @@ python3 tests/e2e/run.py --record artifacts/e2e/core-local
 | `windows_desktop.py` | NSIS 隔离安装后的真实 Tauri/WebView2 窗口：Windows UI Automation 导航、弹窗取消、HTTP 探测、暂停/恢复、关闭到托盘及单实例重开；交互桌面不可用时失败 |
 | `windows_background.py`、`daemon_lifecycle.py` | 暂停持久化、退出、重连与进程树清理 |
 | `windows_signing.py`、`windows_installer.py` | 签名拒绝边界，NSIS 隔离安装、旧版升级、重装及卸载保留数据；有旧包时明确记录基线 |
+| `updater.py` | 真实 Rust 更新实现访问回环 GitHub 夹具：版本筛选、取消、哈希/签名/签名版本拒绝、受限 URL、CLI 同步与中断恢复；`--live` 另检查公开 GitHub。此脚本不安装桌面，Windows 下载契约不等于 Windows 应用内升级通过。 |
 | `verify_package.py`、`installed_app.py` | macOS DMG、打包内容、签名和隔离安装场景 |
 
 ## 原生客户端与平台

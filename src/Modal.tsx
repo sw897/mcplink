@@ -31,12 +31,14 @@ export function Modal({
   onClose,
   wide,
   className = "",
+  closeDisabled = false,
 }: {
   title: string;
   children: React.ReactNode;
   onClose: () => void;
   wide?: boolean;
   className?: string;
+  closeDisabled?: boolean;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {
@@ -72,7 +74,12 @@ export function Modal({
     >
       <header>
         <h2>{title}</h2>
-        <button className="icon" onClick={onClose} aria-label="关闭">
+        <button
+          className="icon"
+          onClick={onClose}
+          aria-label="关闭"
+          disabled={closeDisabled}
+        >
           <X size={19} />
         </button>
       </header>

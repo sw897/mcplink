@@ -65,7 +65,9 @@ jobs:
       - name: Build, sign, timestamp and verify
         env:
           WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
-        run: npm run release:windows -- --signed
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run release:windows -- --signed --with-updates
       - name: Add verified artifacts to a draft
         env:
           GH_TOKEN: ${{ github.token }}

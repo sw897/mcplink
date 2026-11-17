@@ -7,6 +7,8 @@ use tokio::io::AsyncWriteExt;
 
 #[cfg(any(windows, target_os = "macos"))]
 mod background;
+#[cfg(any(windows, target_os = "macos"))]
+mod updater;
 
 fn cli_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os("MCPLINK_CLI") {
@@ -116,10 +118,47 @@ fn desktop_menu(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<(
     }
 }
 
+#[tauri::command]
+async fn desktop_update(
+    app: tauri::AppHandle,
+    action: String,
+    preview: Option<bool>,
+    candidate_id: Option<u64>,
+    confirmed: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    #[cfg(any(windows, target_os = "macos"))]
+    return updater::command(
+        app,
+        action,
+        preview,
+        candidate_id,
+        confirmed.unwrap_or(false),
+    )
+    .await;
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = (preview, candidate_id, confirmed);
+        if action == "open_release" {
+            opener::open("https://github.com/sw897/mcplink/releases")
+                .map_err(|_| "无法打开 GitHub 发布页面")?;
+        } else if action != "status" {
+            return Err("当前平台暂未提供应用内升级，请到 GitHub 下载".into());
+        }
+        Ok(
+            serde_json::json!({"supported":false,"phase":"unsupported","currentVersion":app.package_info().version.to_string()}),
+        )
+    }
+}
+
 fn main() {
     let builder = tauri::Builder::default();
     #[cfg(any(windows, target_os = "macos"))]
     let builder = builder
+        .plugin(
+            tauri_plugin_updater::Builder::new()
+                .pubkey(mcplink_desktop::UPDATE_PUBLIC_KEY.trim())
+                .build(),
+        )
         .plugin(tauri_plugin_single_instance::init(|app, args, _| {
             if !args.iter().any(|arg| arg == "--background") {
                 background::show(app);
@@ -133,7 +172,10 @@ fn main() {
             let plugin = plugin.macos_launcher(tauri_plugin_autostart::MacosLauncher::LaunchAgent);
             plugin.build()
         })
-        .setup(|app| background::setup(app))
+        .setup(|app| {
+            updater::setup(app)?;
+            background::setup(app)
+        })
         .on_menu_event(background::menu_event)
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -154,7 +196,8 @@ fn main() {
             rpc,
             desktop_status,
             desktop_autostart,
-            desktop_menu
+            desktop_menu,
+            desktop_update
         ])
         .build(tauri::generate_context!())
         .expect("mcplink failed to start");

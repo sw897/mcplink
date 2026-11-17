@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -11,6 +12,7 @@ import {
   ChevronDown,
   CircleHelp,
   Clock3,
+  Download,
   FolderPlus,
   History,
   KeyRound,
@@ -52,6 +54,7 @@ import { ConnectDialog, ChangeDiff } from "./ConnectDialog";
 import { GatewayDialog } from "./GatewayDialog";
 import { CliDialog } from "./CliDialog";
 import { HttpProbeDialog } from "./HttpProbeDialog";
+import { UpdateDialog } from "./UpdateDialog";
 import { importInstructions } from "./ImportConfigCard";
 import { Editor, CredentialDialog } from "./ConnectionEditor";
 import "./style.css";
@@ -59,6 +62,7 @@ import "./style.css";
 const toolKey = (connection: Connection) =>
   JSON.stringify([connection.id, connection.revision, connection.checkedAt]);
 function App() {
+  const [appVersion, setAppVersion] = useState("");
   const [page, setPage] = useState<
     "services" | "gateways" | "accounts" | "agents"
   >("services");
@@ -157,6 +161,9 @@ function App() {
   }, []);
   useEffect(() => {
     void load();
+    void getVersion()
+      .then(setAppVersion)
+      .catch(() => {});
   }, [load]);
   useEffect(() => {
     const subscriptions = [
@@ -511,6 +518,13 @@ function App() {
         <div className="sidebar-bottom">
           <button
             className="utility"
+            onClick={() => setDialog({ kind: "updates" })}
+          >
+            <Download size={16} />
+            软件更新
+          </button>
+          <button
+            className="utility"
             onClick={() => setDialog({ kind: "background" })}
           >
             <Server size={16} />
@@ -552,7 +566,11 @@ function App() {
                     ? " · 共享已暂停"
                     : "已连接"}
             </span>
-            <small>v{data?.version || "0.1.0"}</small>
+            <small>
+              {data?.version || appVersion
+                ? `v${data?.version || appVersion}`
+                : "读取版本中…"}
+            </small>
           </div>
         </div>
       </aside>
@@ -1612,6 +1630,9 @@ function App() {
             )}
           </div>
         </Modal>
+      )}
+      {dialog?.kind === "updates" && (
+        <UpdateDialog onClose={() => setDialog(undefined)} />
       )}
       {dialog?.kind === "background" && (
         <Modal title="后台运行" onClose={() => setDialog(undefined)}>

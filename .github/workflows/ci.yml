@@ -256,6 +256,9 @@ jobs:
       - name: Daemon exit and process cleanup acceptance
         timeout-minutes: 5
         run: python -u tests/e2e/daemon_lifecycle.py --record artifacts/e2e/ci-lifecycle
+      - name: GitHub updater download, signature and CLI recovery acceptance
+        timeout-minutes: 8
+        run: python -u tests/e2e/updater.py --record artifacts/e2e/ci-updater
       - name: Windows preview release entry point
         if: runner.os == 'Windows'
         timeout-minutes: 12

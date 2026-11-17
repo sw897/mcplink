@@ -12,6 +12,7 @@
 | Windows 原生桌面 | 独立于 Chrome renderer 的 NSIS 安装窗口验收，使用 Windows UI Automation 检查导航、探测弹窗、后台控制、关闭到托盘与单实例重开。交互桌面不可用按失败处理。 |
 | CLI 契约诊断与批量选择 | 区分完整/部分/失败/未执行发现、工具变化/不可用/未能核验；显示参数与 stdin 模式差异。入口工具范围和 CLI 按搜索结果批量选择/取消，保留隐藏选择。验收入口为 `cli_workflow.py`、`generated_cli.py` 与 `desktop_ui.py`。 |
 | 许可声明一致性 | 发布及 CI 预检核对应用版本和 Cargo/npm 锁定依赖集合，拒绝滞后的第三方声明。 |
+| GitHub 软件升级 | 桌面提供手动检查、预览版筛选、可取消下载、签名与版本核验及确认安装；同步桌面、自带 CLI、可识别独立 CLI 与后台。`updater.py` 验证 HTTP 下载、签名拒绝和 CLI 恢复；真实平台安装结果须单独核对。发布脚本可生成签名更新文件；已发布 0.3.2 不含该功能。 |
 
 上述检查以对应提交的 [macOS / Windows CI](https://github.com/sw897/mcplink/actions/workflows/ci.yml) 结果为准，不能用本地 macOS 或浏览器界面通过替代 Windows 原生结果。可复现命令及测试边界见[端到端验证](tests/e2e/README.md)。
 
@@ -53,6 +54,7 @@
 
 - 完善 macOS Developer ID 签名、公证和下载后的系统验证。
 - 完善 Windows 安装包签名、安装升级和卸载体验。
+- 交付首个含 GitHub 升级功能的版本，并发布对应平台的版本绑定签名更新文件；补齐 Windows 应用内升级的实机验收，不能用下载契约或普通 NSIS 覆盖安装替代。
 - 扩展干净系统账号及桌面交互测试，覆盖首次授权、后台运行和数据保留。
 - 跟进 wry/WebView2 的 Windows UIA 父子窗口衔接及屏幕阅读器兼容性；原生控件操作验收不替代完整辅助技术验收。
 - 按需求评估其他架构和平台的安装包。

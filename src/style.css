@@ -1824,3 +1824,134 @@ dd {
     max-height: 180px;
   }
 }
+
+.update-dialog {
+  width: 640px;
+}
+.update-version {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid #dce2dc;
+}
+.update-version > div {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.update-version strong {
+  font-size: 24px;
+  font-weight: 650;
+}
+.update-channel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 20px 0;
+}
+.update-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  line-height: 1.6;
+  margin: 22px 0 16px;
+}
+.update-status > svg {
+  flex-shrink: 0;
+  color: #287965;
+}
+.update-download progress {
+  width: 100%;
+  height: 8px;
+  accent-color: #287965;
+}
+.update-download > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 6px;
+  color: #5d6a64;
+  font-size: 12px;
+}
+.update-release {
+  padding: 20px 0;
+  border-top: 1px solid #dce2dc;
+  margin-top: 22px;
+}
+.update-release > header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 0;
+  border: 0;
+}
+.update-release h3 {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.update-release .tag {
+  padding: 3px 7px;
+  border-radius: 4px;
+  background: #eef3ef;
+  color: #287965;
+  font-size: 11px;
+}
+.update-release summary {
+  cursor: pointer;
+  line-height: 1.8;
+}
+.update-notes {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 240px;
+  overflow: auto;
+  color: #5d6a64;
+}
+.update-confirm {
+  background: #eef3ef;
+  border: 1px solid #dce2dc;
+  padding: 18px;
+  border-radius: 8px;
+  margin: 14px 0 20px;
+}
+.update-confirm p {
+  margin: 9px 0;
+}
+.update-confirm ul {
+  padding-left: 20px;
+}
+.update-confirm code {
+  overflow-wrap: anywhere;
+}
+.update-error {
+  color: #9c3c35;
+  background: #fff3ef;
+  border: 1px solid #efd7cf;
+  padding: 12px 14px;
+  border-radius: 7px;
+  line-height: 1.65;
+  margin: 14px 0;
+  overflow-wrap: anywhere;
+}
+.update-error p {
+  margin: 0 0 10px;
+}
+.update-message {
+  color: #287965;
+}
+.update-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 20px;
+}
+.update-actions-spacer {
+  flex: 1;
+}
+.update-actions .text-button {
+  margin-right: auto;
+}

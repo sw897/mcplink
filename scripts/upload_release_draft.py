@@ -7,6 +7,7 @@ import re
 import subprocess
 import shutil
 import tempfile
+from prepare_updater import names as updater_names, verify_update
 
 
 def prepare(directory, platform, tag, staging):
@@ -18,7 +19,7 @@ def prepare(directory, platform, tag, staging):
     for name, checksum in manifest["source_files"].items():
         path = Path(name)
         assert not path.is_absolute() and ".." not in path.parts and "\\" not in name, "Invalid source path"
-        assert not any(part.startswith(".") for part in path.parts if part not in {".github", ".node-version", ".npmrc", ".gitignore", ".gitattributes"}), "Private source path"
+        assert not any(part.startswith(".") for part in path.parts if part not in {".github", ".node-version", ".npmrc", ".gitignore", ".gitattributes", ".gitleaks.toml"}), "Private source path"
         assert path.name not in {"AGENTS.md", "CLAUDE.md"} and path.parts[0] not in {"artifacts", "target", "node_modules", "private_keys"} and "project-notes" not in path.parts, "Private source path"
         assert re.fullmatch(r"[0-9a-f]{64}", checksum), "Invalid source checksum"
     verification = json.loads((directory / "verification.json").read_text())
@@ -33,6 +34,13 @@ def prepare(directory, platform, tag, staging):
         signing = {"publisherSignatureVerified": verification["publisherSignatureVerified"]}
         patterns = [f"mcplink_{version}_x64-setup.exe", f"mcplink_cli_{version}_x86_64-pc-windows-msvc.zip"]
     expected = set(patterns)
+    updater_verified = verification.get("updaterSignatureVerified", False)
+    assert isinstance(updater_verified, bool), "Invalid updater verification status"
+    if updater_verified:
+        expected.update(verify_update(directory, platform, version))
+    else:
+        assert not (directory / updater_names(platform, version)[2]).exists(), "Unverified updater metadata"
+    signing["updaterSignatureVerified"] = updater_verified
     assert set(manifest["artifacts"]) == expected, "Unexpected distribution file set"
     checksums = {}
     for line in (directory / "SHA256SUMS").read_text().splitlines():

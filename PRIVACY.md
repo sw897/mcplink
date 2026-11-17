@@ -30,6 +30,10 @@ The Windows interface uses Microsoft Edge WebView2, subject to Microsoft's priva
 
 ## 发布与用户反馈 / Distribution and feedback
 
+桌面「软件更新」只在主动检查或下载时访问 GitHub API、GitHub Releases 及其 HTTPS 下载 CDN，不进行启动时自动轮询。请求包含程序版本 User-Agent 和所选平台文件名，不发送 MCP 凭据、配置、账号、业务正文或浏览器 Cookie。安装确认和 CLI 同步记录仅保存在本机。
+
+Desktop software updates contact the GitHub API, GitHub Releases and their HTTPS download CDN only when users check or download, without automatic startup polling. Requests contain the app version User-Agent and platform asset names, not MCP credentials, configuration, accounts, business content or browser cookies. Install confirmation and CLI synchronization records remain local.
+
 下载页面与问题反馈托管于 GitHub，适用 [GitHub 隐私声明](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement)。若未来启用 SignPath 签名，发布流程会向该服务提交公开源码构建的发布程序和构建来源信息；终端用户的 mcplink 不因此连接 SignPath，也不会向其发送用户的配置、凭据或业务内容。
 
 Downloads and issue reports are hosted on GitHub under its privacy statement. If SignPath signing is enabled, release workflows submit release binaries built from public source and build-origin information. This does not make the end-user application contact SignPath or send it user configurations, credentials, or business content.

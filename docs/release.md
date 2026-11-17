@@ -77,6 +77,8 @@ SignPath 接入须使用其[可信 GitHub 构建流程](https://docs.signpath.io
 
 `release-windows.yml` 也仅手动运行，tag 与版本须匹配。需要 `WINDOWS_CERTIFICATE`（PFX 的 Base64）、`WINDOWS_CERTIFICATE_PASSWORD` 和 `WINDOWS_SIGNING_CERTIFICATE_SHA1` secrets；可选仓库变量 `WINDOWS_TIMESTAMP_URL`。PFX 只经 runner 临时文件导入当前用户证书库，结束时清理文件和指定私钥。使用非导出硬件或签名服务时，在持有该身份的 Windows 环境运行本地签名入口，按相同验证标准交付，不把服务机密写进配置。
 
+两个签名发布工作流还要求 `TAURI_SIGNING_PRIVATE_KEY`（Tauri 更新签名私钥文件的完整正文），以及可选的 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。更新签名身份独立于 Apple、Windows 系统代码签名；工作流缺少更新签名密钥时拒绝生成更新附件，不降级为无签名升级。
+
 签名、安装包和 CLI 验收都通过后，工作流创建或补充匹配 tag 的 **Release 草稿**，拒绝覆盖已有同名文件或修改已发布 Release；两平台元数据使用平台前缀。上传入口按安装包白名单、源码修订与 SHA-256 验证文件，仅输出允许的构建来源字段与签名布尔值；`verification.json` 和原始验收材料留在本地或临时 runner，不上传。可用 `--prepare-only --output NEW_DIRECTORY` 先检查公开文件集。正式公开发布从草稿单独执行。工作流固定第三方 Action 的提交 SHA。Runner 平台依据 [GitHub 官方标签表](https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/choose-the-runner-for-a-job)。
 
 发布前核对待公开的源码、文档和 Git 历史，扫描凭据，避免纳入本机配置、账号验收记录或签名材料。根据两平台 CI 的实际结果记录兼容性；合成测试不能代替 Windows 桌面实机验收。
@@ -94,3 +96,28 @@ Windows CI 在打包前用 `scripts/prepare_windows_bundler.py` 通过 GitHub Re
 为两平台产物汇总 `release-manifest.json` 和 `SHA256SUMS`，记录相同的源码提交、逐文件哈希、平台验收范围与签名状态。公开清单只保留版本、源码相对路径和产物元数据，不附测试 home、系统凭据库、机器绝对路径或原始日志。
 
 发布说明统一维护在 `docs/release-notes.md`。核对 tag 与源码构建版本一致后，先创建 Release 草稿并上传已验证产物，检查说明及校验值后发布为 Pre-release。发布后重新下载附件核对哈希，并确认 tag 指向、Release 状态和下载入口。签名状态不同的产物应单独标明来源及校验值。
+
+## 应用内更新包 / Updater assets
+
+在正常候选验收之外，用 `--with-updates` 生成应用内更新附件。密钥只通过环境传入：`TAURI_SIGNING_PRIVATE_KEY_PATH` 指向本机私钥，或 CI 的 `TAURI_SIGNING_PRIVATE_KEY` 提供正文；密码使用 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。不要把密钥写进源码、命令参数、报告或发布附件。
+
+```sh
+npm run release:macos -- --with-updates
+npm run release:windows -- --with-updates
+# 有系统签名身份时，两项参数可以同时使用：--signed --with-updates
+```
+
+源码中的 `src-tauri/updater.pub` 是更新信任根，必须与 `tauri.conf.json` 一致，构建时会检查。维护者须离线备份对应私钥；丢失后，已安装版本无法接受新密钥签出的包，须通过受信任的手动安装迁移。私钥不随软件分发，用户不需要签名身份。
+
+| 平台 | 新增 Release 文件 |
+| --- | --- |
+| macOS Apple Silicon | `macos-updater.json`、`mcplink_update_VERSION_aarch64.app.tar.gz`、对应 `.sig` |
+| Windows x64 | `windows-updater.json`、已验收 NSIS `mcplink_VERSION_x64-setup.exe` 的 `.sig`；复用原安装包 |
+
+`scripts/prepare_updater.py` 从候选文件清单核对原始哈希，再把已验收的 macOS App ZIP 转为规范化 tar.gz，或复用 Windows NSIS。签名必须用 Tauri CLI `signer sign --app-version VERSION` 绑定版本；随后用与桌面相同的 Rust 验证器核验公钥、内容与签名版本，再补入候选清单和校验值。JSON 包含对应平台的 URL、签名、SHA-256 和大小。签名内容的版本、清单版本、Release tag 必须一致。
+
+上传脚本会再次使用源码公钥验证签名，扩展明确的文件白名单，拒绝错误公钥、版本、URL、哈希或混入其他文件。公开平台构建清单的 `signing.updaterSignatureVerified` 记录更新签名核验结果；它与 Developer ID、公证或 Authenticode 字段分别记录。两平台使用独立 JSON，向同一草稿添加附件时不会覆盖对方的更新清单。
+
+普通 CI 不接触发布私钥，仍构建原有预览安装包，并用临时测试身份运行 `tests/e2e/updater.py`。测试密钥和下载夹具只在标记的隔离 home 使用；release 构建没有测试更新源或公钥覆盖能力，上传脚本也不接受测试身份。原生 Windows 应用内升级须另外从已安装旧版实际确认安装、重启与保留数据，不能把 HTTP 契约测试算作安装通过。
+
+The updater uses version-bound Minisign signatures independently of OS publisher signing. Release maintainers retain the private key; only the public trust root is committed. `--with-updates` signs verified platform packages and creates separate platform metadata. Public upload rechecks the signatures, exact version and file whitelist. Standard CI uses ephemeral fixture keys, never the release identity. See [Tauri updater](https://v2.tauri.app/plugin/updater/) for the platform installer format and signing model.

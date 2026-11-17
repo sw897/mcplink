@@ -9,8 +9,11 @@ import {
 import { join, resolve } from "node:path";
 
 const signed = process.argv.includes("--signed");
-if (process.argv.slice(2).some((arg) => arg !== "--signed"))
-  throw new Error("Usage: npm run release:windows -- [--signed]");
+const withUpdates = process.argv.includes("--with-updates");
+if (process.argv.slice(2).some((arg) => !["--signed", "--with-updates"].includes(arg)))
+  throw new Error("Usage: npm run release:windows -- [--signed] [--with-updates]");
+if (withUpdates && !process.env.TAURI_SIGNING_PRIVATE_KEY && !process.env.TAURI_SIGNING_PRIVATE_KEY_PATH)
+  throw new Error("--with-updates requires an updater signing key in the environment");
 if (process.platform !== "win32" || process.arch !== "x64")
   throw new Error("Windows x64 is required");
 const env = { ...process.env };
@@ -170,4 +173,5 @@ writeFileSync(
     2,
   ) + "\n",
 );
+if (withUpdates) run("python", ["scripts/prepare_updater.py", "--directory", output, "--platform", "windows"]);
 console.log(`Release candidate: ${output}`);
