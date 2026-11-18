@@ -217,6 +217,8 @@ if (location.origin === ORIGIN) {
         assert tomllib.loads((harness.home/".codex/config.toml").read_text())["mcp_servers"]["public_http"]["url"] == url
         checks.append("rename, direct-write disclosure, preview and apply preserve exact URL in native configuration")
         def button(name):
+            label = json.dumps(name)
+            wait_for("[...document.querySelectorAll('button')].some(b=>b.getClientRects().length && !b.matches(':disabled') && b.getAttribute('aria-disabled') !== 'true' && (b.getAttribute('aria-label') === " + label + " || b.innerText.trim() === " + label + "))")
             browser("find","role","button","click","--name",name,"--exact")
 
         def card_action_layout(context):
