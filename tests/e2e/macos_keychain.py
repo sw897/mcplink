@@ -6,7 +6,9 @@ import json
 import os
 from pathlib import Path
 import secrets
+import shlex
 import shutil
+import sqlite3
 import subprocess
 import sys
 
@@ -32,6 +34,7 @@ def main():
     passed = []
     report = {"conclusion": "FAIL", "existing_credentials_touched": False, "keychain_ui_allowed": False}
     created = False
+    fixture_search_added = False
     try:
         run([str(audit), "--create-fixture-keychain", str(keychain)], json.dumps({"password": password}).encode())
         created = True
@@ -53,10 +56,25 @@ def main():
         # Only the newly created disposable signing key is affected. The known
         # synthetic password avoids any system dialog; login Keychain untouched.
         run(["security", "set-key-partition-list", "-S", "apple-tool:,apple:", "-s", "-k", password, str(keychain)])
+        run(["security", "unlock-keychain", "-p", password, str(keychain)])
+        if os.environ.get("CI"):
+            # Headless macOS codesign also consults the user search list when
+            # resolving the signing chain, despite --keychain selecting its key.
+            # Append only this disposable Keychain; never replace the list.
+            original_search = shlex.split(run(["security", "list-keychains", "-d", "user"]).decode())
+            run(["security", "list-keychains", "-d", "user", "-s", *original_search, str(keychain)])
+            fixture_search_added = True
 
         def sign(path, identifier):
-            run(["codesign", "--force", "--keychain", str(keychain), "--sign", fingerprint,
-                 "--identifier", identifier, "--options", "runtime", "--timestamp=none", str(path)])
+            result = subprocess.run(["codesign", "--force", "--keychain", str(keychain), "--sign", fingerprint,
+                                     "--identifier", identifier, "--options", "runtime", "--timestamp=none", str(path)],
+                                    capture_output=True, text=True)
+            if result.returncode:
+                # This command handles only an ephemeral fixture identity, not
+                # the import payload or a production credential. Keep its public
+                # signing diagnostic instead of losing the CI failure reason.
+                print(json.dumps({"fixture_signing_error": result.stderr[-1600:]}))
+                raise RuntimeError("Isolated fixture signing failed")
 
         helper = record / "mcplink-keychain"
         run(["swiftc", "-O", str(ROOT / "scripts/macos_keychain.swift"), "-o", str(helper)])
@@ -123,6 +141,16 @@ def main():
             assert cli("connections", "save", "--stdin", expected=2)["error"]["code"] == "invalid_input"
             preview = cli("keychain", "preview", "--helper", str(helper))["ok"]
             assert preview["credentialValuesRead"] is False and len(preview["items"]) == 1
+            db = sqlite3.connect(data / "mcplink.sqlite3")
+            db.execute("INSERT INTO credential_cleanup(connection_id,reference) VALUES('synthetic-cleanup','definition/cleanup')")
+            db.execute("INSERT INTO connection_deletions(connection_id,definition_ref,released_bindings) VALUES('synthetic-deletion','definition/deletion',0)")
+            db.commit()
+            recovery = cli("keychain", "preview", "--helper", str(helper))["ok"]
+            assert len(recovery["items"]) == 3 and sum(i["kind"] == "cleanup" for i in recovery["items"]) == 2
+            assert recovery["previewHash"] != preview["previewHash"] and recovery["credentialValuesRead"] is False
+            db.execute("DELETE FROM credential_cleanup WHERE connection_id='synthetic-cleanup'")
+            db.execute("DELETE FROM connection_deletions WHERE connection_id='synthetic-deletion'")
+            db.commit(); db.close()
             binding_bytes = (installed / "active.json").read_bytes()
             changed_plan = subprocess.run([str(core), "keychain", "authorize", "--helper", str(helper),
                                            "--preview-hash", "0" * 64, "--confirm"],
@@ -141,6 +169,9 @@ def main():
         report.update(error_class=type(error).__name__, passed=passed)
         raise
     finally:
+        if fixture_search_added:
+            current = shlex.split(run(["security", "list-keychains", "-d", "user"]).decode())
+            run(["security", "list-keychains", "-d", "user", "-s", *[p for p in current if p != str(keychain)]])
         if created:
             run([str(audit), "--delete-fixture-keychain", str(keychain)])
         report["temporary_keychain_removed"] = not keychain.exists()

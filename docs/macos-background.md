@@ -24,7 +24,7 @@ python3 scripts/prepare_macos_keychain.py --record artifacts/e2e/prepared-keycha
 mcplink keychain preview --helper /absolute/path/to/prepared-keychain/mcplink-keychain
 ```
 
-核对助手标识、散列、目标数据目录及逐项授权清单后，才运行 `keychain authorize --helper PATH --preview-hash HASH --confirm`。首次切换需要在系统窗口逐项选择“始终允许”；普通操作不能代替这个明确的授权步骤，`--no-auth-ui` 会拒绝执行它。清单涵盖通信密钥、当前托管定义、OAuth 和待恢复事务引用；已完成历史仍保留在钥匙串，未来需要恢复某次变更时，在预览和授权两步均显式添加 `--operation OPERATION_ID`。全部项目检查成功后才启用绑定；中断或拒绝不会删除原凭据，尚未启用时继续原来的入口。接入后重新启动 App、后台并重载 Agent MCP。
+核对助手标识、散列、目标数据目录及逐项授权清单后，才运行 `keychain authorize --helper PATH --preview-hash HASH --confirm`。首次切换需要在系统窗口逐项选择“始终允许”；普通操作不能代替这个明确的授权步骤，`--no-auth-ui` 会拒绝执行它。清单涵盖通信密钥、当前托管定义、OAuth、待恢复事务及已提交后仍待清理的引用；已完成历史仍保留在钥匙串，未来需要恢复某次变更时，在预览和授权两步均显式添加 `--operation OPERATION_ID`。全部项目检查成功后才启用绑定；中断或拒绝不会删除原凭据，尚未启用时继续原来的入口。接入后重新启动 App、后台并重载 Agent MCP。
 
 助手有独立生命周期：普通 App/CLI 构建和覆盖安装不编译、不替换数据目录内的助手。准备入口优先复用已接入的原字节，否则复用本机准备缓存；助手源码或签名身份变化须显式准备 `--new-helper-candidate`，核对并单独迁移，不能当成主程序的自动附带升级。不同设备仍需独立授权。助手散列固定才能维持自签名分区；换助手后仍可能再次需要系统授权。
 

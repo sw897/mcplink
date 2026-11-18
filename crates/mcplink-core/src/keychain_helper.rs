@@ -155,6 +155,13 @@ pub fn preview(data: &Path, candidate: &Path, operations: &[String]) -> Result<V
             items.push(json!({"key":key,"label":"待恢复的配置事务","kind":"recovery"}));
         }
     }
+    for (_, key) in store
+        .pending_credential_cleanup()?
+        .into_iter()
+        .chain(store.pending_credential_deletions()?)
+    {
+        items.push(json!({"key":key,"label":"待清理的已提交连接定义","kind":"cleanup"}));
+    }
     for id in operations {
         let operation = store.operation(id)?;
         let key = operation["credentialRef"]
