@@ -86,6 +86,8 @@ HTTP API 的业务成功条件通过服务配置 `response.success` 声明；特
 
 OAuth 用 `credentials login CONNECTION_ID` 返回 URL，CLI 不打开浏览器；若上游要求用户交互，交给用户完成，随后检查连接。系统凭据库首次访问也可能需要用户在系统安全窗口授权，不能承诺绕过。
 
+macOS 若 schema 提供 `keychain preview/authorize`，自签名版本可显式接入独立固定凭据助手；先预览候选、数据目录及项目清单，再按已核对的 previewHash 和当次授权执行，不由普通 skill 同步触发。助手不随 App/CLI 构建重编译；普通读写、桌面巡检和 Bridge 恢复禁止口令弹窗。固定证书并不保证自签名程序的钥匙串分区跨构建稳定；不要以重复输入口令或覆盖助手作为升级验收。凭据仍留在钥匙串，不能进入参数、报告或资产库。
+
 若 `schema` 包含 `credentials oauth-config`，可经 stdin 部分更新 `clientId`、`clientSecret`、`scopes` 数组和 `callbackPort`。只使用用户有权使用的注册应用；省略字段保留原值，`null` 清除可选字段，机密掩码表示保留，空 scope 使用服务建议。机密不经过 argv、文件或聊天；配置后再登录。更改已有 OAuth 参数会使旧授权失效，含托管参数的连接使用共享入口。无 DCR 或缺应用机密时按错误补齐，不借用其他客户端身份；手工 Token 成功不代表 OAuth/刷新已通过。
 
 `needs_auth` 先处理认证；`disconnected` 先核对是否应恢复；协议或网络故障核对端点和服务。`gateway status|pause|resume` 只影响共享路径，暂停会影响所有共享连接。

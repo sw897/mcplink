@@ -19,7 +19,7 @@ pub fn verify_running_code() -> Result<()> {
         use std::ffi::c_void;
         #[link(name = "Security", kind = "framework")]
         unsafe extern "C" {
-            fn SecCodeCopySelf(flags: u32, code: *mut *mut c_void) -> i32;
+            fn SecCodeCopySelf(flags: u32, code: *mut *const c_void) -> i32;
             fn SecCodeCheckValidity(
                 code: *const c_void,
                 flags: u32,
@@ -30,7 +30,7 @@ pub fn verify_running_code() -> Result<()> {
         unsafe extern "C" {
             fn CFRelease(value: *const c_void);
         }
-        let mut code = std::ptr::null_mut();
+        let mut code = std::ptr::null();
         if unsafe { SecCodeCopySelf(0, &mut code) } != 0 {
             bail!("无法验证当前程序身份，请使用已签名的 mcplink 构建");
         }
@@ -53,6 +53,8 @@ mod windows;
 pub struct Vault {
     namespace: String,
     fixture: Option<PathBuf>,
+    #[cfg(target_os = "macos")]
+    helper: Option<crate::keychain_helper::Helper>,
 }
 
 /// A diagnostic/headless process may fail rather than display system consent UI.
@@ -202,6 +204,12 @@ impl Vault {
         };
         Ok(Self {
             namespace: digest(data.to_string_lossy().as_bytes())[..20].into(),
+            #[cfg(target_os = "macos")]
+            helper: if fixture.is_some() {
+                None
+            } else {
+                crate::keychain_helper::Helper::configured(data)?
+            },
             fixture,
         })
     }
@@ -216,6 +224,10 @@ impl Vault {
     }
 
     pub fn get(&self, key: &str) -> Result<Option<String>> {
+        #[cfg(target_os = "macos")]
+        if let Some(helper) = &self.helper {
+            return helper.get(key);
+        }
         if let Some(root) = &self.fixture {
             let file = root.join(digest(key.as_bytes()));
             return match fs::read_to_string(file) {
@@ -237,6 +249,11 @@ impl Vault {
     }
 
     pub fn set(&self, key: &str, value: &str) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        if let Some(helper) = &self.helper {
+            helper.request("set", key, Some(value))?;
+            return Ok(());
+        }
         if let Some(root) = &self.fixture {
             return private_write(&root.join(digest(key.as_bytes())), value.as_bytes());
         }
@@ -251,6 +268,11 @@ impl Vault {
     }
 
     pub fn delete(&self, key: &str) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        if let Some(helper) = &self.helper {
+            helper.request("delete", key, None)?;
+            return Ok(());
+        }
         if let Some(root) = &self.fixture {
             let path = root.join(digest(key.as_bytes()));
             if path.exists() {

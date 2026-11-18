@@ -147,9 +147,9 @@ async fn desktop_update(
 }
 
 fn main() {
-    if std::env::args().any(|arg| arg == "--no-auth-ui") {
-        mcplink_core::vault::disable_interaction().expect("cannot disable Keychain consent UI");
-    }
+    // Startup, polling and MCP recovery never open system password dialogs.
+    // First-time helper grants use the explicit reviewed CLI authorization flow.
+    mcplink_core::vault::disable_interaction().expect("cannot disable Keychain consent UI");
     let builder = tauri::Builder::default().setup(|app| {
         app.manage(Session::new(
             mcplink_core::runtime::data_dir()?,

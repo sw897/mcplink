@@ -33,6 +33,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--record", type=Path, required=True)
     parser.add_argument("--build", action="store_true")
+    parser.add_argument("--allow-auth-ui", action="store_true",
+                        help="Explicitly allow system Keychain dialogs during first-time migration; default launch is noninteractive")
     parser.add_argument("--app", type=Path, default=ROOT / "target/release/bundle/macos/mcplink.app")
     parser.add_argument("--target", type=Path, default=Path("/Applications/mcplink.app"))
     parser.add_argument("--cli", type=Path, default=Path.home() / ".cargo/bin/mcplink")
@@ -62,7 +64,13 @@ def main():
         subprocess.run(["codesign", "--verify", "--deep", "--strict", str(args.app)], capture_output=True, check=True)
         schema = json.loads(subprocess.check_output([str(args.cli), "schema"], text=True))["ok"]
         no_ui = any(a.get("long") == "no-auth-ui" for a in schema["command"]["arguments"])
+        assert no_ui or args.allow_auth_ui, "Old CLI lacks --no-auth-ui; review first-time authorization and explicitly select --allow-auth-ui"
         before = snapshot(args.cli, args.data_dir, no_ui)
+        if "keychain_helper" in before:
+            fixed_helper = args.data_dir / "keychain-helper/mcplink-keychain"
+            helper_audit = json.loads(subprocess.check_output([str(helper), str(fixed_helper)], text=True))["signatures"][0]
+            assert helper_audit["valid"] and helper_audit["identifier"] == "io.mcplink.keychain"
+            assert helper_audit["certificate_sha1"] == identity["signatures"][0]["certificate_sha1"], "Candidate signer differs from the fixed helper; review migration before replacing working software"
         (args.record / "before.json").write_text(json.dumps(before, ensure_ascii=False, indent=2) + "\n")
         old_cli_sha = sha(args.cli)
         # Only explicitly selected, currently verified native Bridge processes.
@@ -77,10 +85,16 @@ def main():
         subprocess.run(["ditto", str(args.app), str(stage)], check=True)
         for pid in set(args.stop_bridge):
             os.kill(pid, signal.SIGTERM); wait_exit(pid)
+        stop = [str(args.cli), "--data-dir", str(args.data_dir)]
+        if no_ui and not args.allow_auth_ui:
+            stop.append("--no-auth-ui")
+        # An old desktop lacking permission to the running backend can still
+        # quit cleanly once that backend has been stopped by the reviewed CLI.
+        subprocess.run([*stop, "gateway", "stop"], capture_output=True, check=True, timeout=35)
         for pid, path in process_rows():
             if path == str(args.target / "Contents/MacOS/mcplink-desktop"):
                 os.kill(pid, signal.SIGTERM); wait_exit(pid)
-        subprocess.run([str(args.cli), "--data-dir", str(args.data_dir), "gateway", "stop"], capture_output=True, check=True, timeout=35)
+        subprocess.run([*stop, "gateway", "stop"], capture_output=True, check=True, timeout=35)
         assert sha(args.cli) == old_cli_sha, "Installed CLI changed concurrently"
         rollback = args.record / "rollback"; rollback.mkdir()
         shutil.copy2(args.cli, rollback / "mcplink")
@@ -116,11 +130,15 @@ def main():
                       source_commit=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip())
         result["source_dirty"] = bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True))
         result.pop("previous_app", None)
-        subprocess.run(["open", "-a", str(args.target)], check=True)
+        result["keychain_ui_disabled_on_launch"] = not args.allow_auth_ui
+        launch = ["open", "-a", str(args.target)]
+        if not args.allow_auth_ui:
+            launch.extend(["--args", "--no-auth-ui"])
+        subprocess.run(launch, check=True)
     finally:
         (args.record / "installation.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
         print(json.dumps(result, ensure_ascii=False))
-    print("Reload the owning Agents' MCP connections, finish any first-time system authorization, then run verify_macos_deployment.py with before.json as the baseline.")
+    print("Reload the owning Agents' MCP connections and run verify_macos_deployment.py with before.json as the baseline. Default launch cannot show Keychain dialogs; missing grants require a separately reviewed interactive migration.")
 
 
 if __name__ == "__main__":

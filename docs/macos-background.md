@@ -11,7 +11,22 @@ python3 scripts/setup_macos_signing.py --create-local-identity
 npm run bundle -- --local-signing --bundles app
 ```
 
-身份私钥直接导入当前用户钥匙串，生成与传递只经过内存和私有管道；本机 `.local/macos-signing.json` 仅保存公开指纹。后续构建复用同一身份，不重复创建证书，不导出私钥或修改系统信任。自签名仅供本机使用，不等于 Developer ID、公证或可分发的发布者信任；正式发布仍遵守发布指南。已有配置和服务凭据保留，首次切换身份可能需要在系统窗口逐项授权；希望持续授权时需选择“始终允许”，不放开为所有应用可读。
+身份私钥直接导入当前用户钥匙串，生成与传递只经过内存和私有管道；本机 `.local/macos-signing.json` 仅保存公开指纹。后续构建复用同一身份，不重复创建证书，不导出私钥或修改系统信任。自签名仅供本机使用，不等于 Developer ID、公证或可分发的发布者信任；正式发布仍遵守发布指南。固定证书和标识使签名要求稳定，但不能单独保证跨构建的钥匙串授权：macOS 对未归入 Apple 开发者团队的签名仍使用每个构建的 cdhash 作为分区标识。因此自签名版本采用下面的独立固定助手，不把“证书相同”当作验收通过。
+
+### 独立固定凭据助手
+
+固定助手安装在原数据目录的 `keychain-helper/mcplink-keychain`；`active.json` 仅含协议版本与助手 SHA256。凭据继续留在原服务、原 namespace 的系统钥匙串中，不导出或重写现有值，不放宽现有 ACL。App 和 CLI 都委托同一个助手，经父子进程私有管道读写；双方核验签名、固定标识及相同证书，核心同时核对助手散列。普通操作始终禁止系统交互；桌面启动、巡检和 Bridge 恢复也不请求口令。
+
+先准备候选，不接入真实凭据：
+
+```sh
+python3 scripts/prepare_macos_keychain.py --record artifacts/e2e/prepared-keychain
+mcplink keychain preview --helper /absolute/path/to/prepared-keychain/mcplink-keychain
+```
+
+核对助手标识、散列、目标数据目录及逐项授权清单后，才运行 `keychain authorize --helper PATH --preview-hash HASH --confirm`。首次切换需要在系统窗口逐项选择“始终允许”；普通操作不能代替这个明确的授权步骤，`--no-auth-ui` 会拒绝执行它。清单涵盖通信密钥、当前托管定义、OAuth 和待恢复事务引用；已完成历史仍保留在钥匙串，未来需要恢复某次变更时，在预览和授权两步均显式添加 `--operation OPERATION_ID`。全部项目检查成功后才启用绑定；中断或拒绝不会删除原凭据，尚未启用时继续原来的入口。接入后重新启动 App、后台并重载 Agent MCP。
+
+助手有独立生命周期：普通 App/CLI 构建和覆盖安装不编译、不替换数据目录内的助手。准备入口优先复用已接入的原字节，否则复用本机准备缓存；助手源码或签名身份变化须显式准备 `--new-helper-candidate`，核对并单独迁移，不能当成主程序的自动附带升级。不同设备仍需独立授权。助手散列固定才能维持自签名分区；换助手后仍可能再次需要系统授权。
 
 桌面通过核心库的内存 Session 访问后台，不为每次请求或巡检创建 CLI。Bridge 的工具请求与目录观察共用自己的 Session。通信凭据按数据目录和已核验后台实例复用，实例更换后重新认证；拒绝访问或后台首次启动失败后暂停自动重试，桌面明确点击“刷新”或重新启动客户端才重试。较慢的启动稍后成功时仍能被发现。已有业务调用不会因通信失败自动重放。
 
@@ -23,11 +38,11 @@ npm run bundle -- --local-signing --bundles app
 python3 scripts/verify_macos_deployment.py --snapshot-only --record artifacts/e2e/deploy-before
 ```
 
-完成候选构建与隔离测试后，可用 `npm run deploy:macos -- --record artifacts/e2e/local-install` 构建本机签名候选并安装；已有候选可直接运行 `python3 scripts/install_macos.py --record artifacts/e2e/local-install`。入口在改动程序前完成签名与配置摘要检查，正常退出桌面和后台，原子替换 App 与固定路径 CLI，并保留旧程序回退副本；不改数据库或服务凭据。对已核对且可结束的 Bridge 可逐项传 `--stop-bridge PID`，不自动终止未知进程。
+完成候选构建与隔离测试后，可用 `npm run deploy:macos -- --record artifacts/e2e/local-install` 构建本机签名候选并安装；已有候选可直接运行 `python3 scripts/install_macos.py --record artifacts/e2e/local-install`。入口在改动程序前完成签名与配置摘要检查，正常退出桌面和后台，原子替换 App 与固定路径 CLI，并保留旧程序回退副本；不改数据库或服务凭据。对已核对且可结束的 Bridge 可逐项传 `--stop-bridge PID`，不自动终止未知进程。默认以 `--no-auth-ui` 启动 App 和它创建的后台，缺少授权即失败，避免验收自动触发一串密码请求；需要首次交互式迁移时明确传 `--allow-auth-ui`，授权后仍须冷启动无弹窗验收。旧 CLI 不支持禁止弹窗时，默认在读取凭据前停止，须明确选择交互式迁移。
 
 安装后状态明确为“仍待授权及 Agent 重载”，不将安装成功当作全部验收通过。替换文件不更新 Agent 中已运行的进程：必须使用所属 Agent 的原生 MCP 重载，例如 Hermes 的 `/reload-mcp`、Codex 的 MCP 重载；有未完成调用时先结束或核对，不自动重发。不要以修改或重建原生配置、删除凭据处理旧进程。
 
-真实授权完成后，重新启动 App，以 `--no-auth-ui` 冷启动验证已有授权，再核对实际界面、关窗常驻、暂停/恢复和后台恢复；最后运行：
+真实授权完成后，退出 App 并停止已有后台，再以 `open -a /Applications/mcplink.app --args --no-auth-ui` 冷启动验证已有授权。只给新 CLI 增加该选项，不能禁止已经运行的交互式后台弹窗；验收脚本会先核对实际 App 和后台都以该选项启动。然后核对实际界面、关窗常驻、暂停/恢复和后台恢复；最后运行：
 
 ```sh
 python3 scripts/verify_macos_deployment.py \
@@ -35,7 +50,7 @@ python3 scripts/verify_macos_deployment.py \
   --record artifacts/e2e/deploy-after
 ```
 
-脚本要求至少观察三个十秒巡检周期，使用新 CLI 进程的无弹窗检查，比较配置/绑定/聚合成员与登录偏好，检查 App/CLI/运行中进程及后台身份。它拒绝动态校验失败的旧 Bridge（例如 `-67034`），不以磁盘哈希代替运行中代码检查。真实工具调用与业务成功码另行验收；fixture Vault、成功的签名检查或一次“允许”都不证明授权持久。观察结果只覆盖实际执行范围。
+脚本要求至少观察三个十秒巡检周期，使用新 CLI 进程的无弹窗检查，比较配置/绑定/聚合成员与登录偏好，检查 App/CLI/运行中进程及后台身份。它拒绝动态校验失败的旧 Bridge（例如 `-67034`），不以磁盘哈希代替运行中代码检查。真实工具调用与业务成功码另行验收；fixture Vault、成功的签名检查或一次“允许”都不证明授权持久。同一服务名称可能对应运行通信、聚合定义和各成员的多个独立钥匙串项目；切换助手的首次逐项授权与后续两个不同主程序构建复用固定助手应分别记录。观察结果只覆盖实际执行范围。
 
 普通启动、再次打开应用或点击 Dock 图标会显示并聚焦已有主窗口。登录启动传入 `--background`，窗口从创建起隐藏，应用以 `LSUIElement` 和 Accessory 激活策略启动，只保留菜单栏图标；主动显示窗口后切换为 Regular 策略，支持 Dock 再次唤起。单实例检查防止重复创建桌面进程，后台启动已有实例时不抢占前台。
 

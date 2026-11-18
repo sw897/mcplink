@@ -2,6 +2,9 @@ import Foundation
 import Security
 import CryptoKit
 
+// Audits and isolated fixture setup must fail rather than request passwords.
+guard SecKeychainSetUserInteractionAllowed(false) == errSecSuccess else { exit(2) }
+
 func emit(_ value: Any) {
     let data = try! JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
     print(String(data: data, encoding: .utf8)!)
@@ -31,7 +34,35 @@ func signature(_ path: String) throws -> [String: Any] {
 }
 do {
     let args = Array(CommandLine.arguments.dropFirst())
-    if args == ["--import-identity"] {
+    if args.count == 2 && ["--create-fixture-keychain", "--delete-fixture-keychain"].contains(args[0]) {
+        let path = URL(fileURLWithPath: args[1])
+        guard path.lastPathComponent == "fixture.keychain-db",
+              FileManager.default.fileExists(atPath: path.deletingLastPathComponent().appendingPathComponent(".mcplink-keychain-test-fixture").path) else { throw NSError(domain: "Fixture", code: 1) }
+        if args[0] == "--create-fixture-keychain" {
+            let raw = FileHandle.standardInput.readDataToEndOfFile()
+            guard let object = try JSONSerialization.jsonObject(with: raw) as? [String: String],
+                  let password = object["password"] else { throw NSError(domain: "Fixture", code: 2) }
+            var before: CFArray?
+            try check(SecKeychainCopySearchList(&before))
+            var keychain: SecKeychain?
+            let data = Data(password.utf8)
+            try check(data.withUnsafeBytes { SecKeychainCreate(path.path, UInt32(data.count), $0.baseAddress, false, nil, &keychain) })
+            // Test creation must not change the user's lookup/default Keychain.
+            var current: CFArray?
+            try check(SecKeychainCopySearchList(&current))
+            let original = before as? [SecKeychain] ?? []
+            let filtered = (current as? [SecKeychain] ?? []).filter { entry in
+                original.contains(where: { CFEqual($0, entry) }) || !CFEqual(entry, keychain!)
+            }
+            try check(SecKeychainSetSearchList(filtered as CFArray))
+            emit(["created": true, "test_fixture_only": true])
+        } else {
+            var keychain: SecKeychain?
+            try check(SecKeychainOpen(path.path, &keychain))
+            try check(SecKeychainDelete(keychain!))
+            emit(["deleted": true, "test_fixture_only": true])
+        }
+    } else if args == ["--import-identity"] || (args.count == 3 && args[0] == "--import-identity" && args[1] == "--fixture-keychain") {
         // Only a newly generated signing identity enters this path. No existing
         // service credential or Keychain ACL is read, replaced or relaxed.
         let raw = FileHandle.standardInput.readDataToEndOfFile()
@@ -40,7 +71,14 @@ do {
               let blob = value["pkcs12"].flatMap({ Data(base64Encoded: $0) }),
               let password = value["password"] else { throw NSError(domain: "Input", code: 1) }
         var keychain: SecKeychain?
-        try check(SecKeychainCopyDefault(&keychain))
+        if args.count == 3 {
+            let path = URL(fileURLWithPath: args[2])
+            guard path.lastPathComponent == "fixture.keychain-db",
+                  FileManager.default.fileExists(atPath: path.deletingLastPathComponent().appendingPathComponent(".mcplink-keychain-test-fixture").path) else { throw NSError(domain: "Fixture", code: 3) }
+            try check(SecKeychainOpen(path.path, &keychain))
+        } else {
+            try check(SecKeychainCopyDefault(&keychain))
+        }
         var codesign: SecTrustedApplication?
         try check(SecTrustedApplicationCreateFromPath("/usr/bin/codesign", &codesign))
         var access: SecAccess?

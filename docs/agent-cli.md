@@ -53,7 +53,9 @@ Cargo 默认将程序放入 `~/.cargo/bin`，该目录需在 PATH 中。也可�
 
 可用全局 `--data-dir /absolute/path` 或 `MCPLINK_DATA_DIR` 指定管理数据。`CODEX_HOME`、`HERMES_HOME` 决定默认原生配置来源；自定义项目/profile 用 `sources add` 显式添加。`MCPLINK_HOME`、`MCPLINK_VAULT=fixture` 是隔离验收环境约定，不应在真实账号环境启用 fixture Vault。
 
-macOS 可用全局 `--no-auth-ui` 禁止本进程显示钥匙串授权弹窗，未获授权时直接失败；按需启动的后台也沿用该限制。它不授予访问权限、不修改钥匙串或保存密钥。适合已有授权后的无交互验收，例如 `mcplink --no-auth-ui status`。首次授权仍须在可信系统界面完成。桌面支持同名启动参数供冷启动验收使用；日常启动不必添加。
+macOS 可用全局 `--no-auth-ui` 禁止本进程显示钥匙串授权弹窗，未获授权时直接失败；按需启动的后台也沿用该限制。桌面、Bridge 和 daemon 默认禁止交互，避免巡检或恢复自动弹出口令框。固定助手的普通读写同样始终禁止交互。它不授予访问权限、不放宽钥匙串 ACL 或保存密钥。已有授权后的无交互验收可用 `mcplink --no-auth-ui status`。
+
+自签名版本跨构建保持授权，须按[固定凭据助手流程](macos-background.md#独立固定凭据助手)接入独立助手。`keychain preview --helper PATH` 不读取凭据值；核对输出的逐项清单和 `previewHash` 后，显式 `keychain authorize --helper PATH --preview-hash HASH --confirm` 才请求系统授权并启用助手。不要为解决口令弹窗而反复重建、覆盖助手或扩大应用访问权限。
 
 桌面与长驻 Bridge 复用各自内存中的后台认证连接，后端实例变化时重新认证；独立 CLI 每次启动仍需取得通信凭据。拒绝访问会在该会话中保留；后台首次启动失败后也暂停自动拉起，用户明确点击“刷新”才重试。若先前启动稍后成功，仍会发现已就绪后台。业务请求发生通信错误时不自动重放。
 

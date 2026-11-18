@@ -11,6 +11,8 @@ pub mod generated;
 pub mod http_api;
 pub mod invocation;
 mod json_config;
+#[cfg(target_os = "macos")]
+pub mod keychain_helper;
 mod lifecycle;
 pub mod mcp;
 pub mod model;

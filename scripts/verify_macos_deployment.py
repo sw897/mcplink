@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import shlex
 import subprocess
 import sys
 import time
@@ -33,13 +34,38 @@ def snapshot(cli, data, no_ui):
         value = plistlib.loads(path.read_bytes())
         if "mcplink" in path.name.lower() or any("mcplink" in str(v).lower() for v in value.get("ProgramArguments", [])):
             login[str(path)] = sha(path)
-    return {
+    result = {
         "source_files": {s["path"]: sha(Path(s["path"])) for s in status["sources"]},
         "bindings": sorted([{"sourceId": b.get("sourceId"), **{f: b.get(f) for f in fields}} for b in status["bindings"]], key=lambda b: json.dumps(b, sort_keys=True)),
         "connections": sorted([{"id": c["id"], "transport": c["transport"]} for c in status["connections"] if not c.get("detected")], key=lambda c: c["id"]),
         "gateways": sorted([{"id": g["id"], "members": g["members"], "editVersion": g["editVersion"]} for g in gateways], key=lambda g: g["id"]),
         "paused": status["gateway"]["paused"], "login_items": login,
     }
+    binding = data / "keychain-helper/active.json"
+    if binding.exists():
+        helper = binding.with_name("mcplink-keychain")
+        value = json.loads(binding.read_text())
+        assert value["version"] == 1 and sha(helper) == value["sha256"], "Fixed credential helper or binding changed"
+        result["keychain_helper"] = {"binding_sha256": sha(binding), "helper_sha256": sha(helper)}
+    return result
+
+
+def require_quiet_processes(app, cli, data):
+    desktop = str(app / "Contents/MacOS/mcplink-desktop")
+    output = subprocess.check_output(["ps", "-ww", "-axo", "pid=,comm="], text=True)
+    desktop_pids = [int(p[0]) for line in output.splitlines()
+                    if len(p := line.strip().split(None, 1)) == 2 and p[1] == desktop]
+    assert desktop_pids, "Cold-start the installed App with --no-auth-ui before verification"
+    runtime_file = data / "runtime.json"
+    assert runtime_file.is_file(), "Start the quiet App/backend before verification"
+    runtime = json.loads(runtime_file.read_text())
+    daemon = runtime["pid"]
+    for pid in [*desktop_pids, daemon]:
+        argv = shlex.split(subprocess.check_output(["ps", "-ww", "-p", str(pid), "-o", "args="], text=True))
+        expected = [desktop] if pid in desktop_pids else [str(cli), str(app / "Contents/MacOS/mcplink")]
+        assert argv and argv[0] in expected, "Unexpected App/backend executable"
+        options = argv[1:] if pid in desktop_pids else argv[1:argv.index("daemon")]
+        assert "--no-auth-ui" in options, "App AND existing backend must be cold-started with --no-auth-ui; a quiet client cannot silence an interactive backend"
 
 
 def main():
@@ -61,6 +87,7 @@ def main():
         if not args.snapshot_only:
             assert no_ui, "CLI lacks the noninteractive Keychain check"
             assert args.observe_seconds >= 30, "Observe at least three desktop polling intervals"
+            require_quiet_processes(args.app, args.cli, args.data_dir)
         before = snapshot(args.cli, args.data_dir, no_ui)
         (args.record / "snapshot.json").write_text(json.dumps(before, ensure_ascii=False, indent=2) + "\n")
         if args.snapshot_only:
@@ -75,10 +102,15 @@ def main():
         app_cli = args.app / "Contents/MacOS/mcplink"
         desktop = args.app / "Contents/MacOS/mcplink-desktop"
         assert sha(args.cli) == sha(app_cli), "Installed standalone CLI and App CLI differ"
-        audit = json.loads(subprocess.check_output([str(helper), str(args.cli), str(app_cli), str(desktop)], text=True))
+        identity_paths = [args.cli, app_cli, desktop]
+        if "keychain_helper" in before:
+            identity_paths.append(args.data_dir / "keychain-helper/mcplink-keychain")
+        audit = json.loads(subprocess.check_output([str(helper), *map(str, identity_paths)], text=True))
         signatures = {s["path"]: s for s in audit["signatures"]}
         for path in (args.cli, app_cli):
             assert signatures[str(path.resolve())]["identifier"] == "io.mcplink.cli", "Unstable CLI signing identifier"
+        if "keychain_helper" in before:
+            assert signatures[str(identity_paths[-1].resolve())]["identifier"] == "io.mcplink.keychain", "Invalid fixed helper identifier"
         assert all(s["valid"] for s in signatures.values()), "Invalid installed signature"
         assert all(p["valid"] for p in audit["processes"]), "A running Bridge/App/daemon still uses replaced code; reload the owning Agent MCP connection"
         assert any(p["path"] == str(desktop) for p in audit["processes"]), "Installed desktop is not running"
@@ -89,6 +121,7 @@ def main():
         (args.record / "identity-audit.json").write_text(json.dumps(audit, ensure_ascii=False, indent=2) + "\n")
         checks = 0; deadline = time.monotonic() + args.observe_seconds
         while True:
+            require_quiet_processes(args.app, args.cli, args.data_dir)
             assert snapshot(args.cli, args.data_dir, True) == before, "Deployment observation changed existing configuration"
             checks += 1
             (args.record / "observation.json").write_text(json.dumps({"noninteractive_checks": checks, "complete": time.monotonic() >= deadline}) + "\n")
@@ -103,6 +136,7 @@ def main():
         executable = subprocess.check_output(["ps", "-o", "comm=", "-p", str(runtime["pid"])], text=True).strip()
         assert executable in (str(args.cli), str(app_cli)) and sha(Path(executable)) == sha(args.cli)
         report.update(conclusion="PASS", keychain_ui_disabled=True, noninteractive_checks=checks,
+                      keychain_ui_disabled_in_app_and_backend=True,
                       observation_seconds=args.observe_seconds, all_running_code_valid=True,
                       same_signing_certificate=True, stable_cli_identifier=True, configurations_preserved=True,
                       managementApi=health["managementApi"], raw_business_response_saved=False)

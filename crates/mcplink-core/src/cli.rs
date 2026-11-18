@@ -37,6 +37,11 @@ struct Args {
 enum Command {
     /// 离线输出命令、参数和标准输入契约，不连接后台
     Schema,
+    /// macOS 固定钥匙串助手；预览离线，授权须核对清单后明确确认
+    Keychain {
+        #[command(subcommand)]
+        command: KeychainCommand,
+    },
     /// 离线将 OpenAPI/Swagger 文档转换为待审阅的 HTTP API 配置
     HttpApi {
         #[command(subcommand)]
@@ -111,6 +116,28 @@ enum Command {
     Bridge {
         #[arg(long)]
         connection: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum KeychainCommand {
+    Preview {
+        #[arg(long)]
+        helper: PathBuf,
+        /// 额外授权明确指定的历史配置恢复项目
+        #[arg(long)]
+        operation: Vec<String>,
+    },
+    /// 首次安装固定助手并逐项请求系统授权，全部成功后启用；不改写凭据
+    Authorize {
+        #[arg(long)]
+        helper: PathBuf,
+        #[arg(long)]
+        preview_hash: String,
+        #[arg(long, required = true)]
+        confirm: bool,
+        #[arg(long)]
+        operation: Vec<String>,
     },
 }
 
@@ -485,6 +512,33 @@ impl Failure {
 async fn execute(command: Command, data: PathBuf) -> Result<Value, Failure> {
     let (method, params, projection, check) = match command {
         Command::Schema => return Ok(schema()),
+        Command::Keychain { command } => {
+            #[cfg(target_os = "macos")]
+            return match command {
+                KeychainCommand::Preview { helper, operation } => {
+                    mcplink_core::keychain_helper::preview(&data, &helper, &operation)
+                }
+                KeychainCommand::Authorize {
+                    helper,
+                    preview_hash,
+                    confirm: _,
+                    operation,
+                } => mcplink_core::keychain_helper::authorize(
+                    &data,
+                    &helper,
+                    &preview_hash,
+                    &operation,
+                ),
+            }
+            .map_err(Failure::operation);
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = command;
+                return Err(Failure::operation(anyhow::anyhow!(
+                    "固定钥匙串助手仅支持 macOS"
+                )));
+            }
+        }
         Command::HttpApi {
             command:
                 HttpApiCommand::Import {
@@ -898,7 +952,11 @@ pub async fn run() -> i32 {
             return 2;
         }
     };
-    if args.no_auth_ui
+    if (args.no_auth_ui
+        || matches!(
+            args.command,
+            Command::Bridge { .. } | Command::Daemon { .. }
+        ))
         && let Err(error) = mcplink_core::vault::disable_interaction()
     {
         println!(
