@@ -21,8 +21,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--record", type=Path, required=True)
     parser.add_argument("--binary", type=Path, default=ROOT / "target/debug/mcplink")
+    parser.add_argument("--github-hosted-fixture-trust", action="store_true",
+                        help="Allow temporary code-signing trust for the generated fixture certificate on a disposable GitHub-hosted runner only")
     args = parser.parse_args()
     assert sys.platform == "darwin"
+    if args.github_hosted_fixture_trust:
+        assert os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted", "Fixture trust is restricted to disposable GitHub-hosted runners; local tests never change certificate trust"
     os.umask(0o077)
     record = args.record.resolve(); record.mkdir(parents=True, exist_ok=False)
     data = record / "data"; data.mkdir()
@@ -35,6 +39,9 @@ def main():
     report = {"conclusion": "FAIL", "existing_credentials_touched": False, "keychain_ui_allowed": False}
     created = False
     fixture_search_added = False
+    hosted_trust_cleanup = False
+    fixture_certificate = record / "fixture-certificate.pem"
+    fingerprint = None
     try:
         run([str(audit), "--create-fixture-keychain", str(keychain)], json.dumps({"password": password}).encode())
         created = True
@@ -72,6 +79,15 @@ def main():
             original_search = shlex.split(run(["security", "list-keychains", "-d", "user"]).decode())
             run(["security", "list-keychains", "-d", "user", "-s", *original_search, str(keychain)])
             fixture_search_added = True
+        if args.github_hosted_fixture_trust:
+            # Make the generated test identity eligible for code signing on a
+            # clean hosted image. Trust only its public certificate for this
+            # policy inside the disposable VM. Never use a user's identity or
+            # run this branch during local setup/deployment.
+            fixture_certificate.write_bytes(cert)
+            hosted_trust_cleanup = True
+            run(["sudo", "-n", "/usr/bin/security", "add-trusted-cert", "-d", "-r", "trustRoot", "-p", "codeSign",
+                 "-k", "/Library/Keychains/System.keychain", str(fixture_certificate)])
         identities = run(["security", "find-identity", "-p", "codesigning", str(keychain)]).decode()
         print(json.dumps({"fixture_signing_identity_present": fingerprint.lower() in identities.lower()}))
         print(json.dumps({"isolated_fixture_identity_policy": identities.strip()}))
@@ -190,14 +206,23 @@ def main():
         report.update(error_class=type(error).__name__, passed=passed)
         raise
     finally:
+        if hosted_trust_cleanup:
+            removed = subprocess.run(["sudo", "-n", "/usr/bin/security", "remove-trusted-cert", "-d", str(fixture_certificate)], capture_output=True)
+            deleted = subprocess.run(["sudo", "-n", "/usr/bin/security", "delete-certificate", "-Z", fingerprint,
+                                      "/Library/Keychains/System.keychain"], capture_output=True)
+            report["hosted_fixture_trust_removed"] = removed.returncode == deleted.returncode == 0
         if fixture_search_added:
             current = shlex.split(run(["security", "list-keychains", "-d", "user"]).decode())
             run(["security", "list-keychains", "-d", "user", "-s", *[p for p in current if p != str(keychain)]])
         if created:
             run([str(audit), "--delete-fixture-keychain", str(keychain)])
+        if hosted_trust_cleanup and not report.get("hosted_fixture_trust_removed"):
+            report.update(conclusion="FAIL", error="hosted_fixture_trust_cleanup_failed")
         report["temporary_keychain_removed"] = not keychain.exists()
         (record / "report.json").write_text(json.dumps(report, indent=2) + "\n")
         print(json.dumps(report))
+        if report["conclusion"] != "PASS":
+            raise RuntimeError("Isolated Keychain acceptance did not pass or cleanup failed")
 
 
 if __name__ == "__main__":
