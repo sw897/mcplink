@@ -24,7 +24,7 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) {
 }
 
 const root = process.cwd();
-const dist = resolve(root, "dist");
+const dist = resolve(root, dev ? ".local/frontend" : "dist");
 const entry = resolve(root, "src/main.tsx");
 const template = resolve(root, "index.html");
 const entryTag = '<script type="module" src="/src/main.tsx"></script>';

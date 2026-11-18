@@ -145,6 +145,14 @@ def main():
             assert "<title>template changed</title>" in response.read().decode()
         result["checks"].append("an HTML-only change also emits reload and updates the served document")
 
+        assert (fixture / "dist/index.html").read_text() == html
+        subprocess.run(["node", str(BUILDER)], cwd=fixture, stdout=log, stderr=subprocess.STDOUT, check=True, timeout=30)
+        with HTTP.open(origin + js_url, timeout=3) as response:
+            assert 'EventSource("/esbuild")' in response.read().decode()
+        with HTTP.open(origin + "/", timeout=3) as response:
+            assert "<title>template changed</title>" in response.read().decode()
+        result["checks"].append("development output is independent of production builds in the same workspace")
+
         occupied = record / "occupied-fixture"
         shutil.copytree(fixture / "src", occupied / "src")
         shutil.copy2(fixture / "index.html", occupied / "index.html")
