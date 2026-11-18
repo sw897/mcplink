@@ -162,7 +162,7 @@ async fn gateway(app: &AppHandle, method: &str) -> Result<Value, String> {
     let timeout = if method == "gateway.stop" { 50 } else { 20 };
     let response = tokio::time::timeout(
         std::time::Duration::from_secs(timeout),
-        crate::rpc(app.clone(), method.into(), json!({})),
+        crate::rpc(app.clone(), method.into(), json!({}), None),
     )
     .await
     .map_err(|_| "连接共享后台超时".to_string())??;

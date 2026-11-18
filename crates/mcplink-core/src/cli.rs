@@ -26,6 +26,9 @@ struct Args {
     /// 管理数据目录；默认使用 MCPLINK_DATA_DIR 或系统应用目录
     #[arg(long, global = true)]
     data_dir: Option<PathBuf>,
+    /// macOS：禁止本进程显示钥匙串授权弹窗；未获许可时直接失败
+    #[arg(long, global = true)]
+    no_auth_ui: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -895,6 +898,15 @@ pub async fn run() -> i32 {
             return 2;
         }
     };
+    if args.no_auth_ui
+        && let Err(error) = mcplink_core::vault::disable_interaction()
+    {
+        println!(
+            "{}",
+            json!({"error":{"code":"operation_failed","message":error.to_string()}})
+        );
+        return 1;
+    }
     // Offline discovery and Skill installation must work without Keychain or a daemon.
     let data = match args.data_dir.map(Ok).unwrap_or_else(runtime::data_dir) {
         Ok(path) => path,

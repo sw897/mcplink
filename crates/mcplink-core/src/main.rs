@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use mcplink_core::runtime::Client;
+use mcplink_core::runtime::Session;
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler, ServiceExt, model::*, service::RequestContext,
 };
@@ -10,7 +10,7 @@ mod cli;
 
 #[derive(Clone)]
 struct Bridge {
-    client: Client,
+    client: Session,
     id: String,
     info: ServerConfig,
 }
@@ -29,10 +29,8 @@ impl Bridge {
             params["_meta"] = serde_json::to_value(meta)
                 .map_err(|_| McpError::internal_error("无法编码 MCP 请求元数据", None))?;
         }
-        let client = Client::connect(self.client.data.clone())
-            .await
-            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
-        let value = client
+        let value = self
+            .client
             .call(
                 "mcp.request",
                 json!({"id":self.id,"request":{"method":method,"params":params}}),
@@ -123,7 +121,7 @@ async fn main() {
 }
 
 async fn bridge(data: PathBuf, connection: String) -> Result<()> {
-    let client = Client::connect(data).await?;
+    let client = Session::new(data, std::env::current_exe()?);
     let raw = client
         .call("mcp.describe", json!({"id":connection}))
         .await?;
@@ -152,23 +150,17 @@ async fn bridge(data: PathBuf, connection: String) -> Result<()> {
         .context("MCP 客户端初始化未完成")?;
     let peer = service.peer().clone();
     let watcher = tokio::spawn(async move {
-        let mut client = client;
+        let client = client;
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            let current = match client.refresh_running().await {
-                Ok(running) => {
-                    client = running;
-                    tokio::time::timeout(
-                        std::time::Duration::from_secs(3),
-                        client.call("mcp.catalog", json!({"id":connection})),
-                    )
-                    .await
-                    .ok()
-                    .and_then(Result::ok)
-                    .unwrap_or(json!(null))
-                }
-                Err(_) => json!(null),
-            };
+            let current = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                client.call_running("mcp.catalog", json!({"id":connection})),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or(json!(null));
             if current != version {
                 if info.capabilities.tools.is_some()
                     && current["tools"] != version["tools"]

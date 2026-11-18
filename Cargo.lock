@@ -2772,6 +2772,7 @@ version = "0.3.2"
 dependencies = [
  "base64 0.22.1",
  "directories",
+ "mcplink-core",
  "minisign-verify",
  "opener",
  "reqwest",

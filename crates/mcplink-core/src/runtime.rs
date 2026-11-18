@@ -22,7 +22,7 @@ use std::{
 };
 use tokio::net::TcpListener;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeInfo {
     pub port: u16,
     pub instance: String,
@@ -201,6 +201,82 @@ pub struct Client {
     management_api: u64,
 }
 
+struct Running {
+    info: RuntimeInfo,
+    http: reqwest::Client,
+    management_api: u64,
+}
+
+#[derive(Default)]
+struct SessionState {
+    client: Option<Client>,
+    denied: Option<(RuntimeInfo, String)>,
+}
+
+/// One process-local authentication session; secrets never leave memory.
+#[derive(Clone)]
+pub struct Session {
+    data: PathBuf,
+    executable: PathBuf,
+    state: Arc<tokio::sync::Mutex<SessionState>>,
+}
+
+impl Session {
+    pub fn new(data: PathBuf, executable: PathBuf) -> Self {
+        Self {
+            data,
+            executable,
+            state: Arc::new(tokio::sync::Mutex::new(SessionState::default())),
+        }
+    }
+
+    /// Only an explicit foreground retry should clear an access denial.
+    pub async fn retry_authentication(&self) {
+        self.state.lock().await.denied = None;
+    }
+
+    async fn client(&self, start: bool) -> Result<Client> {
+        let mut state = self.state.lock().await;
+        let running = if start {
+            Client::running_or_start(&self.data, &self.executable, state.client.as_ref()).await?
+        } else {
+            Client::running(&self.data, state.client.as_ref()).await?
+        };
+        if let Some((info, message)) = &state.denied
+            && *info == running.info
+        {
+            bail!("{message}；请在前台明确重试授权，或重新启动客户端");
+        }
+        let info = running.info.clone();
+        match Client::authenticate(&self.data, running, state.client.as_ref()) {
+            Ok(client) => {
+                state.client = Some(client.clone());
+                state.denied = None;
+                Ok(client)
+            }
+            Err(error) => {
+                state.denied = Some((info, error.to_string()));
+                Err(error)
+            }
+        }
+    }
+
+    pub async fn call(&self, method: &str, params: Value) -> Result<Value> {
+        if method == "gateway.stop" {
+            let cached = self.state.lock().await.client.clone();
+            let result = Client::stop_cached(&self.data, cached.as_ref()).await;
+            self.state.lock().await.client = None;
+            return result;
+        }
+        // Never replay an accepted request when its response is lost.
+        self.client(true).await?.call(method, params).await
+    }
+
+    pub async fn call_running(&self, method: &str, params: Value) -> Result<Value> {
+        self.client(false).await?.call(method, params).await
+    }
+}
+
 #[cfg(windows)]
 fn spawn_background(executable: &Path, data: &Path) -> Result<()> {
     use std::{ffi::OsStr, os::windows::ffi::OsStrExt, ptr};
@@ -240,6 +316,9 @@ fn spawn_background(executable: &Path, data: &Path) -> Result<()> {
         .chain(Some(0))
         .collect();
     let mut command = quoted(executable.as_os_str())?;
+    if crate::vault::interaction_disabled() {
+        command.extend(" --no-auth-ui".encode_utf16());
+    }
     command.extend(" daemon --data-dir ".encode_utf16());
     command.extend(quoted(data.as_os_str())?);
     command.push(0);
@@ -282,6 +361,10 @@ fn spawn_background(executable: &Path, data: &Path) -> Result<()> {
 
 impl Client {
     pub async fn stop_existing(data: &Path) -> Result<Value> {
+        Self::stop_cached(data, None).await
+    }
+
+    async fn stop_cached(data: &Path, cached: Option<&Client>) -> Result<Value> {
         let path = data.join("runtime.lock");
         if !path.exists() {
             return Ok(json!({"stopped":true,"wasRunning":false}));
@@ -293,7 +376,7 @@ impl Client {
             Err(error) => return Err(error.into()),
         }
         // Never call connect here: quitting an absent daemon must not start one.
-        let client = Self::read(data).await?;
+        let client = Self::authenticate(data, Self::running(data, cached).await?, cached)?;
         if client.management_api < 11 {
             bail!("旧后台不支持退出清理，请使用同一构建的桌面与后台");
         }
@@ -316,15 +399,19 @@ impl Client {
         }).await.context("后台退出清理超时，请检查现有调用后重试")?
     }
 
-    async fn read(data: &Path) -> Result<Self> {
+    async fn running(data: &Path, cached: Option<&Client>) -> Result<Running> {
         let info: RuntimeInfo =
             serde_json::from_slice(&fs::read(data.join("runtime.json")).context("后台尚未启动")?)
                 .context("后台状态文件无法读取")?;
-        let http = reqwest::Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(650))
-            .build()?;
+        let http = if let Some(client) = cached {
+            client.http.clone()
+        } else {
+            reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(Duration::from_secs(650))
+                .build()?
+        };
         let response = http
             .get(format!("http://127.0.0.1:{}/health", info.port))
             .timeout(Duration::from_secs(1))
@@ -335,15 +422,33 @@ impl Client {
         if status["application"] != "mcplink" || status["instance"] != info.instance {
             bail!("本地端口身份校验未通过");
         }
+        Ok(Running {
+            info,
+            http,
+            management_api: status["managementApi"].as_u64().unwrap_or(1),
+        })
+    }
+
+    fn authenticate(data: &Path, running: Running, cached: Option<&Client>) -> Result<Self> {
+        if let Some(client) = cached
+            && client.data == data
+            && client.info == running.info
+        {
+            return Ok(Self {
+                http: running.http,
+                management_api: running.management_api,
+                ..client.clone()
+            });
+        }
         let key = Vault::new(data)?
             .get("runtime-key")?
             .context("无法取得本地通信凭据")?;
         Ok(Self {
             data: data.to_owned(),
-            info,
+            info: running.info,
             key,
-            http,
-            management_api: status["managementApi"].as_u64().unwrap_or(1),
+            http: running.http,
+            management_api: running.management_api,
         })
     }
 
@@ -356,22 +461,38 @@ impl Client {
         if info.instance == self.info.instance && info.port == self.info.port {
             return Ok(self.clone());
         }
-        Self::read(&self.data).await
+        Self::authenticate(
+            &self.data,
+            Self::running(&self.data, Some(self)).await?,
+            Some(self),
+        )
     }
 
     pub async fn connect(data: PathBuf) -> Result<Self> {
-        if let Ok(client) = Self::read(&data).await {
-            return Ok(client);
-        }
         let executable = std::env::current_exe().context("无法定位后台程序")?;
+        let running = Self::running_or_start(&data, &executable, None).await?;
+        Self::authenticate(&data, running, None)
+    }
+
+    async fn running_or_start(
+        data: &Path,
+        executable: &Path,
+        cached: Option<&Client>,
+    ) -> Result<Running> {
+        if let Ok(running) = Self::running(data, cached).await {
+            return Ok(running);
+        }
         #[cfg(windows)]
-        spawn_background(&executable, &data)?;
+        spawn_background(executable, data)?;
         #[cfg(not(windows))]
         {
             let mut command = tokio::process::Command::new(executable);
+            if crate::vault::interaction_disabled() {
+                command.arg("--no-auth-ui");
+            }
             command
                 .args(["daemon", "--data-dir"])
-                .arg(&data)
+                .arg(data)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
@@ -382,8 +503,8 @@ impl Client {
         }
         for _ in 0..80 {
             tokio::time::sleep(Duration::from_millis(150)).await;
-            if let Ok(client) = Self::read(&data).await {
-                return Ok(client);
+            if let Ok(running) = Self::running(data, cached).await {
+                return Ok(running);
             }
         }
         bail!("后台未能启动，请检查系统凭据库与本地端口，或运行 mcplink daemon 查看原因")

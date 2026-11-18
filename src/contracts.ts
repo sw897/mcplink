@@ -262,10 +262,14 @@ export const time = (value?: number) =>
       })
     : "尚未检查";
 
-export async function rpc<T>(method: string, params: Json = {}): Promise<T> {
+export async function rpc<T>(
+  method: string,
+  params: Json = {},
+  retryAuth = false,
+): Promise<T> {
   const response = await invoke<{ ok?: T; error?: { message: string } }>(
     "rpc",
-    { method, params },
+    { method, params, retryAuth },
   ).catch((error: unknown) => {
     throw error instanceof Error ? error : new Error(String(error));
   });

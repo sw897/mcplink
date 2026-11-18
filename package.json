@@ -12,6 +12,7 @@
     "check": "node scripts/prepare-sidecar.mjs --debug && cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings",
     "desktop": "node scripts/prepare-sidecar.mjs --debug && tauri dev",
     "bundle": "node scripts/bundle.mjs",
+    "deploy:macos": "python3 scripts/install_macos.py --build",
     "release:macos": "node scripts/release-macos.mjs",
     "tauri": "tauri",
     "release:windows": "node scripts/release-windows.mjs"

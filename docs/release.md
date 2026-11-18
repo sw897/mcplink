@@ -19,6 +19,8 @@ npm run release:macos
 
 包校验只在临时副本中去签名、按相同参数重签，再比较 Mach-O 内容，避免签名区域尺寸造成误报，并拒绝旧 sidecar。原始安装包保持签名不变。隔离环境使用合成原生配置和显式 fixture Vault，不能替代新 macOS 账号或真实钥匙串验收。
 
+macOS CLI 内嵌固定 `CFBundleIdentifier=io.mcplink.cli`，避免 Tauri 重新签名时由文件名/Mach-O UUID 生成不同标识。独立 CLI 与 sidecar 使用同一显式签名身份；包验收再次检查最终标识。本机长期自签名构建和真实钥匙串持久授权验收见[macOS 后台](macos-background.md)，该身份不用于公开预览或 Developer ID 发布入口。
+
 `bundle` 为 Rust 编译设置路径映射；Windows MSVC 构建还通过 `_CL_` 裁剪原生依赖 `__FILE__` 中的用户目录，并保留已有编译选项。裁剪选项参考 [Windows App SDK 构建设置](https://github.com/microsoft/WindowsAppSDK/blob/main/Directory.Build.props)。包验收检查可执行文件是否仍残留当前构建机的用户目录或工作区路径。开发目录回退仅在 debug 构建中编译。
 
 ZIP/tar 使用规范化的归档元数据，不保留构建者的用户名、UID/GID 或扩展属性。CLI 归档同时包含 MIT 和第三方许可声明；生成后通过原生解包、签名校验和离线 CLI 调用验收。

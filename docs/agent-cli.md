@@ -53,6 +53,10 @@ Cargo 默认将程序放入 `~/.cargo/bin`，该目录需在 PATH 中。也可�
 
 可用全局 `--data-dir /absolute/path` 或 `MCPLINK_DATA_DIR` 指定管理数据。`CODEX_HOME`、`HERMES_HOME` 决定默认原生配置来源；自定义项目/profile 用 `sources add` 显式添加。`MCPLINK_HOME`、`MCPLINK_VAULT=fixture` 是隔离验收环境约定，不应在真实账号环境启用 fixture Vault。
 
+macOS 可用全局 `--no-auth-ui` 禁止本进程显示钥匙串授权弹窗，未获授权时直接失败；按需启动的后台也沿用该限制。它不授予访问权限、不修改钥匙串或保存密钥。适合已有授权后的无交互验收，例如 `mcplink --no-auth-ui status`。首次授权仍须在可信系统界面完成。桌面支持同名启动参数供冷启动验收使用；日常启动不必添加。
+
+桌面与长驻 Bridge 复用各自内存中的后台认证连接，后端实例变化时重新认证；独立 CLI 每次启动仍需取得通信凭据。拒绝访问会在该会话中保留，桌面的自动巡检、窗口聚焦和被动刷新不会反复申请；用户明确点击“刷新”才重试授权。业务请求发生通信错误时不自动重放。
+
 ## 命令
 
 | 命令 | 用途 |

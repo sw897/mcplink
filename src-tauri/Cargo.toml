@@ -9,6 +9,7 @@ serde_json = "1"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+mcplink-core = { path = "../crates/mcplink-core" }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 serde_json = "1"

@@ -87,11 +87,11 @@ function App() {
   const loadSequence = useRef(0);
   const [tools, setTools] = useState<Record<string, Tool[]>>({});
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (retryAuth = false) => {
     const sequence = ++loadSequence.current;
     setRefreshing(true);
     try {
-      const next = await rpc<Snapshot>("snapshot");
+      const next = await rpc<Snapshot>("snapshot", {}, retryAuth);
       if (sequence !== loadSequence.current) return;
       if (
         !Array.isArray(next.agents) ||
@@ -602,7 +602,7 @@ function App() {
               className="button"
               disabled={!!busy || refreshing}
               aria-busy={refreshing}
-              onClick={() => void load()}
+              onClick={() => void load(true)}
               aria-label="刷新本机配置"
             >
               <RefreshCw size={15} className={refreshing ? "spin" : ""} />

@@ -5,6 +5,47 @@ use std::{
     path::{Path, PathBuf},
 };
 
+static INTERACTION_DISABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn interaction_disabled() -> bool {
+    INTERACTION_DISABLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Refuse Keychain access from a process whose executable was replaced in place.
+pub fn verify_running_code() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::ffi::c_void;
+        #[link(name = "Security", kind = "framework")]
+        unsafe extern "C" {
+            fn SecCodeCopySelf(flags: u32, code: *mut *mut c_void) -> i32;
+            fn SecCodeCheckValidity(
+                code: *const c_void,
+                flags: u32,
+                requirement: *const c_void,
+            ) -> i32;
+        }
+        #[link(name = "CoreFoundation", kind = "framework")]
+        unsafe extern "C" {
+            fn CFRelease(value: *const c_void);
+        }
+        let mut code = std::ptr::null_mut();
+        if unsafe { SecCodeCopySelf(0, &mut code) } != 0 {
+            bail!("无法验证当前程序身份，请使用已签名的 mcplink 构建");
+        }
+        let status = unsafe { SecCodeCheckValidity(code, 0, std::ptr::null()) };
+        unsafe { CFRelease(code) };
+        if status == -67034 {
+            bail!("mcplink 程序已更新；请重新启动当前客户端或重载 MCP 连接后再访问凭据");
+        }
+        if status != 0 {
+            bail!("当前程序签名校验失败，请使用已签名的 mcplink 构建");
+        }
+    }
+    Ok(())
+}
+
 #[cfg(any(windows, test))]
 mod windows;
 
@@ -12,6 +53,23 @@ mod windows;
 pub struct Vault {
     namespace: String,
     fixture: Option<PathBuf>,
+}
+
+/// A diagnostic/headless process may fail rather than display system consent UI.
+/// This never changes an item's permissions or authorizes access.
+pub fn disable_interaction() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        #[link(name = "Security", kind = "framework")]
+        unsafe extern "C" {
+            fn SecKeychainSetUserInteractionAllowed(allowed: u8) -> i32;
+        }
+        if unsafe { SecKeychainSetUserInteractionAllowed(0) } != 0 {
+            bail!("无法关闭本进程的钥匙串授权弹窗");
+        }
+    }
+    INTERACTION_DISABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+    Ok(())
 }
 
 pub fn private_dir(path: &Path) -> Result<()> {
@@ -149,6 +207,7 @@ impl Vault {
     }
 
     fn entry(&self, key: &str) -> Result<keyring::Entry> {
+        verify_running_code()?;
         keyring::Entry::new(
             "io.mcplink.credentials",
             &format!("{}/{}", self.namespace, key),

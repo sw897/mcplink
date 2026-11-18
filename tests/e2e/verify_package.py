@@ -80,6 +80,9 @@ def main():
             report["binaries"][name] = {"sha256": sha(path), "architectures": architectures}
         report["build_machine_paths_absent"] = True
         cli = installed / "Contents/MacOS/mcplink"
+        cli_signature = run(["codesign", "-d", "--verbose=2", "-r-", str(cli)], args.record, "cli-signing-identity")
+        assert "Identifier=io.mcplink.cli\n" in cli_signature, "CLI signing identifier must survive rebuilding and bundling"
+        report["cli_signing_identifier"] = "io.mcplink.cli"
         schema = json.loads(subprocess.check_output([str(cli), "schema"], text=True))["ok"]
         assert schema["version"] == version and schema["schemaVersion"] == 1, "CLI schema/version differs"
         skill = json.loads(subprocess.check_output([str(cli), "skill", "show"], text=True))["ok"]["content"]
@@ -95,6 +98,7 @@ def main():
         signature = run(["codesign", "-d", "--verbose=4", str(installed)], args.record, "codesign-details")
         report["developer_id_signed"] = "Authority=Developer ID Application:" in signature
         report["local_ad_hoc_signature_valid"] = "Signature=adhoc" in signature
+        report["certificate_signed"] = "Authority=" in signature
         report["notarized"] = False
         if args.require_notarization:
             assert report["developer_id_signed"], "Developer ID signature is required"

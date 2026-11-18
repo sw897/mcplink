@@ -179,6 +179,7 @@ npm run desktop
 | --- | --- |
 | `npm run build` | 检查类型并构建前端。 |
 | `npm run check` | 检查 Rust 格式并运行静态分析。 |
+| `npm run deploy:macos -- --record artifacts/e2e/local-install` | 以本机长期签名身份构建并安装，保留配置与凭据；Agent 重载与授权持久性须继续按 [macOS 验收流程](docs/macos-background.md)完成。 |
 | `npm run release:macos` | 构建并校验 macOS DMG、App ZIP 和 CLI 归档。 |
 | `npm run release:windows` | 构建并校验 Windows NSIS 安装包和 CLI ZIP。 |
 

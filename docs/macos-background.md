@@ -1,6 +1,41 @@
 # macOS 后台生命周期
 
-当前源码提供菜单栏常驻和当前用户登录自启。关闭主窗口会隐藏窗口并切回仅菜单栏模式，后台继续提供共享 MCP。Dock 不再显示本应用的运行状态；用户固定的 Dock 快捷方式由系统保留。点击菜单栏图标可显示主窗口、暂停/恢复共享、调整登录启动，或选择退出方式。桌面“后台运行”可打开同一份原生菜单。
+当前源码提供菜单栏常驻和当前用户登录自启。关闭主窗口会隐藏窗口并切回仅菜单栏模式，后台继续提供共享 MCP。Dock 不再显示本应用的运行状态；用户固定的 Dock 快捷方式由系统保留。点击菜单栏图标可显示主窗口、暂停/恢复共享、调整登录启动，或选择退出方式。桌面“后台运行”面板提供共享与登录启动设置，并可打开原生菜单。
+
+## 本机构建的签名与钥匙串
+
+钥匙串按程序的签名要求跟踪授权。CLI 固定标识为 `io.mcplink.cli`，桌面为 `io.mcplink.desktop`。公开预览和普通 CI 仍使用 ad-hoc 签名，不能承诺其授权跨不同构建保留。本机长期使用可明确创建一个自签名身份：
+
+```sh
+python3 scripts/setup_macos_signing.py --create-local-identity
+npm run bundle -- --local-signing --bundles app
+```
+
+身份私钥直接导入当前用户钥匙串，生成与传递只经过内存和私有管道；本机 `.local/macos-signing.json` 仅保存公开指纹。后续构建复用同一身份，不重复创建证书，不导出私钥或修改系统信任。自签名仅供本机使用，不等于 Developer ID、公证或可分发的发布者信任；正式发布仍遵守发布指南。已有配置和服务凭据保留，首次切换身份可能需要在系统窗口逐项授权；希望持续授权时需选择“始终允许”，不放开为所有应用可读。
+
+桌面通过核心库的内存 Session 访问后台，不为每次请求或巡检创建 CLI。Bridge 的工具请求与目录观察共用自己的 Session。通信凭据按数据目录和已核验后台实例复用，实例更换后重新认证；拒绝访问后不循环申请，桌面明确点击“刷新”或重新启动客户端才重试。已有业务调用不会因通信失败自动重放。
+
+## 覆盖部署验收
+
+部署入口会自动保存不含凭据的配置摘要；只需单独盘点时可运行：
+
+```sh
+python3 scripts/verify_macos_deployment.py --snapshot-only --record artifacts/e2e/deploy-before
+```
+
+完成候选构建与隔离测试后，可用 `npm run deploy:macos -- --record artifacts/e2e/local-install` 构建本机签名候选并安装；已有候选可直接运行 `python3 scripts/install_macos.py --record artifacts/e2e/local-install`。入口在改动程序前完成签名与配置摘要检查，正常退出桌面和后台，原子替换 App 与固定路径 CLI，并保留旧程序回退副本；不改数据库或服务凭据。对已核对且可结束的 Bridge 可逐项传 `--stop-bridge PID`，不自动终止未知进程。
+
+安装后状态明确为“仍待授权及 Agent 重载”，不将安装成功当作全部验收通过。替换文件不更新 Agent 中已运行的进程：必须使用所属 Agent 的原生 MCP 重载，例如 Hermes 的 `/reload-mcp`、Codex 的 MCP 重载；有未完成调用时先结束或核对，不自动重发。不要以修改或重建原生配置、删除凭据处理旧进程。
+
+真实授权完成后，重新启动 App，以 `--no-auth-ui` 冷启动验证已有授权，再核对实际界面、关窗常驻、暂停/恢复和后台恢复；最后运行：
+
+```sh
+python3 scripts/verify_macos_deployment.py \
+  --baseline artifacts/e2e/local-install/before.json \
+  --record artifacts/e2e/deploy-after
+```
+
+脚本要求至少观察三个十秒巡检周期，使用新 CLI 进程的无弹窗检查，比较配置/绑定/聚合成员与登录偏好，检查 App/CLI/运行中进程及后台身份。它拒绝动态校验失败的旧 Bridge（例如 `-67034`），不以磁盘哈希代替运行中代码检查。真实工具调用与业务成功码另行验收；fixture Vault、成功的签名检查或一次“允许”都不证明授权持久。观察结果只覆盖实际执行范围。
 
 普通启动、再次打开应用或点击 Dock 图标会显示并聚焦已有主窗口。登录启动传入 `--background`，窗口从创建起隐藏，应用以 `LSUIElement` 和 Accessory 激活策略启动，只保留菜单栏图标；主动显示窗口后切换为 Regular 策略，支持 Dock 再次唤起。单实例检查防止重复创建桌面进程，后台启动已有实例时不抢占前台。
 

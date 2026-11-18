@@ -1,9 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use mcplink_core::runtime::Session;
 use std::path::PathBuf;
-use std::process::Stdio;
 use tauri::Manager;
-use tokio::io::AsyncWriteExt;
 
 #[cfg(any(windows, target_os = "macos"))]
 mod background;
@@ -49,37 +48,34 @@ async fn rpc(
     app: tauri::AppHandle,
     method: String,
     params: serde_json::Value,
+    retry_auth: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     #[cfg(any(windows, target_os = "macos"))]
     let _activity = background::enter_rpc(&app, &method)?;
-    let mut command = tokio::process::Command::new(cli_path(&app)?);
-    command
-        .args(["rpc", "--stdin"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
-    #[cfg(windows)]
-    {
-        // RPC helpers must not create a console window or steal the GUI's focus.
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
+    let session = app.state::<Session>();
+    if retry_auth == Some(true) {
+        session.retry_authentication().await;
     }
-    let mut child = command.spawn().map_err(|_| "无法启动本地管理程序")?;
-    let body = serde_json::to_vec(&serde_json::json!({"method":method,"params":params}))
-        .map_err(|_| "请求格式错误")?;
-    let mut input = child.stdin.take().ok_or("无法建立本地通信")?;
-    input.write_all(&body).await.map_err(|_| "本地通信中断")?;
-    drop(input);
-    let output = tokio::time::timeout(
+    let response = tokio::time::timeout(
         std::time::Duration::from_secs(660),
-        child.wait_with_output(),
+        session.call(&method, params),
     )
     .await
-    .map_err(|_| "本地管理程序响应超时，执行结果需核对")?
-    .map_err(|_| "本地管理程序已退出")?;
-    let result = serde_json::from_slice(&output.stdout)
-        .map_err(|_| "本地管理程序没有返回有效结果".to_string())?;
+    .map_err(|_| "本地管理程序响应超时，执行结果需核对；不要自动重试")?;
+    let result = match response {
+        Ok(value) => serde_json::json!({"ok":value}),
+        Err(error) => {
+            if let Some(failure) = error.downcast_ref::<mcplink_core::invocation::ToolFailure>() {
+                let mut value = serde_json::json!({"error":{"code":failure.code,"message":failure.to_string()}});
+                if !failure.details.is_null() {
+                    value["result"] = failure.details.clone();
+                }
+                value
+            } else {
+                serde_json::json!({"error":{"code":"operation_failed","message":error.to_string()}})
+            }
+        }
+    };
     #[cfg(any(windows, target_os = "macos"))]
     background::observe(&app, &method, &result);
     Ok(result)
@@ -151,7 +147,16 @@ async fn desktop_update(
 }
 
 fn main() {
-    let builder = tauri::Builder::default();
+    if std::env::args().any(|arg| arg == "--no-auth-ui") {
+        mcplink_core::vault::disable_interaction().expect("cannot disable Keychain consent UI");
+    }
+    let builder = tauri::Builder::default().setup(|app| {
+        app.manage(Session::new(
+            mcplink_core::runtime::data_dir()?,
+            cli_path(app.handle())?,
+        ));
+        Ok(())
+    });
     #[cfg(any(windows, target_os = "macos"))]
     let builder = builder
         .plugin(
@@ -173,6 +178,10 @@ fn main() {
             plugin.build()
         })
         .setup(|app| {
+            app.manage(Session::new(
+                mcplink_core::runtime::data_dir()?,
+                cli_path(app.handle())?,
+            ));
             updater::setup(app)?;
             background::setup(app)
         })

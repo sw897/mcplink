@@ -56,6 +56,11 @@ jobs:
         timeout-minutes: 3
         run: python -u tests/e2e/frontend.py --record artifacts/e2e/ci-frontend
       - run: npm run check
+      - name: Process-local authentication and Bridge recovery
+        timeout-minutes: 3
+        run: |
+          cargo build --locked -p mcplink-core --example runtime_session
+          python -u tests/e2e/runtime_session.py --record artifacts/e2e/ci-runtime-session
       - name: Cache Windows bundler downloads
         if: runner.os == 'Windows'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
