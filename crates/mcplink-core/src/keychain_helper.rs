@@ -6,15 +6,20 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     fs,
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+};
+mod lifecycle;
+pub use lifecycle::{
+    UpdateGuard, authorize, migrate, migration_preview, preview, recover, recovery_preview,
+    update_guard,
 };
 
 const LIMIT: usize = 16 * 1024 * 1024;
 const ID: &str = "io.mcplink.keychain";
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Binding {
     version: u32,
@@ -32,22 +37,93 @@ fn directory(data: &Path) -> PathBuf {
     data.join("keychain-helper")
 }
 
+fn private_directory(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    match fs::symlink_metadata(path) {
+        Ok(meta) => ensure!(
+            meta.is_dir()
+                && !meta.file_type().is_symlink()
+                && meta.permissions().mode() & 0o022 == 0,
+            "助手目录必须是普通目录，不能使用符号链接"
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(path)?;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        }
+        Err(e) => return Err(e.into()),
+    }
+    Ok(())
+}
+
+fn read_private_file(path: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(value) => value,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => bail!("无法检查助手文件；不会回退到其他凭据入口"),
+    };
+    ensure!(
+        metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() <= limit,
+        "助手绑定或记录必须是受限的普通文件"
+    );
+    // O_NOFOLLOW on macOS also rejects a link substituted after lstat.
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(0x100)
+        .open(path)
+        .context("无法读取助手文件；不会回退到其他凭据入口")?;
+    ensure!(file.metadata()?.is_file(), "助手记录必须是普通文件");
+    let mut raw = Vec::new();
+    file.take(limit + 1).read_to_end(&mut raw)?;
+    ensure!(raw.len() as u64 <= limit, "助手记录过大");
+    Ok(Some(raw))
+}
+
+fn binding_bytes(data: &Path) -> Result<Option<Vec<u8>>> {
+    match fs::symlink_metadata(directory(data)) {
+        Ok(meta) => ensure!(
+            meta.is_dir() && !meta.file_type().is_symlink(),
+            "助手目录无效"
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    }
+    read_private_file(&directory(data).join("active.json"), 4096)
+}
+
+fn parse_binding(raw: &[u8]) -> Result<Binding> {
+    let value: Binding = serde_json::from_slice(raw).context("钥匙串助手绑定无效")?;
+    ensure!(
+        matches!(value.version, 1 | 2)
+            && value.sha256.len() == 64
+            && value
+                .sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+        "钥匙串助手绑定或版本无效"
+    );
+    Ok(value)
+}
+
+fn binding_path(data: &Path, binding: &Binding) -> PathBuf {
+    if binding.version == 1 {
+        directory(data).join("mcplink-keychain")
+    } else {
+        directory(data)
+            .join("versions")
+            .join(&binding.sha256)
+            .join("mcplink-keychain")
+    }
+}
+
 impl Helper {
     pub fn configured(data: &Path) -> Result<Option<Self>> {
-        let path = directory(data).join("active.json");
-        let raw = match fs::read(&path) {
-            Ok(value) => value,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(_) => bail!("无法读取固定钥匙串助手绑定；不会回退到其他凭据入口"),
+        let Some(raw) = binding_bytes(data)? else {
+            return Ok(None);
         };
-        ensure!(
-            raw.len() <= 4096 && !path.is_symlink(),
-            "钥匙串助手绑定无效"
-        );
-        let binding: Binding = serde_json::from_slice(&raw).context("钥匙串助手绑定无效")?;
-        ensure!(binding.version == 1, "钥匙串助手协议不兼容");
+        let binding = parse_binding(&raw)?;
         Ok(Some(Self {
-            path: directory(data).join("mcplink-keychain"),
+            path: binding_path(data, &binding),
             binding,
             data: data.into(),
         }))
@@ -59,7 +135,9 @@ impl Helper {
             path: path.into(),
             binding: Binding {
                 version: 1,
-                sha256: digest(&fs::read(path).context("无法读取助手候选")?),
+                sha256: digest(
+                    &read_private_file(path, 128 * 1024 * 1024)?.context("无法读取助手候选")?,
+                ),
             },
             data: data.into(),
         };
@@ -69,13 +147,33 @@ impl Helper {
 
     fn verify(&self) -> Result<()> {
         vault::verify_running_code()?;
+        self.verify_pin()?;
+        verify_identity(&self.path)
+    }
+
+    fn verify_pin(&self) -> Result<()> {
+        if self.binding.version == 2 {
+            for parent in [
+                directory(&self.data).join("versions"),
+                directory(&self.data)
+                    .join("versions")
+                    .join(&self.binding.sha256),
+            ] {
+                ensure!(
+                    fs::symlink_metadata(parent)
+                        .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink()),
+                    "助手版本目录无效"
+                );
+            }
+        }
+        let raw = read_private_file(&self.path, 128 * 1024 * 1024)?
+            .context("固定钥匙串助手缺失；不会回退到其他凭据入口")?;
         ensure!(
-            !self.path.is_symlink()
-                && fs::symlink_metadata(&self.path).is_ok_and(|m| m.is_file())
-                && self.binding.sha256 == digest(&fs::read(&self.path)?),
+            self.binding.sha256 == digest(&raw),
             "固定钥匙串助手已改变；请核对单独的助手升级，不自动替换或回退"
         );
-        verify_identity(&self.path)
+        crate::keychain_signature::certificate(&self.path, ID)?;
+        Ok(())
     }
 
     pub fn request(&self, operation: &str, key: &str, value: Option<&str>) -> Result<Value> {
@@ -137,9 +235,7 @@ impl Helper {
     }
 }
 
-pub fn preview(data: &Path, candidate: &Path, operations: &[String]) -> Result<Value> {
-    let helper = Helper::candidate(data, candidate)?;
-    ensure!(data.is_absolute(), "保留原有绝对数据目录和 namespace");
+fn credential_items(data: &Path, operations: &[String]) -> Result<Vec<Value>> {
     let mut items = vec![json!({"key":"runtime-key","label":"本机后台通信","kind":"runtime"})];
     let store = Store::open(data)?;
     for connection in store.connections()? {
@@ -171,164 +267,14 @@ pub fn preview(data: &Path, candidate: &Path, operations: &[String]) -> Result<V
     }
     items.sort_by_key(|v| v["key"].as_str().unwrap_or_default().to_owned());
     items.dedup_by(|a, b| a["key"] == b["key"]);
-    let mut result = json!({"version":1,"helperIdentifier":ID,"helperSha256":helper.binding.sha256,
-        "installedPath":directory(data).join("mcplink-keychain"),"dataDirectory":data,"items":items,
-        "credentialValuesRead":false,"credentialsMoved":false,"historyPolicy":"Old completed plans/changes stay in Keychain; authorize explicitly if later needed."});
-    result["previewHash"] = json!(digest(&serde_json::to_vec(&result)?));
-    Ok(result)
-}
-
-pub fn authorize(
-    data: &Path,
-    candidate: &Path,
-    reviewed_hash: &str,
-    operations: &[String],
-) -> Result<Value> {
-    ensure!(!vault::interaction_disabled(), "无弹窗模式不能请求系统授权");
-    let plan = preview(data, candidate, operations)?;
-    ensure!(
-        plan["previewHash"] == reviewed_hash,
-        "授权清单或助手已改变，请重新预览和确认"
-    );
-    let prepared = Helper::candidate(data, candidate)?;
-    let dir = directory(data);
-    ensure!(!dir.is_symlink(), "助手安装目录不能是符号链接");
-    vault::private_dir(&dir)?;
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
-    let target = dir.join("mcplink-keychain");
-    if target.exists() {
-        ensure!(
-            !target.is_symlink() && digest(&fs::read(&target)?) == prepared.binding.sha256,
-            "已安装不同助手；助手升级须单独处理，不自动覆盖"
-        );
-    } else {
-        let raw = fs::read(candidate)?;
-        ensure!(digest(&raw) == prepared.binding.sha256, "助手候选已改变");
-        // create_new prevents overwriting a concurrent or existing helper.
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o700)
-            .open(&target)?;
-        file.write_all(&raw)?;
-        file.sync_all()?;
-    }
-    let installed = Helper {
-        path: target,
-        ..prepared
-    };
-    installed.verify()?;
-    let mut authorized = Vec::new();
-    for item in plan["items"].as_array().context("授权清单无效")? {
-        let key = item["key"].as_str().context("授权项目无效")?;
-        let response = installed.request("authorize", key, None)?;
-        ensure!(
-            item["kind"] != "definition" || response["found"] == true,
-            "当前托管定义缺少钥匙串项目；未启用助手，原凭据保持不变"
-        );
-        authorized
-            .push(json!({"label":item["label"],"kind":item["kind"],"found":response["found"]}));
-    }
-    ensure!(
-        preview(data, candidate, operations)?["previewHash"] == plan["previewHash"],
-        "授权期间清单已改变；未启用助手，请重新预览"
-    );
-    vault::private_write(
-        &dir.join("active.json"),
-        &serde_json::to_vec(&installed.binding)?,
-    )?;
-    Ok(
-        json!({"enabled":true,"helperSha256":installed.binding.sha256,"items":authorized,
-              "credentialsMoved":false,"reload":"Restart mcplink desktop/backend and reload Agent MCP connections; existing processes keep their previous Vault."}),
-    )
+    Ok(items)
 }
 
 fn verify_identity(path: &Path) -> Result<()> {
-    use std::{ffi::c_void, os::unix::ffi::OsStrExt};
-    type Ref = *const c_void;
-    #[link(name = "Security", kind = "framework")]
-    unsafe extern "C" {
-        fn SecCodeCopySelf(flags: u32, code: *mut Ref) -> i32;
-        fn SecCodeCopyStaticCode(code: Ref, flags: u32, static_code: *mut Ref) -> i32;
-        fn SecStaticCodeCreateWithPath(path: Ref, flags: u32, code: *mut Ref) -> i32;
-        fn SecRequirementCreateWithString(text: Ref, flags: u32, requirement: *mut Ref) -> i32;
-        fn SecStaticCodeCheckValidity(code: Ref, flags: u32, requirement: Ref) -> i32;
-        fn SecCodeCopySigningInformation(code: Ref, flags: u32, info: *mut Ref) -> i32;
-        static kSecCodeInfoCertificates: Ref;
-    }
-    #[link(name = "CoreFoundation", kind = "framework")]
-    unsafe extern "C" {
-        fn CFURLCreateFromFileSystemRepresentation(
-            allocator: Ref,
-            bytes: *const u8,
-            len: isize,
-            directory: u8,
-        ) -> Ref;
-        fn CFStringCreateWithCString(
-            allocator: Ref,
-            bytes: *const std::ffi::c_char,
-            encoding: u32,
-        ) -> Ref;
-        fn CFDictionaryGetValue(dictionary: Ref, key: Ref) -> Ref;
-        fn CFArrayGetCount(array: Ref) -> isize;
-        fn CFArrayGetValueAtIndex(array: Ref, index: isize) -> Ref;
-        fn CFEqual(first: Ref, second: Ref) -> u8;
-        fn CFRelease(value: Ref);
-    }
-    struct Owned(Ref);
-    impl Drop for Owned {
-        fn drop(&mut self) {
-            if !self.0.is_null() {
-                unsafe { CFRelease(self.0) };
-            }
-        }
-    }
-    let bytes = path.as_os_str().as_bytes();
-    let none = std::ptr::null();
-    unsafe {
-        let url = Owned(CFURLCreateFromFileSystemRepresentation(
-            none,
-            bytes.as_ptr(),
-            bytes.len() as isize,
-            0,
-        ));
-        ensure!(!url.0.is_null(), "钥匙串助手路径无效");
-        let mut helper = Owned(none);
-        let mut own = Owned(none);
-        let mut own_static = Owned(none);
-        let text = Owned(CFStringCreateWithCString(
-            none,
-            c"identifier \"io.mcplink.keychain\"".as_ptr(),
-            0x08000100,
-        ));
-        let mut requirement = Owned(none);
-        ensure!(
-            SecStaticCodeCreateWithPath(url.0, 0, &mut helper.0) == 0
-                && SecCodeCopySelf(0, &mut own.0) == 0
-                && SecCodeCopyStaticCode(own.0, 0, &mut own_static.0) == 0
-                && SecRequirementCreateWithString(text.0, 0, &mut requirement.0) == 0
-                && SecStaticCodeCheckValidity(helper.0, 1 << 4, requirement.0) == 0,
-            "固定钥匙串助手签名或标识无效"
-        );
-        let mut a = Owned(none);
-        let mut b = Owned(none);
-        ensure!(
-            SecCodeCopySigningInformation(helper.0, 1 << 1, &mut a.0) == 0
-                && SecCodeCopySigningInformation(own_static.0, 1 << 1, &mut b.0) == 0,
-            "无法核对钥匙串助手签名身份"
-        );
-        let ac = CFDictionaryGetValue(a.0, kSecCodeInfoCertificates);
-        let bc = CFDictionaryGetValue(b.0, kSecCodeInfoCertificates);
-        ensure!(
-            !ac.is_null()
-                && !bc.is_null()
-                && CFArrayGetCount(ac) > 0
-                && CFArrayGetCount(bc) > 0
-                && CFEqual(CFArrayGetValueAtIndex(ac, 0), CFArrayGetValueAtIndex(bc, 0)) != 0,
-            "钥匙串助手必须与当前 mcplink 使用同一签名证书"
-        );
-    }
+    ensure!(
+        crate::keychain_signature::certificate(path, ID)?
+            == crate::keychain_signature::current_certificate()?,
+        "钥匙串助手必须与当前 mcplink 使用同一签名证书"
+    );
     Ok(())
 }

@@ -12,6 +12,35 @@ async fn main() {
             .map_err(|_| "Invalid stdin")?;
         let args: Value = serde_json::from_str(&input).map_err(|_| "Invalid JSON")?;
         let get = |key: &str| args[key].as_str().ok_or_else(|| format!("Missing {key}"));
+        #[cfg(target_os = "macos")]
+        if args["action"] == "keychain-update-preflight" {
+            let home = PathBuf::from(get("home")?)
+                .canonicalize()
+                .map_err(|_| "Missing fixture")?;
+            if !home.join(".mcplink-test-fixture").is_file() {
+                return Err("Missing fixture marker".into());
+            }
+            let data = PathBuf::from(get("data")?)
+                .canonicalize()
+                .map_err(|_| "Missing fixture data")?;
+            let package = PathBuf::from(get("package")?)
+                .canonicalize()
+                .map_err(|_| "Missing fixture package")?;
+            if !data.starts_with(&home) || !package.starts_with(&home) {
+                return Err("Preflight inputs outside fixture".into());
+            }
+            let bytes = fs::read(package).map_err(|_| "Cannot read fixture package")?;
+            let _guard = mcplink_desktop::macos_update::validate_package(&data, &bytes)?;
+            if let Some(ms) = args["holdMs"].as_u64().filter(|ms| *ms <= 5000) {
+                use std::io::Write;
+                println!("{}", json!({"locked":true}));
+                std::io::stdout()
+                    .flush()
+                    .map_err(|_| "Fixture output failed")?;
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+            }
+            return Ok(json!({"verified":true}));
+        }
         let current = get("version")?
             .parse()
             .map_err(|_| "Invalid current version")?;

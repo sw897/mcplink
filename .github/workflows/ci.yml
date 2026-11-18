@@ -63,8 +63,10 @@ jobs:
           python -u tests/e2e/runtime_session.py --record artifacts/e2e/ci-runtime-session
       - name: Fixed macOS credential helper and caller identity boundaries
         if: runner.os == 'macOS'
-        timeout-minutes: 4
-        run: python -u tests/e2e/macos_keychain.py --record artifacts/e2e/ci-macos-keychain --github-hosted-keychain-default
+        timeout-minutes: 8
+        run: |
+          cargo build --locked -p mcplink-desktop --example updater_contract
+          python -u tests/e2e/macos_keychain.py --record artifacts/e2e/ci-macos-keychain --github-hosted-keychain-default
       - name: Cache Windows bundler downloads
         if: runner.os == 'Windows'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

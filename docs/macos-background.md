@@ -15,7 +15,7 @@ npm run bundle -- --local-signing --bundles app
 
 ### 独立固定凭据助手
 
-固定助手安装在原数据目录的 `keychain-helper/mcplink-keychain`；`active.json` 仅含协议版本与助手 SHA256。凭据继续留在原服务、原 namespace 的系统钥匙串中，不导出或重写现有值，不放宽现有 ACL。App 和 CLI 都委托同一个助手，经父子进程私有管道读写；双方核验签名、固定标识及相同证书，核心同时核对助手散列。普通操作始终禁止系统交互；桌面启动、巡检和 Bridge 恢复也不请求口令。
+首次接入的固定助手安装在原数据目录的 `keychain-helper/mcplink-keychain`；`active.json` 仅含绑定格式版本与助手 SHA256。v1 使用这个原路径；显式迁移后的 v2 使用 `keychain-helper/versions/<SHA256>/mcplink-keychain`，助手通信协议仍为 1。普通升级保留现有绑定字节及助手文件。凭据继续留在原服务、原 namespace 的系统钥匙串中，不导出或重写现有值，不放宽现有 ACL。App 和 CLI 都委托同一个助手，经父子进程私有管道读写；双方核验签名、固定标识及相同证书，核心同时核对助手散列。普通操作始终禁止系统交互；桌面启动、巡检和 Bridge 恢复也不请求口令。绑定损坏、悬空链接、非普通文件或未知版本明确失败，只有真正不存在绑定时才使用原凭据入口。
 
 先准备候选，不接入真实凭据：
 
@@ -28,6 +28,31 @@ mcplink keychain preview --helper /absolute/path/to/prepared-keychain/mcplink-ke
 
 助手有独立生命周期：普通 App/CLI 构建和覆盖安装不编译、不替换数据目录内的助手。准备入口优先复用已接入的原字节，否则复用本机准备缓存；助手源码或签名身份变化须显式准备 `--new-helper-candidate`，核对并单独迁移，不能当成主程序的自动附带升级。不同设备仍需独立授权。助手散列固定才能维持自签名分区；换助手后仍可能再次需要系统授权。
 
+### 助手升级与失败恢复
+
+只有需要改变助手本身时才准备独立候选；普通主程序升级跳过本节：
+
+```sh
+python3 scripts/prepare_macos_keychain.py --new-helper-candidate --record artifacts/e2e/next-keychain
+mcplink keychain migrate-preview --helper /absolute/path/to/next-keychain/mcplink-keychain
+mcplink keychain migrate --helper /absolute/path/to/next-keychain/mcplink-keychain --preview-hash REVIEWED_HASH --confirm
+```
+
+预览不读取凭据值，绑定旧/新散列、签名证书、数据目录、现有恢复记录和逐项授权清单。核对后再提交；`--operation` 若使用须两步一致。候选写入独立的版本目录，使用同目录临时文件、同步落盘及不覆盖发布；全部权限检查成功后才原子切换绑定。拒绝、候选变化或授权失败时原绑定不变，保留完整候选供重新预览后重试。中断前已经批准的候选权限仍留在系统钥匙串，不自动撤销；重试先核对现有权限与剩余项目。`--no-auth-ui migrate` 仅检查候选已有权限，不请求授权，也不返回内部读取的值。助手更换或签名轮换的新增授权须另行明确批准；不能因主程序部署或 skill 同步而自动执行。
+
+切换前先同步保存 `rollback.json`，其中只有旧绑定的原始 JSON、新绑定和预览散列；不含凭据。旧助手及所有已授权文件保持原字节，回退窗口内不要手工移动、重签或删除。恢复使用新的核对步骤：
+
+```sh
+mcplink keychain recover-preview
+mcplink keychain recover --preview-hash REVIEWED_RECOVERY_HASH --confirm
+```
+
+已切换则恢复上一份绑定的原始字节；记录已落盘但尚未切换则取消待提交事务。每次只保留最近一次迁移的回退记录，新的迁移预览会包含其散列。原绑定或原文件被外部改变时拒绝覆盖。首次接入留下的未绑定半文件、以及 `.install-UUID.tmp` 暂存残留，须按恢复清单移入 `recovered/` 隔离保存后再预览重试，不直接覆盖或删除。恢复不重写钥匙串、不撤销既有授权；它也不回退数据库或业务配置。未知损坏状态需核对留存文件，不通过删除绑定回退到旧凭据入口。
+
+签名身份轮换须使用已单独验证且与候选同签名的 CLI 执行迁移，并准备同签名 App/CLI 的部署或旧版本回退路径。切换和回退后均应停止旧后台、重启匹配签名的 App/后台并重载 Agent MCP；使用不匹配的主程序会明确失败。回退后新增凭据可能尚未向旧助手授权，应逐项核对，不能自动放宽 ACL。
+
+原生更新器与本机安装脚本在停后台、写更新收据和替换文件之前，核对包内 App/桌面/CLI 的有效签名、固定角色和助手证书；v2 还要求 App 与 CLI 的已签名元数据声明支持该绑定版本。ad-hoc、其他证书或旧绑定格式的更新会被拒绝，保留当前程序与后台。更新包限制解包范围并拒绝越界路径、链接和特殊文件。安装、迁移与恢复共用排他锁，冲突时等待现有操作结束后重新预览，不并发切换。
+
 桌面通过核心库的内存 Session 访问后台，不为每次请求或巡检创建 CLI。Bridge 的工具请求与目录观察共用自己的 Session。通信凭据按数据目录和已核验后台实例复用，实例更换后重新认证；拒绝访问或后台首次启动失败后暂停自动重试，桌面明确点击“刷新”或重新启动客户端才重试。较慢的启动稍后成功时仍能被发现。已有业务调用不会因通信失败自动重放。
 
 ## 覆盖部署验收
@@ -38,7 +63,7 @@ mcplink keychain preview --helper /absolute/path/to/prepared-keychain/mcplink-ke
 python3 scripts/verify_macos_deployment.py --snapshot-only --record artifacts/e2e/deploy-before
 ```
 
-完成候选构建与隔离测试后，可用 `npm run deploy:macos -- --record artifacts/e2e/local-install` 构建本机签名候选并安装；已有候选可直接运行 `python3 scripts/install_macos.py --record artifacts/e2e/local-install`。入口在改动程序前完成签名与配置摘要检查，正常退出桌面和后台，原子替换 App 与固定路径 CLI，并保留旧程序回退副本；不改数据库或服务凭据。对已核对且可结束的 Bridge 可逐项传 `--stop-bridge PID`，不自动终止未知进程。默认以 `--no-auth-ui` 启动 App 和它创建的后台，缺少授权即失败，避免验收自动触发一串密码请求；需要首次交互式迁移时明确传 `--allow-auth-ui`，授权后仍须冷启动无弹窗验收。旧 CLI 不支持禁止弹窗时，默认在读取凭据前停止，须明确选择交互式迁移。
+完成候选构建与隔离测试后，可用 `npm run deploy:macos -- --record artifacts/e2e/local-install` 构建本机签名候选并安装；已有候选可直接运行 `python3 scripts/install_macos.py --record artifacts/e2e/local-install`。入口在改动程序前完成签名与配置摘要检查，使用已核验的候选 CLI 检查凭据和停止后台，正常退出桌面，原子替换 App 与固定路径 CLI，并保留旧程序回退副本；不改数据库或服务凭据。对已核对且可结束的 Bridge 可逐项传 `--stop-bridge PID`，不自动终止未知进程。默认以 `--no-auth-ui` 启动 App 和它创建的后台，缺少授权即失败，避免验收自动触发一串密码请求。`--allow-auth-ui` 只放开安装时的读取/启动策略，不迁移助手或自动授予权限；首次授权必须走上面的单独清单流程，授权后仍须冷启动无弹窗验收。
 
 安装后状态明确为“仍待授权及 Agent 重载”，不将安装成功当作全部验收通过。替换文件不更新 Agent 中已运行的进程：必须使用所属 Agent 的原生 MCP 重载，例如 Hermes 的 `/reload-mcp`、Codex 的 MCP 重载；有未完成调用时先结束或核对，不自动重发。不要以修改或重建原生配置、删除凭据处理旧进程。
 

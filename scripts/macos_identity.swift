@@ -19,6 +19,8 @@ func signature(_ path: String) throws -> [String: Any] {
     try check(SecCodeCopySigningInformation(code!, SecCSFlags(rawValue: UInt32(kSecCSSigningInformation)), &info))
     let values = info! as NSDictionary
     var row: [String: Any] = ["path": path, "identifier": values[kSecCodeInfoIdentifier] ?? ""]
+    let plist = values[kSecCodeInfoPList] as? [String: Any]
+    row["keychain_binding_version"] = plist?["MCPLinkKeychainBindingVersion"] as? Int ?? 1
     if let hash = values[kSecCodeInfoUnique] as? Data { row["cdhash"] = hash.map { String(format: "%02x", $0) }.joined() }
     if let certs = values[kSecCodeInfoCertificates] as? [SecCertificate], let cert = certs.first {
         row["certificate_sha1"] = Insecure.SHA1.hash(data: SecCertificateCopyData(cert) as Data).map { String(format: "%02X", $0) }.joined()

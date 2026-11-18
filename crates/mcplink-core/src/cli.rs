@@ -139,6 +139,33 @@ enum KeychainCommand {
         #[arg(long)]
         operation: Vec<String>,
     },
+    /// 预览独立助手迁移；保留当前助手，不读取凭据值
+    MigratePreview {
+        #[arg(long)]
+        helper: PathBuf,
+        #[arg(long)]
+        operation: Vec<String>,
+    },
+    /// 逐项核对候选权限后原子切换；--no-auth-ui 仅检查已有授权
+    Migrate {
+        #[arg(long)]
+        helper: PathBuf,
+        #[arg(long)]
+        preview_hash: String,
+        #[arg(long, required = true)]
+        confirm: bool,
+        #[arg(long)]
+        operation: Vec<String>,
+    },
+    /// 预览上次迁移回滚或未激活文件隔离；不读取凭据
+    RecoverPreview,
+    /// 仅执行已核对的恢复计划，不覆盖助手或改写钥匙串
+    Recover {
+        #[arg(long)]
+        preview_hash: String,
+        #[arg(long, required = true)]
+        confirm: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -529,6 +556,27 @@ async fn execute(command: Command, data: PathBuf) -> Result<Value, Failure> {
                     &preview_hash,
                     &operation,
                 ),
+                KeychainCommand::MigratePreview { helper, operation } => {
+                    mcplink_core::keychain_helper::migration_preview(&data, &helper, &operation)
+                }
+                KeychainCommand::Migrate {
+                    helper,
+                    preview_hash,
+                    confirm: _,
+                    operation,
+                } => mcplink_core::keychain_helper::migrate(
+                    &data,
+                    &helper,
+                    &preview_hash,
+                    &operation,
+                ),
+                KeychainCommand::RecoverPreview => {
+                    mcplink_core::keychain_helper::recovery_preview(&data)
+                }
+                KeychainCommand::Recover {
+                    preview_hash,
+                    confirm: _,
+                } => mcplink_core::keychain_helper::recover(&data, &preview_hash),
             }
             .map_err(Failure::operation);
             #[cfg(not(target_os = "macos"))]

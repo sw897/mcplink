@@ -194,6 +194,8 @@ def main():
                                           env=env, capture_output=True, text=True, timeout=20)
             assert changed_plan.returncode == 1 and (installed / "active.json").read_bytes() == binding_bytes
             assert cli("keychain", "authorize", "--helper", str(helper), "--preview-hash", preview["previewHash"], "--confirm", expected=1)["error"]
+            from macos_keychain_lifecycle import exercise
+            exercise(record, data, keychain, password, audit, helper, core, env, sign, cli, run, passed)
             cli("gateway", "stop")
             binding = installed / "active.json"
             binding.write_text(json.dumps({"version": 1, "sha256": "0" * 64}))

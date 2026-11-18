@@ -1,5 +1,6 @@
 """Install a locally signed candidate, preserving data and recording reconnect work."""
 import argparse
+from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,7 @@ import sys
 import time
 
 from verify_macos_deployment import ROOT, sha, snapshot
+from macos_keychain_binding import active_helper, lifecycle_lock
 
 
 def process_rows():
@@ -49,28 +51,36 @@ def main():
     assert args.data_dir.is_absolute(), "Keep the exact existing absolute data-directory namespace"
     os.umask(0o077); args.record.mkdir(parents=True, exist_ok=False)
     result = {"state": "preparing", "credentials_or_database_modified": False}
+    transaction = ExitStack()
     try:
         if args.build:
             subprocess.run(["npm", "run", "bundle", "--", "--local-signing", "--bundles", "app"], cwd=ROOT, check=True)
+        transaction.enter_context(lifecycle_lock(args.data_dir))
         helper = args.record / "macos-identity"
         subprocess.run(["swiftc", str(ROOT / "scripts/macos_identity.swift"), "-o", str(helper)],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         built_cli = args.app / "Contents/MacOS/mcplink"
         built_desktop = args.app / "Contents/MacOS/mcplink-desktop"
-        identity = json.loads(subprocess.check_output([str(helper), str(built_cli), str(built_desktop)], text=True))
+        identity = json.loads(subprocess.check_output([str(helper), str(built_cli), str(built_desktop), str(args.app)], text=True))
         assert all(s["valid"] and s.get("certificate_sha1") for s in identity["signatures"]), "Candidate needs a valid certificate signature"
-        assert {s["identifier"] for s in identity["signatures"]} == {"io.mcplink.cli", "io.mcplink.desktop"}
+        expected_roles = {str(built_cli): "io.mcplink.cli", str(built_desktop): "io.mcplink.desktop", str(args.app): "io.mcplink.desktop"}
+        assert all(s["identifier"] == expected_roles[s["path"]] for s in identity["signatures"]), "Candidate has incorrect executable roles"
         assert len({s["certificate_sha1"] for s in identity["signatures"]}) == 1
         subprocess.run(["codesign", "--verify", "--deep", "--strict", str(args.app)], capture_output=True, check=True)
-        schema = json.loads(subprocess.check_output([str(args.cli), "schema"], text=True))["ok"]
-        no_ui = any(a.get("long") == "no-auth-ui" for a in schema["command"]["arguments"])
-        assert no_ui or args.allow_auth_ui, "Old CLI lacks --no-auth-ui; review first-time authorization and explicitly select --allow-auth-ui"
-        before = snapshot(args.cli, args.data_dir, no_ui)
-        if "keychain_helper" in before:
-            fixed_helper = args.data_dir / "keychain-helper/mcplink-keychain"
-            helper_audit = json.loads(subprocess.check_output([str(helper), str(fixed_helper)], text=True))["signatures"][0]
+        fixed = active_helper(args.data_dir)
+        if fixed:
+            helper_audit = json.loads(subprocess.check_output([str(helper), str(fixed["path"])], text=True))["signatures"][0]
             assert helper_audit["valid"] and helper_audit["identifier"] == "io.mcplink.keychain"
             assert helper_audit["certificate_sha1"] == identity["signatures"][0]["certificate_sha1"], "Candidate signer differs from the fixed helper; review migration before replacing working software"
+            signatures = {s["path"]: s for s in identity["signatures"]}
+            for path in (built_cli, args.app):
+                assert signatures[str(path)]["keychain_binding_version"] >= fixed["version"], "Candidate main does not support the active helper binding version"
+        # After an explicit signer rotation, only the matching candidate CLI can
+        # talk to the newly activated helper. Validate it before touching runtime.
+        schema = json.loads(subprocess.check_output([str(built_cli), "schema"], text=True))["ok"]
+        no_ui = any(a.get("long") == "no-auth-ui" for a in schema["command"]["arguments"])
+        assert no_ui or args.allow_auth_ui, "Old CLI lacks --no-auth-ui; review first-time authorization and explicitly select --allow-auth-ui"
+        before = snapshot(built_cli, args.data_dir, no_ui)
         (args.record / "before.json").write_text(json.dumps(before, ensure_ascii=False, indent=2) + "\n")
         old_cli_sha = sha(args.cli)
         # Only explicitly selected, currently verified native Bridge processes.
@@ -85,7 +95,7 @@ def main():
         subprocess.run(["ditto", str(args.app), str(stage)], check=True)
         for pid in set(args.stop_bridge):
             os.kill(pid, signal.SIGTERM); wait_exit(pid)
-        stop = [str(args.cli), "--data-dir", str(args.data_dir)]
+        stop = [str(built_cli), "--data-dir", str(args.data_dir)]
         if no_ui and not args.allow_auth_ui:
             stop.append("--no-auth-ui")
         # An old desktop lacking permission to the running backend can still
@@ -136,6 +146,7 @@ def main():
             launch.extend(["--args", "--no-auth-ui"])
         subprocess.run(launch, check=True)
     finally:
+        transaction.close()
         (args.record / "installation.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
         print(json.dumps(result, ensure_ascii=False))
     print("Reload the owning Agents' MCP connections and run verify_macos_deployment.py with before.json as the baseline. Default launch cannot show Keychain dialogs; missing grants require a separately reviewed interactive migration.")

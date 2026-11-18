@@ -57,6 +57,8 @@ macOS 可用全局 `--no-auth-ui` 禁止本进程显示钥匙串授权弹窗，�
 
 自签名版本跨构建保持授权，须按[固定凭据助手流程](macos-background.md#独立固定凭据助手)接入独立助手。`keychain preview --helper PATH` 不读取凭据值；核对输出的逐项清单和 `previewHash` 后，显式 `keychain authorize --helper PATH --preview-hash HASH --confirm` 才请求系统授权并启用助手。不要为解决口令弹窗而反复重建、覆盖助手或扩大应用访问权限。
 
+助手本身升级使用 `keychain migrate-preview/migrate`，失败或回退使用 `keychain recover-preview/recover`；均先预览，再提交当前 `--preview-hash HASH --confirm`。迁移保留旧助手，只在逐项检查通过后切换；全局 `--no-auth-ui` 使迁移只验证已有权限。普通主程序更新会检查签名与绑定兼容性，不自动更换助手。具体恢复顺序及签名轮换见[升级与失败恢复](macos-background.md#助手升级与失败恢复)。
+
 桌面与长驻 Bridge 复用各自内存中的后台认证连接，后端实例变化时重新认证；独立 CLI 每次启动仍需取得通信凭据。拒绝访问会在该会话中保留；后台首次启动失败后也暂停自动拉起，用户明确点击“刷新”才重试。若先前启动稍后成功，仍会发现已就绪后台。业务请求发生通信错误时不自动重放。
 
 ## 命令

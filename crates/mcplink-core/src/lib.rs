@@ -13,6 +13,8 @@ pub mod invocation;
 mod json_config;
 #[cfg(target_os = "macos")]
 pub mod keychain_helper;
+#[cfg(target_os = "macos")]
+mod keychain_signature;
 mod lifecycle;
 pub mod mcp;
 pub mod model;

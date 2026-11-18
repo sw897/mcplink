@@ -21,6 +21,8 @@ struct Settings {
     home: PathBuf,
     receipt: PathBuf,
     sidecar: PathBuf,
+    #[cfg(target_os = "macos")]
+    data: PathBuf,
 }
 
 #[derive(Clone, Serialize)]
@@ -119,6 +121,8 @@ pub fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             .to_owned(),
         receipt: app.path().app_data_dir()?.join("updates/pending.json"),
         sidecar: crate::cli_path(app.handle())?,
+        #[cfg(target_os = "macos")]
+        data: mcplink_core::runtime::data_dir()?,
     };
     #[cfg(debug_assertions)]
     let settings = fixture_settings(app, settings)?;
@@ -397,6 +401,22 @@ async fn install(app: &AppHandle) -> View {
     if let Err(error) = validation {
         return fail(app, error);
     }
+    // Validate native signatures before stopping any working backend or writing a receipt.
+    // Keep the guard until restart so another update/helper migration cannot race installation.
+    #[cfg(target_os = "macos")]
+    let _helper_guard = {
+        let data = settings.data.clone();
+        let package = bytes.clone();
+        match tauri::async_runtime::spawn_blocking(move || {
+            mcplink_desktop::macos_update::validate_package(&data, &package)
+        })
+        .await
+        {
+            Ok(Ok(guard)) => guard,
+            Ok(Err(error)) => return fail(app, error),
+            Err(_) => return fail(app, "无法完成固定助手更新检查，当前程序保持不变".into()),
+        }
+    };
     if let Err(error) = crate::background::prepare_update(app).await {
         return fail(app, error);
     }

@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+from macos_keychain_binding import active_helper
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -30,21 +31,18 @@ def main():
     assert len(identity) == 40 and all(c in "0123456789ABCDEFabcdef" for c in identity)
     source_hash = sha(ROOT / "scripts/macos_keychain.swift")
     cache = ROOT / ".local/keychain-helper"
-    installed = args.data_dir / "keychain-helper/mcplink-keychain"
-    active = installed.with_name("active.json")
+    active = active_helper(args.data_dir)
     binary = args.record / "mcplink-keychain"
     report = {"protocol": 1, "identifier": "io.mcplink.keychain", "certificate_sha1": identity,
               "source_sha256": source_hash, "credentials_read": False, "installed_or_enabled": False}
-    if active.exists() and not args.new_helper_candidate:
-        binding = json.loads(active.read_text())
-        assert not installed.is_symlink() and sha(installed) == binding["sha256"], "Installed helper changed; explicit review required"
-        shutil.copy2(installed, binary)
+    if active and not args.new_helper_candidate:
+        shutil.copy2(active["path"], binary)
         report["mode"] = "reused_installed_bytes"
         report["current_source_sha256"] = source_hash
         report["source_sha256"] = None
         if (cache / "manifest.json").exists():
             cached = json.loads((cache / "manifest.json").read_text())
-            if cached.get("sha256") == binding["sha256"]:
+            if cached.get("sha256") == active["sha256"]:
                 report["source_sha256"] = cached.get("source_sha256")
     elif (cache / "manifest.json").exists() and not args.new_helper_candidate:
         previous = json.loads((cache / "manifest.json").read_text())
@@ -63,7 +61,7 @@ def main():
     binary.chmod(0o700)
     report["sha256"] = sha(binary)
     (args.record / "manifest.json").write_text(json.dumps(report, indent=2) + "\n")
-    if not active.exists() and not args.new_helper_candidate and not cache.exists():
+    if not active and not args.new_helper_candidate and not cache.exists():
         cache.mkdir(parents=True)
         shutil.copy2(binary, cache / "mcplink-keychain")
         (cache / "manifest.json").write_text(json.dumps(report, indent=2) + "\n")

@@ -14,6 +14,7 @@ fn main() {
 <key>CFBundleName</key><string>mcplink</string>
 <key>CFBundleVersion</key><string>{version}</string>
 <key>CFBundleShortVersionString</key><string>{version}</string>
+<key>MCPLinkKeychainBindingVersion</key><integer>2</integer>
 </dict></plist>
 "#)).unwrap();
     println!(

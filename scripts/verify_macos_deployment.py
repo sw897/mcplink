@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from macos_keychain_binding import active_helper
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -41,12 +42,9 @@ def snapshot(cli, data, no_ui):
         "gateways": sorted([{"id": g["id"], "members": g["members"], "editVersion": g["editVersion"]} for g in gateways], key=lambda g: g["id"]),
         "paused": status["gateway"]["paused"], "login_items": login,
     }
-    binding = data / "keychain-helper/active.json"
-    if binding.exists():
-        helper = binding.with_name("mcplink-keychain")
-        value = json.loads(binding.read_text())
-        assert value["version"] == 1 and sha(helper) == value["sha256"], "Fixed credential helper or binding changed"
-        result["keychain_helper"] = {"binding_sha256": sha(binding), "helper_sha256": sha(helper)}
+    helper = active_helper(data)
+    if helper:
+        result["keychain_helper"] = {"binding_sha256": helper["binding_sha256"], "helper_sha256": helper["sha256"]}
     return result
 
 
@@ -102,16 +100,22 @@ def main():
         app_cli = args.app / "Contents/MacOS/mcplink"
         desktop = args.app / "Contents/MacOS/mcplink-desktop"
         assert sha(args.cli) == sha(app_cli), "Installed standalone CLI and App CLI differ"
-        identity_paths = [args.cli, app_cli, desktop]
-        if "keychain_helper" in before:
-            identity_paths.append(args.data_dir / "keychain-helper/mcplink-keychain")
+        identity_paths = [args.cli, app_cli, desktop, args.app]
+        fixed = active_helper(args.data_dir)
+        if fixed:
+            identity_paths.append(fixed["path"])
         audit = json.loads(subprocess.check_output([str(helper), *map(str, identity_paths)], text=True))
         signatures = {s["path"]: s for s in audit["signatures"]}
         for path in (args.cli, app_cli):
             assert signatures[str(path.resolve())]["identifier"] == "io.mcplink.cli", "Unstable CLI signing identifier"
+        for path in (desktop, args.app):
+            assert signatures[str(path.resolve())]["identifier"] == "io.mcplink.desktop", "Invalid desktop signing identifier"
         if "keychain_helper" in before:
             assert signatures[str(identity_paths[-1].resolve())]["identifier"] == "io.mcplink.keychain", "Invalid fixed helper identifier"
         assert all(s["valid"] for s in signatures.values()), "Invalid installed signature"
+        if fixed:
+            for path in (args.cli, app_cli, args.app):
+                assert signatures[str(path.resolve())]["keychain_binding_version"] >= fixed["version"], "Installed main cannot read the active binding version"
         assert all(p["valid"] for p in audit["processes"]), "A running Bridge/App/daemon still uses replaced code; reload the owning Agent MCP connection"
         assert any(p["path"] == str(desktop) for p in audit["processes"]), "Installed desktop is not running"
         certs = {s.get("certificate_sha1") for s in signatures.values()}
