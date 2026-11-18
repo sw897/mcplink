@@ -251,6 +251,7 @@ if (location.origin === ORIGIN) {
                             assert (current["right"] <= previous["left"]+1 or previous["right"] <= current["left"]+1
                                 or current["bottom"] <= previous["top"]+1 or previous["bottom"] <= current["top"]+1), card
             browser("set", "viewport", "940", "620")
+            wait_for("innerWidth === 940 && innerHeight === 620 && document.fonts.status === 'loaded'")
 
         def copy_import_value(label, expected):
             attribute = json.dumps(label, ensure_ascii=False)
@@ -632,6 +633,17 @@ if (location.origin === ORIGIN) {
         wait_for("document.querySelectorAll('dialog .mode-choices input').length === 1 && document.querySelector('dialog .mode-choices')?.innerText.includes('统一入口')")
         hermes_target = 'dialog[open] .target input[type=checkbox][value="hermes:user"]'
         wait_for("!!document.querySelector(" + json.dumps(hermes_target) + ") && !document.querySelector(" + json.dumps(hermes_target) + ").disabled")
+        browser("scrollintoview", hermes_target)
+        # A mounted input can still be clipped by the scrolling modal body.
+        # Wait for its real hit target before the single native checkbox action.
+        wait_for('''(() => {
+            const input = document.querySelector(SELECTOR);
+            const body = input?.closest('.modal-body');
+            if (!input || input.disabled || !body) return false;
+            const r = input.getBoundingClientRect(), b = body.getBoundingClientRect();
+            return r.width > 0 && r.height > 0 && r.top >= b.top && r.bottom <= b.bottom &&
+                input.contains(document.elementFromPoint(r.x + r.width/2, r.y + r.height/2));
+        })()'''.replace('SELECTOR', json.dumps(hermes_target)))
         browser("check", hermes_target)
         wait_for("document.querySelectorAll('dialog[open] .target input:checked').length === 1 && document.querySelector('dialog[open] .target input:checked')?.closest('label').innerText.includes('Hermes · 用户配置')")
         button("预览变更")
@@ -875,6 +887,20 @@ if (location.origin === ORIGIN) {
             if result["conclusion"] != "PASS":
                 # Public logs contain only allowlisted, synthetic state; raw diagnostics stay private.
                 print("RENDERER_FAILURE " + json.dumps({"action":current_action,"completedChecks":len(checks),"lastPassed":checks[-1] if checks else None}), flush=True)
+                try:
+                    # Only geometry and checkbox state enter public CI logs.
+                    # Do not print paths, input values or dialog/business text.
+                    state = json.loads(browser("eval", """(() => {
+                        const dialog = document.querySelector('dialog[open]');
+                        const input = dialog?.querySelector('.target input[value="hermes:user"]');
+                        const r = input?.getBoundingClientRect();
+                        return {viewport:[innerWidth,innerHeight], openDialogCount:document.querySelectorAll('dialog[open]').length,
+                            targetPresent:!!input, disabled:input?.disabled, checked:input?.checked,
+                            bounds:r ? {x:r.x,y:r.y,width:r.width,height:r.height}:null};
+                    })()"""))
+                    print("RENDERER_FAILURE_GEOMETRY " + json.dumps(state), flush=True)
+                except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+                    pass
                 try:
                     (record/"failure-snapshot.txt").write_text(browser("snapshot"))
                     browser("screenshot", str(record/"failure.png"))
