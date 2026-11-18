@@ -43,7 +43,7 @@ python3 tests/e2e/run.py --record artifacts/e2e/core-local
 | `updater.py` | 真实 Rust 更新实现访问回环 GitHub 夹具：版本筛选、取消、哈希/签名/签名版本拒绝、受限 URL、CLI 同步与中断恢复；`--live` 另检查公开 GitHub。此脚本不安装桌面，Windows 下载契约不等于 Windows 应用内升级通过。 |
 | `verify_package.py`、`installed_app.py` | macOS DMG、打包内容、签名和隔离安装场景 |
 
-`macos_keychain.py` 的本地默认模式不修改证书信任。GitHub 托管 macOS 运行器显式传 `--github-hosted-fixture-trust`，仅为新生成的临时测试证书增加 codeSign 信任，结束时按该证书精确移除信任和系统证书副本；其他环境拒绝该选项。正式本机签名、固定助手准备和部署不调用这条 CI 流程。
+`macos_keychain.py` 不修改证书信任。本地默认模式保留既有默认钥匙串；GitHub 托管 macOS 运行器显式传 `--github-hosted-keychain-default`，仅在测试期间将临时钥匙串选为默认，结束时恢复原值并移除临时钥匙串；其他环境拒绝该选项。正式本机签名、固定助手准备和部署不调用这条 CI 流程。
 
 ## 原生客户端与平台
 

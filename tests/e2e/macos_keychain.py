@@ -21,12 +21,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--record", type=Path, required=True)
     parser.add_argument("--binary", type=Path, default=ROOT / "target/debug/mcplink")
-    parser.add_argument("--github-hosted-fixture-trust", action="store_true",
-                        help="Allow temporary code-signing trust for the generated fixture certificate on a disposable GitHub-hosted runner only")
+    parser.add_argument("--github-hosted-keychain-default", action="store_true",
+                        help="Temporarily select the disposable signing Keychain as default on a GitHub-hosted runner only")
     args = parser.parse_args()
     assert sys.platform == "darwin"
-    if args.github_hosted_fixture_trust:
-        assert os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted", "Fixture trust is restricted to disposable GitHub-hosted runners; local tests never change certificate trust"
+    if args.github_hosted_keychain_default:
+        assert os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted", "Changing the default is restricted to disposable GitHub-hosted runners; local tests keep the existing default Keychain"
     os.umask(0o077)
     record = args.record.resolve(); record.mkdir(parents=True, exist_ok=False)
     data = record / "data"; data.mkdir()
@@ -36,25 +36,34 @@ def main():
     run(["swiftc", str(ROOT / "scripts/macos_identity.swift"), "-o", str(audit)])
     password = secrets.token_urlsafe(32)
     passed = []
-    report = {"conclusion": "FAIL", "existing_credentials_touched": False, "keychain_ui_allowed": False}
+    report = {"conclusion": "FAIL", "existing_credentials_touched": False, "keychain_ui_allowed": False,
+              "certificate_trust_modified": False}
     created = False
     fixture_search_added = False
-    hosted_trust_cleanup = False
-    fixture_certificate = record / "fixture-certificate.pem"
+    original_default = None
     fingerprint = None
     try:
         run([str(audit), "--create-fixture-keychain", str(keychain)], json.dumps({"password": password}).encode())
         created = True
+        if args.github_hosted_keychain_default:
+            original_default = shlex.split(run(["security", "default-keychain", "-d", "user"]).decode())
+            assert len(original_default) == 1, "Expected one original default Keychain"
+            run(["security", "default-keychain", "-d", "user", "-s", str(keychain)])
         private = run(["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048"])
-        cert = run(["openssl", "req", "-new", "-x509", "-sha256", "-days", "2", "-key", "/dev/stdin", "-subj", "/CN=mcplink isolated fixture",
-                    "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,digitalSignature,keyCertSign,cRLSign", "-addext", "extendedKeyUsage=codeSigning"], private)
+        # A code-signing leaf, with an explicit configuration so runner OpenSSL
+        # defaults cannot silently add unrelated or unsupported extensions.
+        cert = run(["openssl", "req", "-new", "-x509", "-sha256", "-days", "2", "-config", "/dev/null",
+                    "-key", "/dev/stdin", "-subj", "/CN=mcplink isolated fixture",
+                    "-addext", "basicConstraints=critical,CA:FALSE", "-addext", "keyUsage=critical,digitalSignature",
+                    "-addext", "extendedKeyUsage=critical,codeSigning"], private)
         fingerprint = run(["openssl", "x509", "-noout", "-fingerprint", "-sha1"], cert).decode().strip().split("=", 1)[1].replace(":", "")
         cert_fd, cert_write = os.pipe(); pass_fd, pass_write = os.pipe()
         try:
             os.write(cert_write, cert); os.close(cert_write)
             os.write(pass_write, (password + "\n").encode()); os.close(pass_write)
             archive = run(["openssl", "pkcs12", "-export", "-inkey", "/dev/stdin", "-in", f"/dev/fd/{cert_fd}",
-                           "-keypbe", "PBE-SHA1-3DES", "-certpbe", "PBE-SHA1-3DES", "-macalg", "sha1", "-passout", f"fd:{pass_fd}"], private,
+                           "-name", "mcplink isolated fixture", "-keypbe", "PBE-SHA1-3DES", "-certpbe", "PBE-SHA1-3DES",
+                           "-macalg", "sha1", "-passout", f"fd:{pass_fd}"], private,
                           pass_fds=(cert_fd, pass_fd))
         finally:
             os.close(cert_fd); os.close(pass_fd)
@@ -77,17 +86,8 @@ def main():
             # resolving the signing chain, despite --keychain selecting its key.
             # Append only this disposable Keychain; never replace the list.
             original_search = shlex.split(run(["security", "list-keychains", "-d", "user"]).decode())
-            run(["security", "list-keychains", "-d", "user", "-s", *original_search, str(keychain)])
+            run(["security", "list-keychains", "-d", "user", "-s", str(keychain), *original_search])
             fixture_search_added = True
-        if args.github_hosted_fixture_trust:
-            # Make the generated test identity eligible for code signing on a
-            # clean hosted image. Trust only its public certificate for this
-            # policy inside the disposable VM. Never use a user's identity or
-            # run this branch during local setup/deployment.
-            fixture_certificate.write_bytes(cert)
-            hosted_trust_cleanup = True
-            run(["sudo", "-n", "/usr/bin/security", "add-trusted-cert", "-d", "-r", "trustRoot", "-p", "codeSign",
-                 "-k", "/Library/Keychains/System.keychain", str(fixture_certificate)])
         identities = run(["security", "find-identity", "-p", "codesigning", str(keychain)]).decode()
         print(json.dumps({"fixture_signing_identity_present": fingerprint.lower() in identities.lower()}))
         print(json.dumps({"isolated_fixture_identity_policy": identities.strip()}))
@@ -95,21 +95,15 @@ def main():
 
         def sign(path, identifier):
             run(["security", "unlock-keychain", "-p", password, str(keychain)])
-            result = subprocess.run(["codesign", "--verbose=4", "--force", "--keychain", str(keychain), "--sign", fingerprint,
+            result = subprocess.run(["/usr/bin/codesign", "--verbose=4", "--force", "--keychain", str(keychain), "--sign", fingerprint,
                                      "--identifier", identifier, "--options", "runtime", "--timestamp=none", str(path)],
-                                    capture_output=True, text=True)
-            if result.returncode:
-                # The documented name lookup is constrained to our one
-                # disposable Keychain; audit the actual signer below.
-                result = subprocess.run(["codesign", "--verbose=4", "--force", "--keychain", str(keychain), "--sign", "mcplink isolated fixture",
-                                         "--identifier", identifier, "--options", "runtime", "--timestamp=none", str(path)],
-                                        capture_output=True, text=True)
-                print(json.dumps({"fixture_identity_name_lookup_exit": result.returncode}))
+                                    capture_output=True, text=True, timeout=30)
             if result.returncode:
                 # This command handles only an ephemeral fixture identity, not
                 # the import payload or a production credential. Keep its public
                 # signing diagnostic instead of losing the CI failure reason.
                 print(json.dumps({"fixture_signing_error": result.stderr[-1600:]}))
+                print(json.dumps({"fixture_public_certificate": run(["openssl", "x509", "-text", "-noout"], cert).decode()}))
                 raise RuntimeError("Isolated fixture signing failed")
 
         helper = record / "mcplink-keychain"
@@ -206,18 +200,14 @@ def main():
         report.update(error_class=type(error).__name__, passed=passed)
         raise
     finally:
-        if hosted_trust_cleanup:
-            removed = subprocess.run(["sudo", "-n", "/usr/bin/security", "remove-trusted-cert", "-d", str(fixture_certificate)], capture_output=True)
-            deleted = subprocess.run(["sudo", "-n", "/usr/bin/security", "delete-certificate", "-Z", fingerprint,
-                                      "/Library/Keychains/System.keychain"], capture_output=True)
-            report["hosted_fixture_trust_removed"] = removed.returncode == deleted.returncode == 0
+        if original_default is not None:
+            run(["security", "default-keychain", "-d", "user", "-s", original_default[0]], timeout=20)
+            report["hosted_default_keychain_restored"] = shlex.split(run(["security", "default-keychain", "-d", "user"]).decode()) == original_default
         if fixture_search_added:
             current = shlex.split(run(["security", "list-keychains", "-d", "user"]).decode())
             run(["security", "list-keychains", "-d", "user", "-s", *[p for p in current if p != str(keychain)]])
         if created:
             run([str(audit), "--delete-fixture-keychain", str(keychain)])
-        if hosted_trust_cleanup and not report.get("hosted_fixture_trust_removed"):
-            report.update(conclusion="FAIL", error="hosted_fixture_trust_cleanup_failed")
         report["temporary_keychain_removed"] = not keychain.exists()
         (record / "report.json").write_text(json.dumps(report, indent=2) + "\n")
         print(json.dumps(report))
