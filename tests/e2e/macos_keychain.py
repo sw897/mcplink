@@ -61,6 +61,9 @@ def main():
         # Only the newly created disposable signing key is affected. The known
         # synthetic password avoids any system dialog; login Keychain untouched.
         run(["security", "set-key-partition-list", "-S", "apple-tool:,apple:", "-s", "-k", password, str(keychain)])
+        # Keep only this disposable Keychain unlocked for the bounded test;
+        # a fresh headless runner may have a different automatic-lock policy.
+        run(["security", "set-keychain-settings", "-lut", "21600", str(keychain)])
         run(["security", "unlock-keychain", "-p", password, str(keychain)])
         if os.environ.get("CI"):
             # Headless macOS codesign also consults the user search list when
@@ -75,9 +78,17 @@ def main():
         assert fingerprint.lower() in identities.lower(), "Disposable signing identity did not persist"
 
         def sign(path, identifier):
-            result = subprocess.run(["codesign", "--force", "--keychain", str(keychain), "--sign", fingerprint,
+            run(["security", "unlock-keychain", "-p", password, str(keychain)])
+            result = subprocess.run(["codesign", "--verbose=4", "--force", "--keychain", str(keychain), "--sign", fingerprint,
                                      "--identifier", identifier, "--options", "runtime", "--timestamp=none", str(path)],
                                     capture_output=True, text=True)
+            if result.returncode:
+                # The documented name lookup is constrained to our one
+                # disposable Keychain; audit the actual signer below.
+                result = subprocess.run(["codesign", "--verbose=4", "--force", "--keychain", str(keychain), "--sign", "mcplink isolated fixture",
+                                         "--identifier", identifier, "--options", "runtime", "--timestamp=none", str(path)],
+                                        capture_output=True, text=True)
+                print(json.dumps({"fixture_identity_name_lookup_exit": result.returncode}))
             if result.returncode:
                 # This command handles only an ephemeral fixture identity, not
                 # the import payload or a production credential. Keep its public
@@ -99,6 +110,7 @@ def main():
             callers.append(caller)
         audit_result = json.loads(run([str(audit), *map(str, callers)]))
         assert len({s["cdhash"] for s in audit_result["signatures"]}) == 3
+        assert all(s.get("certificate_sha1") == fingerprint for s in audit_result["signatures"])
         passed.append("three distinct signed callers with one fixed helper")
 
         def request(caller, operation, value=None, extra=None, expected=0):
