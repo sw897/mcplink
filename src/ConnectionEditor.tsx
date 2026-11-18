@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { ArrowRight, KeyRound, Loader2 } from "lucide-react";
 import { Connection, Definition, rpc } from "./contracts";
 import { Modal } from "./Modal";
+import { CredentialInput, OpenApiImport } from "./OpenApiImport";
 
 export function Editor({
   connection,
@@ -29,6 +30,12 @@ export function Editor({
   const [definition, setDefinition] = useState<Definition>();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
+  const [importedCredentials, setImportedCredentials] = useState<
+    CredentialInput[]
+  >([]);
+  const [importedValues, setImportedValues] = useState<Record<string, string>>(
+    {},
+  );
   useEffect(() => {
     if (connection) {
       setPending(true);
@@ -117,6 +124,15 @@ export function Editor({
           next.cwd = undefined;
         }
         next.headers = JSON.parse(customHeaders);
+        for (const [key, value] of Object.entries(importedValues)) {
+          if (!value) continue;
+          next.headers = Object.fromEntries(
+            Object.entries(next.headers).filter(
+              ([old]) => old.toLowerCase() !== key.toLowerCase(),
+            ),
+          );
+          next.headers[key] = value;
+        }
       }
       for (const map of [next.env, next.headers]) {
         if (
@@ -228,6 +244,61 @@ export function Editor({
                   }
                 />
               </label>
+              {type === "http-api" && (
+                <OpenApiImport
+                  disabled={pending}
+                  onApply={(result) => {
+                    setUrl(result.definition.url || "");
+                    setHttpApi(
+                      JSON.stringify(result.definition.httpApi, null, 2),
+                    );
+                    setDefinition((current) =>
+                      current
+                        ? { ...current, httpApi: result.definition.httpApi }
+                        : result.definition,
+                    );
+                    if (!name) setName(result.suggestedName);
+                    if (!title) setTitle(result.title);
+                    setImportedCredentials(result.credentialInputs);
+                    setImportedValues({});
+                  }}
+                />
+              )}
+              {type === "http-api" &&
+                connection &&
+                definition?.includeSpecified && (
+                  <p className="field-help">
+                    此连接已有工具范围限制。导入后请检查允许的工具名称；新增工具仍受原范围限制。
+                  </p>
+                )}
+              {type === "http-api" && importedCredentials.length > 0 && (
+                <div className="import-credentials">
+                  <p className="field-help">
+                    所选操作需要以下认证。文档没有提供实际凭据；可以在此填写，或保存后再配置。
+                  </p>
+                  {importedCredentials
+                    .filter(
+                      (item) => item.header.toLowerCase() !== "authorization",
+                    )
+                    .map((item) => (
+                      <label className="field" key={item.header}>
+                        <span>{item.header}</span>
+                        <input
+                          type="password"
+                          autoComplete="off"
+                          value={importedValues[item.header] || ""}
+                          placeholder={item.hint}
+                          onChange={(event) =>
+                            setImportedValues((current) => ({
+                              ...current,
+                              [item.header]: event.target.value,
+                            }))
+                          }
+                        />
+                      </label>
+                    ))}
+                </div>
+              )}
               {type === "http-api" && (
                 <label className="field">
                   <span>工具与请求映射 · JSON</span>

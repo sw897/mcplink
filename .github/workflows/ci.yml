@@ -214,6 +214,9 @@ jobs:
       - name: HTTP API Adapter acceptance
         timeout-minutes: 5
         run: python -u tests/e2e/http_api.py --record artifacts/e2e/ci-http-api
+      - name: OpenAPI import and credential filtering acceptance
+        timeout-minutes: 5
+        run: python -u tests/e2e/openapi.py --record artifacts/e2e/ci-openapi
       - name: Catalog and authentication boundary acceptance
         timeout-minutes: 5
         run: python -u tests/e2e/architecture_boundaries.py --record artifacts/e2e/ci-boundaries

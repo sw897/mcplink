@@ -59,7 +59,7 @@ STDIO 命令需要能在桌面实际继承的运行环境中找到，推荐绝�
 
 ## 加载与恢复
 
-普通 HTTP API 可通过声明式 Adapter 提供 MCP tools，复用单服务共享入口、统一入口和 CLI。支持路径/query/JSON 映射、托管请求头及 JSON/文本/PNG/JPEG/WebP 结果；不将原始 API 地址导出为原生 MCP。当前未提供 OpenAPI 导入、multipart 上传、流式图片或异步任务。工具清单来自本地定义，真实上游核验须实际调用或运行显式 probe，详见 [HTTP API 指南](http-api.md)。
+普通 HTTP API 可通过声明式 Adapter 提供 MCP tools，复用单服务共享入口、统一入口和 CLI。支持路径/query/JSON 映射、托管请求头、通用响应条件及 JSON/文本/PNG/JPEG/WebP 结果；不将原始 API 地址导出为原生 MCP。支持 OpenAPI／Swagger 离线文件导入；未支持的操作明确标记，默认不选择任何操作。暂不支持 multipart 上传、流式图片或异步任务。工具清单来自本地定义，真实上游核验须实际调用或运行显式 probe，详见 [HTTP API 指南](http-api.md)。
 
 文件写入或配置生成成功后，客户端仍需重新加载并完成实际工具调用。界面不会将写入状态当作已获信任或业务调用成功。
 

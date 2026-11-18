@@ -34,6 +34,11 @@ struct Args {
 enum Command {
     /// 离线输出命令、参数和标准输入契约，不连接后台
     Schema,
+    /// 离线将 OpenAPI/Swagger 文档转换为待审阅的 HTTP API 配置
+    HttpApi {
+        #[command(subcommand)]
+        command: HttpApiCommand,
+    },
     /// 扫描原生配置并返回连接、绑定、来源、历史和后台状态
     Status,
     /// 校验 stdin 参数后调用指定连接的精确工具名，不自动重试
@@ -103,6 +108,26 @@ enum Command {
     Bridge {
         #[arg(long)]
         connection: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum HttpApiCommand {
+    /// 预览操作；显式选择后生成配置，不连接后台或调用上游
+    Import {
+        #[arg(long, required_unless_present = "stdin", conflicts_with = "stdin")]
+        file: Option<PathBuf>,
+        /// JSON 对象：source 为 JSON/YAML 文档正文，另可传 serverUrl、operations、all、toolNames
+        #[arg(long, conflicts_with_all = ["server", "operation", "all"])]
+        stdin: bool,
+        #[arg(long)]
+        server: Option<String>,
+        /// 重复选择实际操作键，例如 --operation "GET /notes/{id}"
+        #[arg(long, conflicts_with = "all")]
+        operation: Vec<String>,
+        /// 显式选择全部受支持操作，仍只输出预览
+        #[arg(long)]
+        all: bool,
     },
 }
 
@@ -336,15 +361,16 @@ fn schema() -> Value {
             "discoveryStatus":["complete","partial","failed","not_checked"],"toolStatus":["current","changed","unavailable","unchecked"],
             "semantics":"Inspection only, no tool calls or file changes. Read the report, not just exit code 0. Partial discovery keeps healthy tools checkable; failed members are unchecked, not removed. Changes compare saved parameter metadata, not complete schemas."},
         "exitCodes":{"0":"success","1":"operation failure, non-ready probe, upstream error or partial apply","2":"invalid CLI arguments or stdin"},
-        "httpApi":{"definitionField":"httpApi","transport":"http-api","baseUrlField":"url","authentication":"managed definition.headers; no MCP OAuth; shared connections only",
-            "tools":{"required":["name","description","inputSchema","method","path","response"],"optional":["pathParams","query","body","annotations"],"methods":["GET","POST","PUT","PATCH","DELETE","HEAD"]},
+        "httpApi":{"managementApi":23,"definitionField":"httpApi","transport":"http-api","baseUrlField":"url","authentication":"managed definition.headers; no MCP OAuth; shared connections only",
+            "tools":{"required":["name","description","inputSchema","method","path","response"],"optional":["pathParams","query","queryEncoding","body","requestContentType","annotations"],"methods":["GET","POST","PUT","PATCH","DELETE","HEAD"]},
             "mapping":{"input":{"$input":"JSON Pointer","default":"optional literal"},"missing":"omit object/query values; required path and array entries fail","queryArrays":"comma-separated","paths":"whole-segment {name}, percent-encoded, same origin"},
-            "response":{"type":["json","text","image","base64Image"],"pointer":"optional JSON Pointer for json/base64Image","mimeType":"optional expected image/png,image/jpeg,image/webp","maxBytes":8388608},
+            "response":{"type":["json","text","image","base64Image"],"pointer":"optional JSON Pointer for json/base64Image","mimeType":"optional expected image/png,image/jpeg,image/webp","maxBytes":8388608,"success":{"pointer":"JSON Pointer in original response","equals":"literal scalar; missing/mismatched values are tool failures"},"sensitivePaths":"optional original-response JSON Pointers, filtered before output","credentialFiltering":"managed/custom request-header values, including encoded and token-only echoes; public metadata headers can be added via httpApi.sensitiveHeaders"},
             "probe":{"tool":"explicit operation name","arguments":"validated JSON object","semantics":"Only connections probe executes this sample. tools/list is local; successful discovery alone does not verify the upstream."}},
         "stdin":{"limitBytes":INPUT_LIMIT,"encoding":"UTF-8 JSON object; close stdin after one request",
-            "connections save":{"required":["name","definition"],"optional":["id","title","accountLabel"],
+            "http-api import":{"required":["source"],"optional":["serverUrl","operations","all","toolNames"],"semantics":"Offline JSON/YAML document preview; operations are METHOD /path keys. Defaults to no selection. Explicit all selects supported operations only. No requests, credentials or configuration writes."},
+            "connections save":{"required":["name","definition"],"optional":["id","title","accountLabel","credentialMappings"],
                 "definition":{"command":"string (stdio)","args":"string[]","env":"object<string,string>","cwd":"string","url":"string (HTTP MCP or API base URL)","httpApi":"object or null; see top-level httpApi contract","headers":"object<string,string>","enabled":"boolean (default true)","oauth":"boolean","clientId":"string or null","clientSecret":"string or null; masked on output","oauthScopes":"string[] (empty uses server suggestions)","oauthCallbackPort":"integer 1–65535 or null (automatic)","includeTools":"string[]","excludeTools":"string[]","includeSpecified":"boolean (true to restrict even when includeTools is empty)","timeout":"integer seconds","startupTimeout":"integer seconds","resourcesDisabled":"boolean","promptsDisabled":"boolean"},
-                "semantics":"Edit the normalized definition from connections show. Masked credentials stay with their origin. Changing origin suspends access. Metadata edits preserve connection state."},
+                "credentialMappings":{"from":{"field":"env or headers","name":"existing protected name"},"to":{"field":"env or headers","name":"new protected name"},"semantics":"array; existing id + definition.editVersion required; values stay in backend memory and protected storage"},"semantics":"Edit the normalized definition from connections show. Masked credentials stay with their origin. Changing origin suspends access. Metadata edits preserve connection state."},
             "credentials update":{"required":["value"],"optional":["header (default Authorization)"],"semantics":"Value stored verbatim, no Bearer prefix added"},
             "gateway save":{"required":["connectionIds"],"optional":["id","editVersion","title","toolSelections"],"semantics":"Create an aggregate entry or replace its service selection. Updates require editVersion. toolSelections maps selected connection IDs to original tool names: null inherits the service policy, [] exposes no tools; omission retains the saved range. Entry ranges can only narrow service-wide policy. Empty service selection exposes nothing; authentication stays with member connections."},
             "credentials oauth-config":{"optional":{"clientId":"string or null","clientSecret":"string, retained mask or null","scopes":"string[]; empty uses server suggestions","callbackPort":"integer 1–65535 or null"},"semantics":"Partial update. Omitted fields retain values; null clears optional fields. Does not start login or switch Token mode; changes invalidate an existing OAuth grant. Secrets use stdin and the system credential store; direct native export is unavailable for managed OAuth parameters."},
@@ -456,6 +482,42 @@ impl Failure {
 async fn execute(command: Command, data: PathBuf) -> Result<Value, Failure> {
     let (method, params, projection, check) = match command {
         Command::Schema => return Ok(schema()),
+        Command::HttpApi {
+            command:
+                HttpApiCommand::Import {
+                    file,
+                    stdin,
+                    server,
+                    operation,
+                    all,
+                },
+        } => {
+            let request = if stdin {
+                serde_json::from_value(stdin_json().await.map_err(Failure::input)?)
+                    .map_err(|_| Failure::input(anyhow::anyhow!("导入参数格式有误")))?
+            } else {
+                let file = file.ok_or_else(|| Failure::input(anyhow::anyhow!("请选择本地文档")))?;
+                let metadata = fs::metadata(&file)
+                    .map_err(|_| Failure::input(anyhow::anyhow!("无法读取导入文件")))?;
+                if !metadata.is_file()
+                    || metadata.len() > mcplink_core::http_api::import::MAX_DOCUMENT_BYTES as u64
+                {
+                    return Err(Failure::input(anyhow::anyhow!(
+                        "导入需要不超过 4 MiB 的本地文件"
+                    )));
+                }
+                let source = fs::read_to_string(file)
+                    .map_err(|_| Failure::input(anyhow::anyhow!("导入文件需要 UTF-8 JSON/YAML")))?;
+                mcplink_core::http_api::import::ImportRequest {
+                    source,
+                    server_url: server,
+                    operations: operation,
+                    all,
+                    ..Default::default()
+                }
+            };
+            return mcplink_core::http_api::import::preview(request).map_err(Failure::input);
+        }
         Command::Skill {
             command: SkillCommand::Show,
         } => return Ok(json!({"name":"mcplink","content":SKILL})),

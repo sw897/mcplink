@@ -437,6 +437,16 @@ impl Engine {
                 .map(|old| self.definition(old))
                 .transpose()?,
         };
+        if let Some(mappings) = p.get("credentialMappings") {
+            if existing.is_none() || draft.is_some() || edit_version.is_none() {
+                bail!("凭据字段迁移仅用于带编辑版本的已有托管连接");
+            }
+            crate::credential_transfer::apply(
+                mappings,
+                previous.as_ref().context("原连接不存在")?,
+                &mut definition,
+            )?;
+        }
         let mut changed_origin = false;
         if let Some(old_definition) = &previous {
             if protected_url {
@@ -1303,6 +1313,9 @@ impl Engine {
             bail!("统一入口不保存账号授权，请在上游服务的账号中维护认证");
         }
         match method {
+            "httpApi.import" => crate::http_api::import::preview(
+                serde_json::from_value(p).map_err(|_| anyhow::anyhow!("导入参数格式有误"))?,
+            ),
             "gateway.list" => Ok(json!(
                 self.store
                     .connections()?

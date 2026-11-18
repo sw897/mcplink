@@ -13,6 +13,9 @@ use std::{
     time::Duration,
 };
 
+pub mod import;
+mod security;
+
 const MAX_RESPONSE: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
@@ -21,6 +24,9 @@ pub struct HttpApi {
     pub tools: Vec<HttpTool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probe: Option<Probe>,
+    /// Additional credential headers, including any normally public metadata headers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sensitive_headers: Vec<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
@@ -42,8 +48,12 @@ pub struct HttpTool {
     pub path_params: BTreeMap<String, Value>,
     #[serde(default)]
     pub query: BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub query_encoding: BTreeMap<String, QueryEncoding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_content_type: Option<String>,
     pub response: ResponseMapping,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub annotations: Option<Value>,
@@ -57,6 +67,27 @@ pub struct ResponseMapping {
     pub pointer: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub success: Option<ResponseCondition>,
+    /// JSON Pointers relative to the original response, before selecting `pointer`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sensitive_paths: Vec<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResponseCondition {
+    pub pointer: String,
+    pub equals: Value,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum QueryEncoding {
+    Comma,
+    Repeated,
+    Space,
+    Pipe,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -140,6 +171,10 @@ pub fn validate(definition: &Definition) -> Result<()> {
     for key in definition.headers.keys() {
         checked_header_name(key)?;
     }
+    ensure!(api.sensitive_headers.len() <= 128, "敏感请求头声明过多");
+    for name in &api.sensitive_headers {
+        checked_header_name(name)?;
+    }
     let mut names = HashSet::new();
     for tool in &api.tools {
         config::safe_name(&tool.name)?;
@@ -198,6 +233,39 @@ pub fn validate(definition: &Definition) -> Result<()> {
             .chain(tool.body.iter())
         {
             validate_template(template, 0)?;
+        }
+        ensure!(
+            tool.query_encoding
+                .keys()
+                .all(|key| tool.query.contains_key(key)),
+            "queryEncoding 包含未定义的 query 参数"
+        );
+        if let Some(content_type) = &tool.request_content_type {
+            ensure!(
+                tool.body.is_some() && json_content_type(content_type),
+                "请求类型需要 JSON body，且必须是 application/json 或 application/*+json"
+            );
+        }
+        ensure!(
+            tool.response.sensitive_paths.len() <= 128,
+            "响应敏感字段声明过多"
+        );
+        ensure!(
+            tool.response.sensitive_paths.is_empty()
+                || matches!(tool.response.r#type, ResponseKind::Json),
+            "响应敏感字段只支持 JSON 结果"
+        );
+        for path in &tool.response.sensitive_paths {
+            ensure!(valid_pointer(path), "响应敏感字段需要有效 JSON Pointer");
+        }
+        if let Some(condition) = &tool.response.success {
+            ensure!(
+                matches!(tool.response.r#type, ResponseKind::Json)
+                    && valid_pointer(&condition.pointer)
+                    && !condition.equals.is_array()
+                    && !condition.equals.is_object(),
+                "响应成功条件需要 JSON 结果、有效 JSON Pointer 和标量比较值"
+            );
         }
         ensure!(
             tool.response.pointer.as_deref().is_none_or(valid_pointer),
@@ -276,6 +344,16 @@ fn scalar(value: &Value) -> Result<String> {
     }
 }
 
+fn json_content_type(value: &str) -> bool {
+    value == "application/json"
+        || (value.starts_with("application/")
+            && value.ends_with("+json")
+            && value.len() <= 128
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"/-+._".contains(&b)))
+}
+
 fn checked_header_name(key: &str) -> Result<reqwest::header::HeaderName> {
     let key =
         reqwest::header::HeaderName::from_bytes(key.as_bytes()).context("HTTP 请求头名称无效")?;
@@ -320,15 +398,31 @@ fn prepare(definition: &Definition, tool: &HttpTool, input: &Value) -> Result<re
             if value.is_null() {
                 continue;
             }
-            let value = match value.as_array() {
-                Some(values) => values
-                    .iter()
-                    .map(scalar)
-                    .collect::<Result<Vec<_>>>()?
-                    .join(","),
-                None => scalar(&value)?,
-            };
-            url.query_pairs_mut().append_pair(key, &value);
+            if let Some(values) = value.as_array() {
+                let values = values.iter().map(scalar).collect::<Result<Vec<_>>>()?;
+                match tool
+                    .query_encoding
+                    .get(key)
+                    .unwrap_or(&QueryEncoding::Comma)
+                {
+                    QueryEncoding::Repeated => {
+                        for value in values {
+                            url.query_pairs_mut().append_pair(key, &value);
+                        }
+                    }
+                    encoding => {
+                        let separator = match encoding {
+                            QueryEncoding::Space => " ",
+                            QueryEncoding::Pipe => "|",
+                            _ => ",",
+                        };
+                        url.query_pairs_mut()
+                            .append_pair(key, &values.join(separator));
+                    }
+                }
+            } else {
+                url.query_pairs_mut().append_pair(key, &scalar(&value)?);
+            }
         }
     }
     let mut request = reqwest::Request::new(
@@ -342,12 +436,22 @@ fn prepare(definition: &Definition, tool: &HttpTool, input: &Value) -> Result<re
             .map_err(|_| anyhow::anyhow!("HTTP 请求头值无效"))?;
         request.headers_mut().insert(key, value);
     }
-    if let Some(template) = &tool.body {
-        let body = render(template, input)?.context("HTTP JSON body 缺少输入")?;
+    if let Some(body) = tool
+        .body
+        .as_ref()
+        .map(|template| render(template, input))
+        .transpose()?
+        .flatten()
+    {
         *request.body_mut() = Some(serde_json::to_vec(&body)?.into());
         request.headers_mut().insert(
             reqwest::header::CONTENT_TYPE,
-            reqwest::header::HeaderValue::from_static("application/json"),
+            reqwest::header::HeaderValue::from_str(
+                tool.request_content_type
+                    .as_deref()
+                    .unwrap_or("application/json"),
+            )
+            .map_err(|_| anyhow::anyhow!("JSON 请求类型无效"))?,
         );
     }
     Ok(request)
@@ -371,7 +475,11 @@ fn image_result(bytes: &[u8], mime: &str) -> Result<Value> {
     )
 }
 
-async fn execute(tool: &HttpTool, request: reqwest::Request) -> Result<Value> {
+async fn execute(
+    tool: &HttpTool,
+    request: reqwest::Request,
+    secrets: &security::CredentialFilter,
+) -> Result<Value> {
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())
@@ -419,8 +527,25 @@ async fn execute(tool: &HttpTool, request: reqwest::Request) -> Result<Value> {
     }
     let mut result = match tool.response.r#type {
         ResponseKind::Json => {
-            let value: Value = serde_json::from_slice(&bytes)
+            let mut value: Value = serde_json::from_slice(&bytes)
                 .map_err(|_| anyhow::anyhow!("HTTP API 未返回有效 JSON"))?;
+            let failed = tool.response.success.as_ref().is_some_and(|condition| {
+                value.pointer(&condition.pointer) != Some(&condition.equals)
+            });
+            // Filter before both result mapping and serialization. The condition is
+            // evaluated on the response but cannot override any credential filter.
+            for path in &tool.response.sensitive_paths {
+                if let Some(field) = value.pointer_mut(path) {
+                    *field = json!("[redacted]");
+                }
+            }
+            secrets.redact_value(&mut value);
+            if failed {
+                let mut result = json!({"content":[{"type":"text","text":serde_json::to_string(&value)?}],
+                    "structuredContent":if value.is_object() { value } else { json!({"data":value}) },"isError":true});
+                result["_meta"] = json!({"mcplink":{"httpStatus":status.as_u16(),"responseCondition":"not_matched"}});
+                return Ok(result);
+            }
             let value = match &tool.response.pointer {
                 Some(pointer) => value
                     .pointer(pointer)
@@ -432,7 +557,7 @@ async fn execute(tool: &HttpTool, request: reqwest::Request) -> Result<Value> {
         ResponseKind::Text => {
             let text = String::from_utf8(bytes)
                 .map_err(|_| anyhow::anyhow!("HTTP API 文本不是有效 UTF-8"))?;
-            json!({"content":[{"type":"text","text":text}],"isError":false})
+            json!({"content":[{"type":"text","text":secrets.redact_text(&text)}],"isError":false})
         }
         ResponseKind::Image => {
             ensure!(
@@ -515,6 +640,8 @@ pub(crate) async fn request(
         .cloned()
         .unwrap_or_else(|| json!({}));
     let prepared = prepare(definition, tool, &input)?;
+    let secrets =
+        security::CredentialFilter::from_headers(prepared.headers(), &api.sensitive_headers)?;
     let current = engine.store.connection(&connection.id)?;
     ensure!(
         current.revision == connection.revision && current.active,
@@ -524,7 +651,7 @@ pub(crate) async fn request(
     let mut shutdown = engine.shutdown.subscribe();
     let outcome = tokio::select! {
         _ = shutdown.wait_for(|stopping| *stopping) => Err(anyhow::anyhow!("后台正在退出；执行结果待核对，不要自动重试")),
-        outcome = tokio::time::timeout(limit, execute(tool, prepared)) => outcome.unwrap_or_else(|_| Err(anyhow::anyhow!("HTTP API 请求超时；执行结果待核对，不要自动重试"))),
+        outcome = tokio::time::timeout(limit, execute(tool, prepared, &secrets)) => outcome.unwrap_or_else(|_| Err(anyhow::anyhow!("HTTP API 请求超时；执行结果待核对，不要自动重试"))),
     };
     let _guard = engine.mutation.lock().await;
     let mut current = engine.store.connection(&connection.id)?;
@@ -551,10 +678,14 @@ pub(crate) async fn request(
     current.last_error = match &outcome {
         Err(error) => Some(error.to_string()),
         Ok(value) if failed => Some(
-            value["content"][0]["text"]
-                .as_str()
-                .unwrap_or("HTTP API 调用失败")
-                .to_owned(),
+            if value.pointer("/_meta/mcplink/responseCondition").is_some() {
+                "上游响应未满足此服务配置的成功条件".to_owned()
+            } else {
+                value["content"][0]["text"]
+                    .as_str()
+                    .unwrap_or("HTTP API 调用失败")
+                    .to_owned()
+            },
         ),
         _ => None,
     };

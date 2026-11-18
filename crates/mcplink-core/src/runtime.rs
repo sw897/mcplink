@@ -63,7 +63,7 @@ async fn health(State(state): State<ServerState>, headers: HeaderMap) -> impl In
     (
         StatusCode::OK,
         Json(
-            json!({"application":"mcplink","instance":state.info.instance,"version":env!("CARGO_PKG_VERSION"),"managementApi":22}),
+            json!({"application":"mcplink","instance":state.info.instance,"version":env!("CARGO_PKG_VERSION"),"managementApi":23}),
         ),
     )
 }
@@ -390,6 +390,16 @@ impl Client {
     }
 
     pub async fn call(&self, method: &str, params: Value) -> Result<Value> {
+        if self.management_api < 23
+            && (method == "httpApi.import"
+                || (method == "connections.save"
+                    && (params.get("credentialMappings").is_some()
+                        || params
+                            .pointer("/definition/httpApi")
+                            .is_some_and(|value| !value.is_null()))))
+        {
+            bail!("此 HTTP API 配置需要新版后台（management API 23），请退出并重启后台");
+        }
         if self.management_api < 22 && method == "cli.check" {
             bail!("旧后台不支持 CLI 契约诊断，请退出并重启后台");
         }

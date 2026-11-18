@@ -74,6 +74,12 @@ mcplink changes restore OPERATION_ID
 
 ## 认证与排查
 
+普通 HTTP API 使用 `definition.httpApi`，工具发现只读取本地定义。若当前 schema 支持 `http-api import`，可离线预览本机 OpenAPI／Swagger JSON/YAML 文件，默认不选择操作；审阅 serverUrl、unsupported/issue、credentialInputs 和工具范围后显式选择，再将返回的 definition 放入保存请求。导入不联网、不写配置、不验证账号；不自动执行文档示例或外部引用。支持范围和字段以 schema 为准。
+
+HTTP API 的业务成功条件通过服务配置 `response.success` 声明；特定业务码的解释、分页与参数换算属于对应业务 Skill。不要在通用 mcplink 逻辑中加入服务专用判断。Adapter 过滤已知请求头凭据回显和配置的敏感 JSON Pointer，不代表所有业务资料都可公开。
+
+替换同一连接的接入方式时，若 schema 支持 credentialMappings，可使用原 ID 和最新 definition.editVersion，将 env/headers 中已有受保护字段迁移到另一个 env/headers 字段。实际值留在后端内存与受保护存储，不导出、不读凭据库文件；变更 HTTP 来源时不能带走旧凭据。新设备仍需独立授权。
+
 `credentials update CONNECTION_ID --stdin` 接受 `{"value":"上游要求的原样凭据","header":"Authorization"}`，默认 header 为 Authorization，不自动加 Bearer。凭据由可信本机来源经 stdin 传入；不要放在命令参数、Shell 历史、聊天回复、临时文件或报告里。`connections save` 中的 headers/env 同样走 stdin。管理输出保留掩码，不尝试读回秘密。
 
 同一本机数据目录内，同一服务、账号和授权范围的托管连接，认证一次供单服务入口、多个聚合入口与 CLI 复用。更新一次凭据共同生效；直连绑定需另行通过预览／应用同步，不承诺共用托管 OAuth 登录态。更新后先查看工具与核验状态；普通 MCP 可重新 `probe`，HTTP API 按下述调用边界核验。`credentials disconnect CONNECTION_ID` 停止该连接的托管调用；它不会清除原生客户端已保存的直连凭据。不同服务、账号、数据目录或设备分别维护授权，撤销或无法续期时重新认证。

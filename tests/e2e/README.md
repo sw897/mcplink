@@ -27,6 +27,7 @@ python3 tests/e2e/run.py --record artifacts/e2e/core-local
 | `claude_native.py` | Claude 原生 CLI 加载生成的原生配置，并调用两个独立上游；模型 Messages 响应来自 loopback 合成服务，不使用真实模型账号 |
 | `tool_calls.py`、`generated_cli.py`、`cli_workflow.py` | 工具发现、Schema 校验、错误与退出码、命令生成及重新绑定；契约参数差异、单服务/聚合发现故障归因、旧后台拒绝及零调用核对 |
 | `http_api.py` | HTTP API 的路径/query/JSON 映射、图片与 Base64 转换、发现与核验区分、聚合路由、CLI 与凭据生命周期 |
+| `openapi.py` | OpenAPI／Swagger 离线 JSON/YAML 导入、显式选择、编码与可选请求体、响应条件、凭据回显过滤及同一连接的受保护字段迁移 |
 | `aggregate_gateway.py` | 单入口多上游、重名路由、分页、资源与提示、服务选择、配置迁移和三路径共用 OAuth；可用 `--pi-package` 验证官方 Pi MCP 运行时 |
 | `entry_policy.py` | 同一账号的独立入口白名单、空与继承语义、全局上限和拒绝伪造调用 |
 | `catalog_refresh.py` | 工具/资源/提示变更通知、入口隔离、手动刷新、断开清理及官方 Pi 实时工具刷新（`--pi-package`） |

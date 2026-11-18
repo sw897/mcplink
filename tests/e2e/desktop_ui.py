@@ -21,6 +21,7 @@ def main():
     parser.add_argument("--profile")
     parser.add_argument("--chrome", required=True)
     parser.add_argument("--browser-driver", default="agent-browser")
+    parser.add_argument("--import-only", action="store_true", help="Run focused OpenAPI editor acceptance")
     args = parser.parse_args()
     record = args.record.resolve()
     record.mkdir(parents=True)
@@ -44,7 +45,7 @@ def main():
             request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             if request.get("method") == "gateway.save" and request.get("params", {}).get("title") == "异步关闭入口":
                 time.sleep(1.5)
-            if request.get("method") not in {"snapshot","connections.detail","connections.save","connections.export_config","changes.preview","changes.apply","sources.add","connections.source_detail","connections.import","connections.detach","connections.probe","changes.preview_restore","changes.restore","credentials.disconnect","changes.history","gateway.save","connections.tools","tools.describe","tools.call","cli.generate","cli.inspect","cli.check","gateway.refresh"}:
+            if request.get("method") not in {"httpApi.import","snapshot","connections.detail","connections.save","connections.export_config","changes.preview","changes.apply","sources.add","connections.source_detail","connections.import","connections.detach","connections.probe","changes.preview_restore","changes.restore","credentials.disconnect","changes.history","gateway.save","connections.tools","tools.describe","tools.call","cli.generate","cli.inspect","cli.check","gateway.refresh"}:
                 return self.send_error(403)
             if request["method"] == "sources.add" and request.get("params") != {"agent":"codex","path":str(extra)}:
                 return self.send_error(403)
@@ -111,12 +112,72 @@ if (location.origin === ORIGIN) {
         browser("press", "Backspace")
         wait_for("document.querySelector(" + json.dumps(selector) + ")?.value === ''")
 
+    def import_acceptance():
+        def button(name):
+            browser("find", "role", "button", "click", "--name", name, "--exact")
+
+        long_path = "/items/" + "long-route-segment-" * 12 + "/{id}"
+        document = {"openapi": "3.1.0", "info": {"title": "OpenAPI 界面验收"}, "servers": [{"url": api.endpoint + "/v1"}],
+                    "security": [{"key": []}], "components": {"securitySchemes": {"key": {"type": "apiKey", "in": "header", "name": "X-Api-Key"}}},
+                    "paths": {long_path: {"get": {"operationId": "read_item", "parameters": [{"name": "id", "in": "path", "required": True, "schema": {"type": "string"}}],
+                              "responses": {"200": {"content": {"application/json": {}}}}}},
+                              "/upload": {"post": {"requestBody": {"content": {"multipart/form-data": {"schema": {"type": "object"}}}}, "responses": {"200": {}}}}}}
+        source = record / "openapi-ui.json"
+        source.write_text(json.dumps(document), encoding="utf-8")
+        button("添加 MCP")
+        browser("select", "dialog[open] select", "http-api")
+        browser("click", "dialog .openapi-import summary")
+        browser("upload", "dialog input[type=file]", str(source))
+        wait_for("document.querySelectorAll('.openapi-operation').length === 2")
+        assert json.loads(browser("eval", "document.querySelectorAll('.openapi-operation input:checked').length")) == 0
+        assert json.loads(browser("eval", "document.querySelector('.openapi-operation.unsupported input').disabled"))
+        button_disabled = "[...document.querySelectorAll('.openapi-import button')].find(b=>b.textContent.includes('生成')).disabled"
+        assert json.loads(browser("eval", button_disabled))
+        for width in [940, 620]:
+            browser("set", "viewport", str(width), "760")
+            wait_for("innerWidth === " + str(width))
+            assert json.loads(browser("eval", "document.documentElement.scrollWidth <= innerWidth && [...document.querySelectorAll('dialog,.modal-body,.openapi-operations')].every(e=>e.scrollWidth<=e.clientWidth+1)"))
+        browser("check", f'input[aria-label="选择 GET {long_path}"]')
+        browser("fill", f'input[aria-label="GET {long_path} 工具名"]', "read_renamed")
+        audit("openapi-selected")
+        browser("screenshot", str(record / "openapi-selected.png"))
+        button("生成 1 项工具配置")
+        wait_for("!document.querySelector('.openapi-import').open && document.querySelector('.import-credentials input')?.type === 'password'")
+        editor = json.loads(browser("eval", "JSON.parse(document.querySelector('textarea[aria-label=\"HTTP API 工具与请求映射\"]').value)"))
+        assert len(editor["tools"]) == 1 and editor["tools"][0]["name"] == "read_renamed"
+        assert json.loads(browser("eval", "document.querySelector('.import-credentials input').value")) == ""
+        assert not api.requests
+        button("保存连接")
+        wait_for("!document.querySelector('dialog[open]')")
+        connection = next(c for c in harness.rpc("snapshot")["connections"] if c["title"] == "OpenAPI 界面验收")
+        detail = harness.rpc("connections.detail", {"id": connection["id"]})
+        assert detail["definition"]["includeTools"] == ["read_renamed"] and detail["definition"]["headers"] == {}
+        button("OpenAPI 界面验收 详情")
+        button("编辑")
+        wait_for("!!document.querySelector('dialog .openapi-import summary') && !document.querySelector('dialog fieldset').disabled")
+        browser("click", "dialog .openapi-import summary")
+        document["servers"] = [{"url": "https://another.example/v2"}]
+        source.write_text(json.dumps(document), encoding="utf-8")
+        browser("upload", "dialog input[type=file]", str(source))
+        wait_for("document.querySelectorAll('.openapi-operation').length === 2")
+        browser("check", f'input[aria-label="选择 GET {long_path}"]')
+        button("生成 1 项工具配置")
+        wait_for("!!document.querySelector('dialog .warning-banner')")
+        assert not api.requests
+        browser("screenshot", str(record / "openapi-origin-warning.png"))
+        browser("press", "Escape")
+        checks.append("OpenAPI file preview defaults to no selection, marks unsupported operations, wraps long routes at 620px, generates selected tools with empty protected credential inputs, preserves origin-change warnings and makes no API requests")
+
     try:
         harness.rpc("connections.save", {"name":"public_http","title":"免认证服务","definition":{"url":url}})
         browser(*(["--profile",args.profile] if args.profile else []),
                 "--executable-path",args.chrome,"--init-script",str(shim),"open",origin)
         browser("set","viewport","940","620")
         browser("wait","--text","免认证服务")
+        if args.import_only:
+            import_acceptance()
+            result["conclusion"] = "PASS"
+            return
         audit("services")
         browser("find","role","button","click","--name","账号","--exact")
         wait_for("Array.from(document.querySelectorAll('article')).some(a=>a.textContent.includes('免认证服务') && a.textContent.includes('本机未配置独立凭据') && !a.textContent.includes('断开'))")

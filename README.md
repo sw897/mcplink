@@ -46,7 +46,7 @@ flowchart LR
 
 The desktop source includes on-demand GitHub Release updates with signed packages, explicit install confirmation and synchronization of recognized standalone CLIs. Install the first updater-enabled release manually; the existing published 0.3.2 does not include this feature.
 
-0.3.2 沿用数据语义版本 5，management API 升为 22；新的契约诊断要求新版后台。较早的程序仍会拒绝它不支持的数据目录。
+0.3.2 沿用数据语义版本 5；当前源码的 management API 为 23，新增通用响应规则、凭据过滤和 OpenAPI 导入。已发布的早期 0.3.2 包为 API 22，不能仅凭应用版本判断功能；桌面、CLI 和后台应采用同一构建。较早的程序仍会拒绝它不支持的数据目录。
 
 macOS 预览包为 **ad-hoc 签名、未公证**，Windows 包 **未签名**。本版本不宣称正式发布者签名或系统信任；实际状态和源码提交见平台构建清单，下载后按平台 SHA256SUMS 核对。Intel Mac 和 Linux 暂无已验收的安装包。兼容性、签名和校验详见[发布说明](docs/release-notes.md)与[发布指南](docs/release.md)。成功的 [CI 构建](https://github.com/sw897/mcplink/actions/workflows/ci.yml)也提供 `packages-*` 工件。
 
@@ -139,7 +139,7 @@ JSON
 
 Adapter 支持 JSON、UTF-8 文本、PNG/JPEG/WebP 图片字节和映射后的 Base64 图片结果；图片作为 MCP 图片内容返回。凭据使用托管请求头。普通 HTTP API 不做 MCP OAuth 发现，也不能导出为原生 MCP 直连地址。
 
-当前采用显式操作定义，尚未提供 OpenAPI 导入、multipart 上传或异步任务。公共服务保留各自的限额与条款；Open-Meteo 免费入口限非商业用途。定义方式、映射规则和限制见 [HTTP Adapter 指南](docs/http-api.md)。
+支持显式操作定义，以及离线导入 OpenAPI 3.0/3.1/3.2、Swagger 2.0 的 JSON/YAML 文件。导入默认不选操作；审阅地址、工具与认证后再保存。通用响应条件和凭据回显过滤在 Adapter 中执行，业务分页与结果解释留给 Skill。暂不支持 multipart 上传或异步任务。公共服务保留各自的限额与条款；Open-Meteo 免费入口限非商业用途。定义方式、映射规则和限制见 [HTTP Adapter 指南](docs/http-api.md)。
 
 <a id="management-cli-and-skill"></a>
 

@@ -43,7 +43,7 @@ class ApiServer:
             def respond(self):
                 raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
                 path = urllib.parse.urlsplit(self.path)
-                harness.requests.append({"path": path.path, "query": urllib.parse.parse_qs(path.query), "body": json.loads(raw) if raw else None, "authorization": self.headers.get("Authorization")})
+                harness.requests.append({"path": path.path, "query": urllib.parse.parse_qs(path.query), "body": json.loads(raw) if raw else None, "authorization": self.headers.get("Authorization"), "contentType": self.headers.get("Content-Type")})
                 if path.path.startswith("/slow/"):
                     time.sleep(1)
                 status, mime, body = 200, "application/json", json.dumps(harness.requests[-1]).encode()
@@ -61,6 +61,19 @@ class ApiServer:
                     status, body = 302, b""
                 elif path.path == "/large":
                     body = b"x" * (8 * 1024 * 1024 + 1)
+                elif path.path.startswith("/condition/"):
+                    token = self.headers.get("Authorization", "").removeprefix("Bearer ")
+                    value = {"code": 0, "data": {"token": token, "encoded": urllib.parse.quote(token, safe=""),
+                             "authorization": self.headers.get("Authorization"), "private": "fixture-business-private"}}
+                    if path.path.endswith("failed"):
+                        value["code"] = 9001
+                    elif path.path.endswith("missing"):
+                        value.pop("code")
+                    elif path.path.endswith("wrong-type"):
+                        value["code"] = "0"
+                    elif path.path.endswith("text"):
+                        mime, value = "text/plain", None
+                    body = json.dumps(value).encode() if value is not None else (token + " " + urllib.parse.quote(token, safe="")).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", mime)
                 if status == 302:
@@ -134,7 +147,7 @@ class HttpApi(AgentCli):
         assert actual["path"] == "/echo/a%2Fb%20%3F"
         assert actual["query"] == {"count": ["2"]}
         assert actual["body"] == {"enabled": False, "items": [1, 2]}
-        assert actual["authorization"] == "Bearer fixture-http-api"
+        assert actual["authorization"] == "[redacted]"
         assert self.cli("connections", "probe", connection)["verification"]["upstream"] == "previous_call"
         self.passed("path/query/JSON mapping preserves encoding and types; actual execution verifies upstream")
 

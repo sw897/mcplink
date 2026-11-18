@@ -2,6 +2,7 @@ mod agent_config;
 mod catalog;
 mod client_import;
 pub mod config;
+mod credential_transfer;
 mod discovery;
 mod dsh_config;
 pub mod engine;

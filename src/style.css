@@ -1,5 +1,111 @@
 @import "@fontsource-variable/inter";
 
+.openapi-import {
+  border: 1px solid #dce4df;
+  border-radius: 8px;
+  background: #f8f9f7;
+  min-width: 0;
+}
+.openapi-import > summary {
+  padding: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #1b8066;
+  cursor: pointer;
+  font-weight: 600;
+}
+.openapi-content {
+  padding: 0 12px 12px;
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+.openapi-file input {
+  width: 100%;
+  min-width: 0;
+  padding: 8px;
+}
+.openapi-source,
+.openapi-selection-bar {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+.openapi-source > span {
+  color: #5d6a64;
+}
+.openapi-operations {
+  max-height: 290px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  border-block: 1px solid #dce4df;
+}
+.openapi-operation {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) 130px;
+  gap: 10px;
+  padding: 12px 0;
+  align-items: start;
+}
+.openapi-operation + .openapi-operation {
+  border-top: 1px solid #e5eae6;
+}
+.openapi-operation input[type="checkbox"] {
+  margin: 4px 0;
+  accent-color: #1b8066;
+}
+.openapi-operation-info,
+.openapi-tool-name {
+  min-width: 0;
+}
+.openapi-route {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.openapi-route > span {
+  overflow-wrap: anywhere;
+}
+.openapi-route > strong {
+  font-size: 11px;
+  color: #1b8066;
+  padding-top: 1px;
+}
+.openapi-operation .field-help {
+  display: block;
+  overflow-wrap: anywhere;
+  margin-top: 5px;
+}
+.openapi-tool-name {
+  display: grid;
+  gap: 4px;
+  font-size: 11px;
+  color: #5d6a64;
+}
+.openapi-tool-name input {
+  width: 100%;
+  min-width: 0;
+  font-size: 12px;
+}
+.openapi-operation.unsupported {
+  opacity: 0.65;
+}
+.import-credentials {
+  display: grid;
+  gap: 12px;
+}
+@media (max-width: 620px) {
+  .openapi-operation {
+    grid-template-columns: 20px minmax(0, 1fr);
+  }
+  .openapi-tool-name {
+    grid-column: 2;
+  }
+}
+
 :root {
   font-family:
     Inter,

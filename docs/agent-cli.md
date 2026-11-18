@@ -8,7 +8,7 @@ MCP 转 CLI 是 mcplink 的核心能力之一：从工具 Schema 发现参数，
 
 `mcplink` CLI 与桌面使用同一个管理核心、后台、系统凭据库和配置事务。命令不启动桌面或浏览器；后台在首次管理调用时按需启动。`schema` 和 `skill` 离线可用。
 
-客户端与来源支持范围见[Agent 兼容矩阵](agent-discovery.md)。原生文件写入需要客户端已安装，当前 management API 为 22，新的 CLI 契约诊断要求 API 22；桌面、CLI 和后台应使用同一构建。管理 Skill 的复制安装目标另见下文。
+客户端与来源支持范围见[Agent 兼容矩阵](agent-discovery.md)。原生文件写入需要客户端已安装，当前源码 management API 为 23；HTTP API 新映射和凭据迁移要求 API 23，CLI 契约诊断要求 API 22。早期 0.3.2 发布包为 API 22；桌面、CLI 和后台应使用同一构建。管理 Skill 的复制安装目标另见下文。
 
 ## 安装与发现
 
