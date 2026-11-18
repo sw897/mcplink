@@ -211,6 +211,7 @@ struct Running {
 struct SessionState {
     client: Option<Client>,
     denied: Option<(RuntimeInfo, String)>,
+    startup_error: Option<String>,
 }
 
 /// One process-local authentication session; secrets never leave memory.
@@ -232,15 +233,34 @@ impl Session {
 
     /// Only an explicit foreground retry should clear an access denial.
     pub async fn retry_authentication(&self) {
-        self.state.lock().await.denied = None;
+        let mut state = self.state.lock().await;
+        state.denied = None;
+        state.startup_error = None;
     }
 
     async fn client(&self, start: bool) -> Result<Client> {
         let mut state = self.state.lock().await;
-        let running = if start {
-            Client::running_or_start(&self.data, &self.executable, state.client.as_ref()).await?
-        } else {
-            Client::running(&self.data, state.client.as_ref()).await?
+        let running = match Client::running(&self.data, state.client.as_ref()).await {
+            Ok(running) => {
+                // A slow but successful startup is still discovered passively.
+                state.startup_error = None;
+                running
+            }
+            Err(error) if !start => return Err(error),
+            Err(_) => {
+                if let Some(message) = &state.startup_error {
+                    bail!("{message}；自动启动已暂停，请在前台明确重试或重新启动客户端");
+                }
+                match Client::running_or_start(&self.data, &self.executable, state.client.as_ref())
+                    .await
+                {
+                    Ok(running) => running,
+                    Err(error) => {
+                        state.startup_error = Some(error.to_string());
+                        return Err(error);
+                    }
+                }
+            }
         };
         if let Some((info, message)) = &state.denied
             && *info == running.info

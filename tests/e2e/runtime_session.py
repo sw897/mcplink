@@ -136,6 +136,20 @@ class Acceptance(AgentCli):
             assert "程序已更新" in process.call("process.identity", error=True)
             self.passed("a real macOS process refuses credential access after its signed executable is replaced")
 
+        unready = self.record / "startup-data"
+        unready.mkdir()
+        blocked_vault = unready / "fixture-vault"
+        blocked_vault.write_text("synthetic-not-a-vault-directory")
+        retry = SessionProcess({**self.environment, "MCPLINK_DATA_DIR": str(unready)}); self.sessions.append(retry)
+        retry.call("gateway.status", error=True)
+        blocked_vault.unlink()
+        started = time.monotonic()
+        assert "自动启动已暂停" in retry.call("gateway.status", error=True)
+        assert time.monotonic() - started < 3 and not (unready / "runtime.json").exists()
+        assert retry.call("gateway.status", retryAuth=True)["paused"] is False
+        assert retry.call("gateway.stop")["stopped"]
+        self.passed("failed daemon credential startup is not repeated until an explicit foreground retry")
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
