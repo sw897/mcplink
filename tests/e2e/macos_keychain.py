@@ -1,6 +1,5 @@
 """Real Keychain worker acceptance with a separate disposable Keychain and signers."""
 import argparse
-import base64
 import hashlib
 import json
 import os
@@ -11,6 +10,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -51,8 +51,13 @@ def main():
                           pass_fds=(cert_fd, pass_fd))
         finally:
             os.close(cert_fd); os.close(pass_fd)
-        payload = json.dumps({"pkcs12": base64.b64encode(archive).decode(), "password": password}).encode()
-        run([str(audit), "--import-identity", "--fixture-keychain", str(keychain)], payload)
+        # The system CLI uses the legacy import path supported by macOS 15 as
+        # well as newer SDKs. Only a freshly generated disposable test identity
+        # crosses an unlinked private descriptor; no user identity is exported.
+        with tempfile.TemporaryFile() as stream:
+            stream.write(archive); stream.seek(0)
+            run(["security", "import", f"/dev/fd/{stream.fileno()}", "-f", "pkcs12", "-k", str(keychain),
+                 "-P", password, "-T", "/usr/bin/codesign"], pass_fds=(stream.fileno(),))
         # Only the newly created disposable signing key is affected. The known
         # synthetic password avoids any system dialog; login Keychain untouched.
         run(["security", "set-key-partition-list", "-S", "apple-tool:,apple:", "-s", "-k", password, str(keychain)])
@@ -64,6 +69,9 @@ def main():
             original_search = shlex.split(run(["security", "list-keychains", "-d", "user"]).decode())
             run(["security", "list-keychains", "-d", "user", "-s", *original_search, str(keychain)])
             fixture_search_added = True
+        identities = run(["security", "find-identity", "-p", "codesigning", str(keychain)]).decode()
+        print(json.dumps({"fixture_signing_identity_present": fingerprint.lower() in identities.lower()}))
+        assert fingerprint.lower() in identities.lower(), "Disposable signing identity did not persist"
 
         def sign(path, identifier):
             result = subprocess.run(["codesign", "--force", "--keychain", str(keychain), "--sign", fingerprint,

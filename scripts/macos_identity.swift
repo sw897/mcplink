@@ -62,7 +62,7 @@ do {
             try check(SecKeychainDelete(keychain!))
             emit(["deleted": true, "test_fixture_only": true])
         }
-    } else if args == ["--import-identity"] || (args.count == 3 && args[0] == "--import-identity" && args[1] == "--fixture-keychain") {
+    } else if args == ["--import-identity"] {
         // Only a newly generated signing identity enters this path. No existing
         // service credential or Keychain ACL is read, replaced or relaxed.
         let raw = FileHandle.standardInput.readDataToEndOfFile()
@@ -71,14 +71,7 @@ do {
               let blob = value["pkcs12"].flatMap({ Data(base64Encoded: $0) }),
               let password = value["password"] else { throw NSError(domain: "Input", code: 1) }
         var keychain: SecKeychain?
-        if args.count == 3 {
-            let path = URL(fileURLWithPath: args[2])
-            guard path.lastPathComponent == "fixture.keychain-db",
-                  FileManager.default.fileExists(atPath: path.deletingLastPathComponent().appendingPathComponent(".mcplink-keychain-test-fixture").path) else { throw NSError(domain: "Fixture", code: 3) }
-            try check(SecKeychainOpen(path.path, &keychain))
-        } else {
-            try check(SecKeychainCopyDefault(&keychain))
-        }
+        try check(SecKeychainCopyDefault(&keychain))
         var codesign: SecTrustedApplication?
         try check(SecTrustedApplicationCreateFromPath("/usr/bin/codesign", &codesign))
         var access: SecAccess?
