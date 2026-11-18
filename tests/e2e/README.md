@@ -22,7 +22,6 @@ python3 tests/e2e/run.py --record artifacts/e2e/core-local
 | `frontend.py` | 真实前端生产构建、模块/样式/字体与公开资源、仅服务生成目录、开发刷新、端口占用及退出清理 |
 | `runtime_session.py` | 桌面与 Bridge 共用的内存 Session：并发请求复用认证、拒绝后明确重试、实例更换重新认证、无被动拉起及无业务重放；先构建 `cargo build --locked -p mcplink-core --example runtime_session` |
 | `macos_keychain.py` | 独立临时钥匙串与合成身份；两个不同构建的调用者复用同一固定凭据助手，拒绝错误调用者和散列，普通操作不显示系统授权 UI；不接触日常凭据 |
-
 | `run.py`、`agent_cli.py` | 服务盘点、连接与授权、命令契约、共享及恢复 |
 | `config_integrity.py`、`bridge_adoption.py` | 格式保留、并发与失败恢复、已有 Bridge 接管和保留原生配置退出托管 |
 | `agent_discovery.py`、`office_agents.py`、`pi_agent.py` | 安装门禁、来源与存储保护、原生配置及客户端确认、共享调用 |
