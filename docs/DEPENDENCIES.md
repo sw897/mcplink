@@ -24,6 +24,6 @@ mcplink 自有代码使用 MIT。具体依赖解析由 Cargo.lock 与 package-lo
 | sha2 / uuid | 0.10.9 / 1.29.1 | 配置哈希、实例与连接 ID | MIT / Apache-2.0 |
 | lucide-react | 1.70.0 | 界面图标 | ISC |
 | Inter variable font | 5.3.0 | 本地字体 | OFL-1.1 |
-| Vite / TypeScript | 7.3.7 / 5.9.3 | 前端构建、类型检查 | MIT；Apache-2.0 |
+| esbuild / TypeScript | 0.28.2 / 5.9.3 | 前端构建、类型检查 | MIT；Apache-2.0 |
 
 `serde_yaml` 已标记 deprecated，当前用于只读解析；YAML 修改由 yaml-edit 完成。后续升级需要重新运行配置保存与恢复场景。SDK 和原生 Agent 协议同时演进，升级应先跑端到端兼容场景。

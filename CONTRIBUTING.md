@@ -19,6 +19,7 @@ npm run desktop
 
 ```sh
 npm run build
+python3 tests/e2e/frontend.py --record artifacts/e2e/frontend/local
 npm run check
 python3 tests/e2e/run.py
 python3 tests/e2e/agent_cli.py --record artifacts/e2e/agent-cli/local
@@ -28,6 +29,8 @@ python3 tests/e2e/generated_cli.py --record artifacts/e2e/generated-cli/local
 ```
 
 检查命令会先构建并同步 debug sidecar。隔离测试使用合成 home、MCP 上游和 fixture Vault。`MCPLINK_E2E_BINARY` 可指定待测程序；每次测试应使用新的记录目录。
+
+前端通过 esbuild 构建到 `dist/`，开发入口为 `http://127.0.0.1:1420`。`npm run dev` 监听模块和 HTML 入口的变化并刷新页面；公开静态文件在启动或构建时复制。开发端口被占用时直接失败，可用 `npm run dev -- --port 1421` 显式选择其他端口。Tauri 的 `devUrl` 使用默认端口。
 
 `run.py --native-agents` 额外调用已安装的 Codex/Hermes 命令，需要对应客户端环境。默认测试不要求模型登录或真实服务账号。平台验证结果应分别记录；CI 构建通过不等于桌面交互已验收。
 

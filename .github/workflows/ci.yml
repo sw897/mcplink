@@ -52,6 +52,9 @@ jobs:
           restore-keys: |
             rust-v1-${{ runner.os }}-${{ runner.arch }}-
       - run: npm ci
+      - name: Frontend build and development server acceptance
+        timeout-minutes: 3
+        run: python -u tests/e2e/frontend.py --record artifacts/e2e/ci-frontend
       - run: npm run check
       - name: Cache Windows bundler downloads
         if: runner.os == 'Windows'
