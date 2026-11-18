@@ -40,7 +40,7 @@ def main():
         created = True
         private = run(["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048"])
         cert = run(["openssl", "req", "-new", "-x509", "-sha256", "-days", "2", "-key", "/dev/stdin", "-subj", "/CN=mcplink isolated fixture",
-                    "-addext", "basicConstraints=critical,CA:FALSE", "-addext", "keyUsage=critical,digitalSignature", "-addext", "extendedKeyUsage=codeSigning"], private)
+                    "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,digitalSignature,keyCertSign,cRLSign", "-addext", "extendedKeyUsage=codeSigning"], private)
         fingerprint = run(["openssl", "x509", "-noout", "-fingerprint", "-sha1"], cert).decode().strip().split("=", 1)[1].replace(":", "")
         cert_fd, cert_write = os.pipe(); pass_fd, pass_write = os.pipe()
         try:
@@ -71,6 +71,7 @@ def main():
             fixture_search_added = True
         identities = run(["security", "find-identity", "-p", "codesigning", str(keychain)]).decode()
         print(json.dumps({"fixture_signing_identity_present": fingerprint.lower() in identities.lower()}))
+        print(json.dumps({"isolated_fixture_identity_policy": identities.strip()}))
         assert fingerprint.lower() in identities.lower(), "Disposable signing identity did not persist"
 
         def sign(path, identifier):
