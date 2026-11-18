@@ -52,10 +52,16 @@ def main():
         private = run(["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048"])
         # A code-signing leaf, with an explicit configuration so runner OpenSSL
         # defaults cannot silently add unrelated or unsupported extensions.
-        cert = run(["openssl", "req", "-new", "-x509", "-sha256", "-days", "2", "-config", "/dev/null",
-                    "-key", "/dev/stdin", "-subj", "/CN=mcplink isolated fixture",
-                    "-addext", "basicConstraints=critical,CA:FALSE", "-addext", "keyUsage=critical,digitalSignature",
-                    "-addext", "extendedKeyUsage=critical,codeSigning"], private)
+        # LibreSSL requires a distinguished_name section even when -subj is
+        # supplied, unlike recent OpenSSL. Use a complete, portable template.
+        cert_config = record / "fixture-openssl.cnf"
+        cert_config.write_text("[req]\ndistinguished_name=subject\nprompt=no\nx509_extensions=code_signing\n"
+                               "[subject]\nCN=mcplink isolated fixture\n[code_signing]\n"
+                               "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\n"
+                               "extendedKeyUsage=critical,codeSigning\n")
+        print(json.dumps({"fixture_openssl": run(["openssl", "version"]).decode().strip()}))
+        cert = run(["openssl", "req", "-new", "-x509", "-sha256", "-days", "2", "-config", str(cert_config),
+                    "-key", "/dev/stdin"], private)
         fingerprint = run(["openssl", "x509", "-noout", "-fingerprint", "-sha1"], cert).decode().strip().split("=", 1)[1].replace(":", "")
         cert_fd, cert_write = os.pipe(); pass_fd, pass_write = os.pipe()
         try:
