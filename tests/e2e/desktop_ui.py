@@ -105,6 +105,50 @@ if (location.origin === ORIGIN) {
     def wait_for(expression):
         browser("wait","--fn",expression)
 
+    def modal_backdrop_acceptance():
+        opener = 'document.querySelector(".header-actions .button.primary")'
+        dialog = 'document.querySelector("dialog[open]")'
+        focused_opener = f"document.activeElement === {opener}"
+
+        def open_editor():
+            wait_for(focused_opener)
+            browser("press", "Enter")
+            wait_for(f'{dialog}?.getAttribute("aria-label") === "添加 MCP 服务"')
+
+        browser("focus", ".header-actions .button.primary")
+        open_editor()
+        points = json.loads(browser("eval", """(() => {
+            const dialog = document.querySelector('dialog[open]');
+            const title = dialog.querySelector('h2').getBoundingClientRect();
+            const y = Math.round(title.top + title.height / 2);
+            return {
+                start: [Math.round(title.left + 3), y],
+                textEnd: [Math.round(title.right - 3), y],
+                backdrop: [Math.round(dialog.getBoundingClientRect().right + 12), y]
+            };
+        })()"""))
+        assert points["start"][0] < points["textEnd"][0] < points["backdrop"][0] < 940
+
+        def move(point):
+            browser("mouse", "move", *map(str, point))
+
+        move(points["start"])
+        browser("mouse", "down", "left")
+        move(points["textEnd"])
+        assert json.loads(browser("eval", "!!getSelection()?.toString().trim()")), "No dialog text selected"
+        move(points["backdrop"])
+        browser("mouse", "up", "left")
+        assert json.loads(browser("eval", f"!!{dialog}")), "Text-selection drag dismissed the modal"
+        browser("press", "Escape")
+        wait_for(f"!{dialog} && {focused_opener}")
+
+        open_editor()
+        move(points["backdrop"])
+        browser("mouse", "down", "left")
+        browser("mouse", "up", "left")
+        wait_for(f"!{dialog} && {focused_opener}")
+        checks.append("dragging selected text onto the backdrop keeps the dialog open; Esc and a backdrop click close and restore focus")
+
     def clear_field(selector):
         # Empty fill and editing shortcuts are not equivalent across the
         # native CDP drivers. Delete one actual character to emit input.
@@ -178,6 +222,7 @@ if (location.origin === ORIGIN) {
             import_acceptance()
             result["conclusion"] = "PASS"
             return
+        modal_backdrop_acceptance()
         audit("services")
         browser("find","role","button","click","--name","账号","--exact")
         wait_for("Array.from(document.querySelectorAll('article')).some(a=>a.textContent.includes('免认证服务') && a.textContent.includes('本机未配置独立凭据') && !a.textContent.includes('断开'))")

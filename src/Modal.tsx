@@ -25,6 +25,18 @@ export function Status({ value, label }: { value: string; label?: string }) {
 
 export const ModalNotice = React.createContext<React.ReactNode>(null);
 
+function isBackdrop(event: React.MouseEvent<HTMLDialogElement>) {
+  const dialog = event.currentTarget;
+  if (event.target !== dialog) return false;
+  const box = dialog.getBoundingClientRect();
+  return (
+    event.clientX < box.left ||
+    event.clientX > box.right ||
+    event.clientY < box.top ||
+    event.clientY > box.bottom
+  );
+}
+
 export function Modal({
   title,
   children,
@@ -41,6 +53,7 @@ export function Modal({
   closeDisabled?: boolean;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
+  const pressedOnBackdrop = useRef(false);
   useEffect(() => {
     const dialog = ref.current!;
     const previous = document.activeElement;
@@ -60,16 +73,18 @@ export function Modal({
         event.preventDefault();
         onClose();
       }}
+      onPointerDownCapture={(event) => {
+        if (event.isPrimary)
+          pressedOnBackdrop.current = event.button === 0 && isBackdrop(event);
+      }}
+      onPointerCancelCapture={(event) => {
+        if (event.isPrimary) pressedOnBackdrop.current = false;
+      }}
       onClick={(event) => {
-        if (event.target !== event.currentTarget) return;
-        const box = event.currentTarget.getBoundingClientRect();
-        if (
-          event.clientX < box.left ||
-          event.clientX > box.right ||
-          event.clientY < box.top ||
-          event.clientY > box.bottom
-        )
-          onClose();
+        // A drag from the content can dispatch its click on the backdrop.
+        const startedOnBackdrop = pressedOnBackdrop.current;
+        pressedOnBackdrop.current = false;
+        if (startedOnBackdrop && isBackdrop(event)) onClose();
       }}
     >
       <header>
