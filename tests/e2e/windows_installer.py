@@ -10,6 +10,7 @@ import traceback
 import urllib.request
 
 import run as e2e
+from daemon_lifecycle import exited, wait_until
 
 
 def main():
@@ -28,20 +29,25 @@ def main():
         report["scenarios"].append({"scenario": name, "result": "PASS"})
         print("PASS", name, flush=True)
 
-    def install(installer, directory):
+    def install(installer, directory, phase):
         # NSIS requires /D= to be the last argument and unquoted, even with spaces.
         assert '"' not in str(directory) and not any(c in str(directory) for c in '\r\n')
         command = subprocess.list2cmdline([str(installer.resolve()), "/S"]) + " /D=" + str(directory)
         result = subprocess.run(command, env=harness.environment, capture_output=True, text=True, timeout=180)
-        assert result.returncode == 0, "NSIS installation failed"
+        assert result.returncode == 0, f"NSIS {phase} failed (exit code {result.returncode})"
         deadline = time.monotonic() + 20
         while not (directory / "mcplink.exe").is_file():
             assert time.monotonic() < deadline, "Installed CLI is missing"
             time.sleep(0.1)
 
     def stop():
+        pid = json.loads((harness.data / "runtime.json").read_text())["pid"]
         result = subprocess.run([str(e2e.BINARY), "gateway", "stop"], env=harness.environment, capture_output=True, text=True, timeout=90)
         assert result.returncode == 0, "Installed daemon did not release its runtime lock"
+        # NSIS must be able to replace the CLI executable after the runtime lock is released.
+        if not exited(pid):
+            print("WAIT for the installed daemon process to exit before running NSIS", flush=True)
+            wait_until(lambda: exited(pid))
 
     try:
         assert os.name == "nt", "NSIS lifecycle requires Windows"
@@ -50,7 +56,7 @@ def main():
         harness = e2e.Harness(fixture)
         directory = record / "Test Applications/mcplink"
         first = args.previous_installer or args.installer
-        install(first, directory)
+        install(first, directory, "baseline install")
         e2e.BINARY = directory / "mcplink.exe"
         report["previous_installer_sha256"] = hashlib.sha256(first.read_bytes()).hexdigest()
         report["distinct_previous_installer"] = args.previous_installer is not None and first.read_bytes() != args.installer.read_bytes()
@@ -66,7 +72,7 @@ def main():
         stop()
         passed("the baseline installer initializes token and OAuth accounts and two native shared bindings")
 
-        install(args.installer, directory)
+        install(args.installer, directory, "upgrade")
         for connection in [token, oauth]:
             assert harness.rpc("connections.probe", {"id": connection})["connection"]["status"] == "ready"
         assert [p.read_bytes() for p in configs] == before
@@ -79,14 +85,14 @@ def main():
             for path in [args.installer.resolve(), directory / "mcplink.exe", directory / "mcplink-desktop.exe"]:
                 subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(e2e.ROOT / "scripts/sign-windows.ps1"), "-VerifyOnly", "-FilePath", str(path)], check=True)
             passed("installer and installed desktop/CLI signatures match the selected publisher and include timestamps")
-        install(args.installer, directory)
+        install(args.installer, directory, "reinstall")
         assert [p.read_bytes() for p in configs] == before
         assert harness.rpc("connections.probe", {"id": oauth})["connection"]["status"] == "ready"
         stop()
         passed("reinstalling the candidate retains OAuth authorization and native configuration")
         uninstaller = next(directory.glob("uninstall*.exe"))
         result = subprocess.run([str(uninstaller), "/S"], env=harness.environment, capture_output=True, text=True, timeout=120)
-        assert result.returncode == 0, "Uninstall failed"
+        assert result.returncode == 0, f"NSIS uninstall failed (exit code {result.returncode})"
         deadline = time.monotonic() + 30
         while (directory / "mcplink.exe").exists():
             assert time.monotonic() < deadline, "Uninstall left executable files"
