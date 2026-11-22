@@ -21,7 +21,7 @@ jobs:
       matrix:
         os: [macos-15, windows-2025]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: ${{ matrix.os == 'windows-2025' && 75 || 60 }}
     env:
       PYTHONUTF8: "1"
     steps:
@@ -78,13 +78,19 @@ jobs:
           path: ~/AppData/Local/tauri/mcplink-downloads
           key: windows-bundler-v1-${{ hashFiles('package-lock.json', 'scripts/prepare_windows_bundler.py') }}
       - name: Prepare verified Windows bundler tools
+        id: windows_bundler_tools
         if: runner.os == 'Windows'
         timeout-minutes: 6
         env:
           GH_TOKEN: ${{ github.token }}
         run: python -u scripts/prepare_windows_bundler.py
+      - name: Windows configuration recovery before packaging
+        if: runner.os == 'Windows' && github.repository == 'sw897/mcplink' && startsWith(github.ref, 'refs/heads/codex/release-acceptance-')
+        timeout-minutes: 5
+        env:
+          MCPLINK_E2E_BINARY: target/debug/mcplink.exe
+        run: python -u tests/e2e/config_integrity.py --record artifacts/e2e/ci-windows-storage-preflight
       - name: Build isolated installer for native acceptance
-        id: fixture_bundle
         run: npm run bundle -- --test-fixtures
       - name: Find a previous successful installer for upgrade acceptance
         env:
@@ -288,14 +294,14 @@ jobs:
       - name: Windows preview release entry point
         id: windows_release_preview
         if: runner.os == 'Windows'
-        timeout-minutes: 12
+        timeout-minutes: 25
         run: npm run release:windows
       - name: Build Windows installer when an earlier gate failed
         id: windows_native_candidate
         if: >-
           failure() && !cancelled() && runner.os == 'Windows' && github.repository == 'sw897/mcplink'
           && startsWith(github.ref, 'refs/heads/codex/release-acceptance-')
-          && steps.fixture_bundle.outcome == 'success' && steps.windows_release_preview.outcome != 'success'
+          && steps.windows_bundler_tools.outcome == 'success' && steps.windows_release_preview.outcome != 'success'
         timeout-minutes: 25
         run: npm run bundle
       - name: Download pinned Windows migration baseline

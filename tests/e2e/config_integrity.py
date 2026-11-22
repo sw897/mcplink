@@ -85,7 +85,11 @@ def verify_storage(h, previous_binary):
     if sys.platform == "darwin":
         assert subprocess.check_output(["/bin/ls", "-le", native], text=True).splitlines()[1:] == acl
     if os.name == "nt":
-        assert dacl(native) == native_dacl
+        result_dacl = dacl(native)
+        assert result_dacl == native_dacl, (
+            "NTFS DACL changed after apply "
+            f"(flags {native_dacl.partition('(')[0]!r} to {result_dacl.partition('(')[0]!r})"
+        )
         assert dacl(backup).startswith("P") and ";;;WD)" not in dacl(backup)
     h.passed("a preview survives restart, successful apply clears the plan secret, and the outcome and original file permissions remain")
 

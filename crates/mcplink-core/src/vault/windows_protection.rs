@@ -16,11 +16,12 @@ use windows_sys::Win32::{
         ACL,
         Authorization::{
             ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-            SDDL_REVISION_1, SE_FILE_OBJECT, SetSecurityInfo,
+            GetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT, SetSecurityInfo,
         },
-        DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, GetTokenInformation,
-        PROTECTED_DACL_SECURITY_INFORMATION, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
-        TokenUser,
+        DACL_SECURITY_INFORMATION, GetSecurityDescriptorControl, GetSecurityDescriptorDacl,
+        GetTokenInformation, PROTECTED_DACL_SECURITY_INFORMATION, SE_DACL_PROTECTED,
+        SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
+        UNPROTECTED_DACL_SECURITY_INFORMATION,
     },
     Storage::FileSystem::{
         CREATE_NEW, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_REPARSE_POINT,
@@ -122,13 +123,17 @@ pub(super) fn private_directory(path: &Path) -> io::Result<()> {
 }
 
 pub(crate) fn create_private_file(path: &Path) -> io::Result<File> {
+    create_private_file_with_access(path, GENERIC_WRITE)
+}
+
+pub(crate) fn create_private_file_with_access(path: &Path, access: u32) -> io::Result<File> {
     let sd = descriptor(false)?;
     let attrs = attributes(&sd);
     // SAFETY: successful creation returns a unique owned handle for a new file.
     let handle = unsafe {
         CreateFileW(
             wide(path).as_ptr(),
-            GENERIC_WRITE,
+            access,
             0,
             &attrs,
             CREATE_NEW,
@@ -140,6 +145,56 @@ pub(crate) fn create_private_file(path: &Path) -> io::Result<File> {
         return Err(io::Error::last_os_error());
     }
     Ok(unsafe { File::from_raw_handle(handle) })
+}
+
+pub(crate) fn preserve_file_dacl(source: &File, replacement: &File) -> io::Result<()> {
+    let mut descriptor = null_mut();
+    let mut acl = null_mut();
+    // SAFETY: the source handle stays live and the out-pointers are writable.
+    let error = unsafe {
+        GetSecurityInfo(
+            source.as_raw_handle(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            null_mut(),
+            null_mut(),
+            &mut acl,
+            null_mut(),
+            &mut descriptor,
+        )
+    };
+    if error != 0 {
+        return Err(io::Error::from_raw_os_error(error as i32));
+    }
+    let descriptor = LocalAllocation(descriptor);
+    let mut control = 0;
+    let mut revision = 0;
+    // SAFETY: the descriptor owns the ACL and remains live through the write.
+    if unsafe { GetSecurityDescriptorControl(descriptor.0, &mut control, &mut revision) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let inheritance = if control & SE_DACL_PROTECTED != 0 {
+        PROTECTED_DACL_SECURITY_INFORMATION
+    } else {
+        UNPROTECTED_DACL_SECURITY_INFORMATION
+    };
+    // SAFETY: the private replacement handle is open with WRITE_DAC. The ACL,
+    // including a null DACL if present on the source, comes from its descriptor.
+    let error = unsafe {
+        SetSecurityInfo(
+            replacement.as_raw_handle(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | inheritance,
+            null_mut(),
+            null_mut(),
+            acl,
+            null(),
+        )
+    };
+    if error != 0 {
+        return Err(io::Error::from_raw_os_error(error as i32));
+    }
+    Ok(())
 }
 
 pub(super) fn restrict_file(path: &Path) -> io::Result<()> {

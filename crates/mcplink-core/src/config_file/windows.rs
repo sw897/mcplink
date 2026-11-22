@@ -10,11 +10,14 @@ use std::{
     },
     path::{Path, PathBuf},
 };
-use windows_sys::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_WRITE_THROUGH, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle, MOVEFILE_WRITE_THROUGH,
-    MoveFileExW, ReplaceFileW,
+use windows_sys::Win32::{
+    Foundation::GENERIC_WRITE,
+    Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_WRITE_THROUGH, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle,
+        MOVEFILE_WRITE_THROUGH, MoveFileExW, ReplaceFileW, WRITE_DAC,
+    },
 };
 
 pub(super) struct Directory {
@@ -92,7 +95,10 @@ impl Directory {
     }
 
     pub(super) fn create(&self, name: &OsStr) -> io::Result<File> {
-        crate::vault::windows_protection::create_private_file(&self.path.join(name))
+        crate::vault::windows_protection::create_private_file_with_access(
+            &self.path.join(name),
+            GENERIC_WRITE | WRITE_DAC,
+        )
     }
 
     pub(super) fn replace(&self, from: &OsStr, to: &OsStr, replace: bool) -> io::Result<()> {
@@ -151,7 +157,7 @@ pub(super) fn private_lock_options(options: &mut OpenOptions) {
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH);
 }
 
-pub(super) fn preserve(_: &File, _: &File) -> io::Result<()> {
-    // ReplaceFile performs the merge with the live original.
-    Ok(())
+pub(super) fn preserve(source: &File, replacement: &File) -> io::Result<()> {
+    // Match the original inheritance state before ReplaceFile merges its streams.
+    crate::vault::windows_protection::preserve_file_dacl(source, replacement)
 }
