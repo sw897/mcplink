@@ -203,8 +203,10 @@ export function GatewayDialog({
   );
   const [error, setError] = useState("");
   const available = connections.filter((c) => !c.detected && !c.members);
+  const availableIds = new Set(available.map((service) => service.id));
+  const missing = selected.filter((id) => !availableIds.has(id));
   const save = async () => {
-    if (saving.current) return;
+    if (saving.current || missing.length > 0) return;
     saving.current = true;
     setPending(true);
     setError("");
@@ -248,6 +250,22 @@ export function GatewayDialog({
         <h3 className="section-label">
           提供给 Agent 的服务 · 已选 {selected.length} 项
         </h3>
+        {missing.length > 0 && (
+          <div className="warning-banner" role="alert">
+            <p>部分已选服务无法读取。确认移除这些服务后可保存入口。</p>
+            {missing.map((id) => (
+              <label className="target" key={id}>
+                <input
+                  type="checkbox"
+                  checked
+                  disabled={pending}
+                  onChange={() => setSelected((current) => current.filter((member) => member !== id))}
+                />
+                <span>不可用服务 <code>{id}</code></span>
+              </label>
+            ))}
+          </div>
+        )}
         {available.map((c) => (
           <div className="gateway-member" key={c.id}>
             <label className="target" key={c.id}>
@@ -301,7 +319,7 @@ export function GatewayDialog({
         </button>
         <button
           className="button primary"
-          disabled={pending || !title.trim()}
+          disabled={pending || !title.trim() || missing.length > 0}
           onClick={() => void save()}
         >
           {pending && <Loader2 size={15} className="spin" />}保存入口

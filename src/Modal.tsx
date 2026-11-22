@@ -54,6 +54,9 @@ export function Modal({
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const pressedOnBackdrop = useRef(false);
+  const dismiss = () => {
+    if (!closeDisabled) onClose();
+  };
   useEffect(() => {
     const dialog = ref.current!;
     const previous = document.activeElement;
@@ -71,11 +74,11 @@ export function Modal({
       aria-label={title}
       onCancel={(event) => {
         event.preventDefault();
-        onClose();
+        dismiss();
       }}
       onPointerDownCapture={(event) => {
         if (event.isPrimary)
-          pressedOnBackdrop.current = event.button === 0 && isBackdrop(event);
+          pressedOnBackdrop.current = !closeDisabled && event.button === 0 && isBackdrop(event);
       }}
       onPointerCancelCapture={(event) => {
         if (event.isPrimary) pressedOnBackdrop.current = false;
@@ -84,14 +87,14 @@ export function Modal({
         // A drag from the content can dispatch its click on the backdrop.
         const startedOnBackdrop = pressedOnBackdrop.current;
         pressedOnBackdrop.current = false;
-        if (startedOnBackdrop && isBackdrop(event)) onClose();
+        if (startedOnBackdrop && isBackdrop(event)) dismiss();
       }}
     >
       <header>
         <h2>{title}</h2>
         <button
           className="icon"
-          onClick={onClose}
+          onClick={dismiss}
           aria-label="关闭"
           disabled={closeDisabled}
         >

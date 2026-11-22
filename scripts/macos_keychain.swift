@@ -66,6 +66,7 @@ var query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                           kSecAttrAccount as String: "\(namespace)/\(key)"]
 // Integration tests use a private, explicitly marked directory and a separate
 // Keychain. This does not change the default/search list or query real items.
+#if MCPLINK_TEST_FIXTURES
 var fixtureKeychain: SecKeychain?
 let fixtureMarker = URL(fileURLWithPath: directory).appendingPathComponent(".mcplink-keychain-test-fixture")
 if FileManager.default.fileExists(atPath: fixtureMarker.path) {
@@ -74,6 +75,7 @@ if FileManager.default.fileExists(atPath: fixtureMarker.path) {
           let keychain = fixtureKeychain else { fail("fixture_keychain") }
     query[kSecMatchSearchList as String] = [keychain]
 }
+#endif
 if operation == "authorize" {
     guard SecKeychainSetUserInteractionAllowed(true) == errSecSuccess else { fail("interaction_policy") }
 }
@@ -96,7 +98,9 @@ case "set":
     if status == errSecItemNotFound {
         var addition = query.merging(changes) { _, new in new }
         addition.removeValue(forKey: kSecMatchSearchList as String)
+        #if MCPLINK_TEST_FIXTURES
         if let keychain = fixtureKeychain { addition[kSecUseKeychain as String] = keychain }
+        #endif
         status = SecItemAdd(addition as CFDictionary, nil)
     }
     guard status == errSecSuccess else { fail("keychain_access", status) }

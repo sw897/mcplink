@@ -10,38 +10,42 @@
 npm ci
 npm run build
 npm run check
+node scripts/prepare-sidecar.mjs --debug --test-fixtures
 python3 tests/e2e/run.py --record artifacts/e2e/core-local
 ```
 
-`MCPLINK_E2E_BINARY` 可指定待测构建或安装目录中的程序；未指定时使用 debug CLI。每次运行使用新的记录目录，报告与临时内容保存在忽略的 `artifacts/e2e/`。各脚本参数以 `--help` 为准。
+使用合成凭据库的脚本需要显式构建 `test-fixtures`。`MCPLINK_E2E_BINARY` 可指定待测构建或安装目录中的程序，默认使用 debug CLI。`npm run bundle -- --test-fixtures` 将合成验收安装包构建到 `target/fixture-bundle`。发布包由默认构建生成，单独验证系统凭据库边界。每次运行使用新的记录目录，报告与临时内容保存在忽略的 `artifacts/e2e/`。各脚本参数以 `--help` 为准。
 
 ## 场景
 
 | 入口 | 覆盖范围 |
 | --- | --- |
 | `frontend.py` | 真实前端生产构建、模块/样式/字体与公开资源、仅服务生成目录、开发刷新、端口占用及退出清理 |
-| `runtime_session.py` | 桌面与 Bridge 共用的内存 Session：并发请求复用认证、拒绝后明确重试、实例更换重新认证、无被动拉起及无业务重放；先构建 `cargo build --locked -p mcplink-core --example runtime_session` |
+| `runtime_session.py` | 桌面与 Bridge 共用的内存 Session，并发认证、拒绝后明确重试、实例更换重新认证和中断后无业务重放。先运行 `cargo build --locked -p mcplink-core --features test-fixtures --example runtime_session`。`openapi.py` 的迁移确认场景也使用此测试程序。 |
 | `macos_keychain.py` | 独立临时钥匙串与合成身份；两个不同构建的调用者复用同一固定凭据助手，拒绝错误调用者和散列，普通操作不显示系统授权 UI；不接触日常凭据 |
 | `run.py`、`agent_cli.py` | 服务盘点、连接与授权、命令契约、共享及恢复 |
-| `config_integrity.py`、`bridge_adoption.py` | 格式保留、并发与失败恢复、已有 Bridge 接管和保留原生配置退出托管 |
+| `config_integrity.py`、`bridge_adoption.py` | 目录链接、历史来源 ID、跨数据目录写锁、预览和备份期限、写入中断及补记、已有 Bridge 接管。用 `--previous-binary` 验证旧版预览的迁移。 |
 | `agent_discovery.py`、`office_agents.py`、`pi_agent.py` | 安装门禁、来源与存储保护、原生配置及客户端确认、共享调用 |
 | `claude_sources.py`、`claude_writable.py`、`opencode_sources.py` | 客户端作用域、只读边界、格式及可写事务 |
 | `native_clients.py` | Codex app-server 与 Hermes 官方 MCP 发现/工具注册表：一个原生入口调用两个独立上游、范围变化、授权故障隔离、恢复及条目还原；不启动模型推理 |
 | `claude_native.py` | Claude 原生 CLI 加载生成的原生配置，并调用两个独立上游；模型 Messages 响应来自 loopback 合成服务，不使用真实模型账号 |
 | `tool_calls.py`、`generated_cli.py`、`cli_workflow.py` | 工具发现、Schema 校验、错误与退出码、命令生成及重新绑定；契约参数差异、单服务/聚合发现故障归因、旧后台拒绝及零调用核对 |
-| `http_api.py` | HTTP API 的路径/query/JSON 映射、图片与 Base64 转换、发现与核验区分、聚合路由、CLI 与凭据生命周期 |
-| `openapi.py` | OpenAPI／Swagger 离线 JSON/YAML 导入、显式选择、编码与可选请求体、响应条件、凭据回显过滤及同一连接的受保护字段迁移 |
+| `http_api.py` | HTTP API 的路径/query/JSON 映射、图片与 Base64、聚合调用、连接复用、凭据回显过滤及超时后单次派发 |
+| `openapi.py` | OpenAPI／Swagger 离线导入、本机和内网候选显式选择、文档级展开容量、并发预览、响应条件及受保护字段迁移 |
 | `aggregate_gateway.py` | 单入口多上游、重名路由、分页、资源与提示、服务选择、配置迁移和三路径共用 OAuth；可用 `--pi-package` 验证官方 Pi MCP 运行时 |
 | `entry_policy.py` | 同一账号的独立入口白名单、空与继承语义、全局上限和拒绝伪造调用 |
-| `catalog_refresh.py` | 工具/资源/提示变更通知、入口隔离、手动刷新、断开清理及官方 Pi 实时工具刷新（`--pi-package`） |
-| `catalog_pagination.py` | 动态上游的聚合分页快照、跨入口游标隔离、认证与成员变更后的游标失效 |
-| `remote_transports.py`、`oauth_clients.py` | 远程传输、协议会话、OAuth 注册与刷新、并发和失效处理 |
-| `desktop_ui.py` | 构建后界面流程与可访问性，包括搜索结果批量选择/取消、契约变更及未能核验提示，HTTP API 只读发现、探测确认、修订冲突、重复提交和异步关闭；需要 Chrome 和 agent-browser |
+| `catalog_refresh.py` | 工具/资源/提示变更通知、入口隔离、手动刷新、停止后台后的巡检及官方 Pi 实时工具刷新（`--pi-package`） |
+| `catalog_pagination.py` | 动态上游的聚合分页快照、跨入口游标隔离、成员变更、手动刷新和对应种类通知后的游标失效 |
+| `remote_transports.py`、`oauth_clients.py` | 远程传输、出站地址与代理边界、会话换代、OAuth 注册与刷新、取消和固定端口复用 |
+| `desktop_ui.py` | 构建后界面流程与可访问性，包括缺失入口成员、晚到的表单回复、非法端口、异步关闭及重复导入。需要 Chrome 和 agent-browser；可用 `--forms-only` 仅跑恢复表单和 OpenAPI。 |
 | `windows_desktop.py` | NSIS 隔离安装后的真实 Tauri/WebView2 窗口：Windows UI Automation 导航、弹窗取消、HTTP 探测、暂停/恢复、关闭到托盘及单实例重开；交互桌面不可用时失败 |
-| `windows_background.py`、`daemon_lifecycle.py` | 暂停持久化、退出、重连与进程树清理 |
-| `windows_signing.py`、`windows_installer.py` | 签名拒绝边界，NSIS 隔离安装、旧版升级、重装及卸载保留数据；有旧包时明确记录基线 |
+| `windows_background.py`、`daemon_lifecycle.py` | 暂停持久化、退出、残留端口冲突、并发重连与进程树清理。Linux 源码 CLI 可通过后者检查 SIGTERM 和进程组。 |
+| `windows_signing.py`、`windows_installer.py` | 签名拒绝边界，NSIS 隔离安装、旧版升级、重装及卸载保留数据。`--production` 检查从发布包安装得到的 CLI，签名候选还检查安装后的签名。 |
 | `updater.py` | 真实 Rust 更新实现访问回环 GitHub 夹具：版本筛选、取消、哈希/签名/签名版本拒绝、受限 URL、CLI 同步与中断恢复；`--live` 另检查公开 GitHub。此脚本不安装桌面，Windows 下载契约不等于 Windows 应用内升级通过。 |
-| `verify_package.py`、`installed_app.py` | macOS DMG、打包内容、签名和隔离安装场景 |
+| `verify_package.py`、`installed_app.py` | macOS DMG、打包内容和签名。隔离升级场景核对已有配置、认证、Bridge 和生成的 CLI。 |
+| `release_vault.py` | 用实际发布 CLI 验证显式的 fixture 请求被拒绝，且后台与测试凭据库均未创建 |
+
+Windows 覆盖验收可在一次性 x64 测试账户中传入两个不同的默认模式 NSIS，并启用 `windows_installer.py --native-migration`。将 `MCPLINK_E2E_BINARY` 指向当前默认模式 CLI。验收在 Credential Manager 中存放合成授权，通过真实安装器检查连接、授权、已有生成脚本和旧条目历史。原生配置的 DACL 和命名数据流须在应用及恢复后保持，数据库和备份须为私有。测试清理本次创建的合成凭据，原始报告保存在验收目录。
 
 `macos_keychain.py` 不修改证书信任。本地默认模式保留既有默认钥匙串；GitHub 托管 macOS 运行器显式传 `--github-hosted-keychain-default`，仅在测试期间将临时钥匙串选为默认，结束时恢复原值并移除临时钥匙串；其他环境拒绝该选项。正式本机签名、固定助手准备和部署不调用这条 CI 流程。
 

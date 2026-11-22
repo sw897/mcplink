@@ -18,31 +18,36 @@ pub(crate) enum Transition {
     Authorize,
 }
 
-/// Callers hold Engine::mutation. Never wait for a session slot while holding R:
-/// initialize holds the slot and may enter the SDK's refresh guard (S -> R).
-/// Invalidate again after releasing R, including on failure: a peer may install
-/// another slot after the first invalidation removes the old map entry.
+/// Callers hold Engine::mutation. Close admission for this connection and cancel
+/// both running and starting peers before taking the SDK refresh guard.
 pub(crate) struct CredentialEdit<'a> {
     engine: &'a Engine,
     id: String,
-    refresh: OwnedMutexGuard<()>,
+    refresh: Option<OwnedMutexGuard<()>>,
 }
 
 impl<'a> CredentialEdit<'a> {
     pub async fn begin(engine: &'a Engine, id: &str) -> Self {
-        engine.pool.invalidate(id).await;
-        let refresh = engine.pool.refresh_lock(id).lock_owned().await;
-        Self {
+        engine.pool.suspend_for_edit(id);
+        let mut edit = Self {
             engine,
             id: id.to_owned(),
-            refresh,
-        }
+            refresh: None,
+        };
+        edit.refresh = Some(engine.pool.refresh_lock(id).lock_owned().await);
+        edit
     }
 
-    pub async fn finish<T>(self, result: Result<T>) -> Result<T> {
-        drop(self.refresh);
-        self.engine.pool.invalidate(&self.id).await;
+    pub fn finish<T>(self, result: Result<T>) -> Result<T> {
+        drop(self);
         result
+    }
+}
+
+impl Drop for CredentialEdit<'_> {
+    fn drop(&mut self) {
+        drop(self.refresh.take());
+        self.engine.pool.invalidate(&self.id);
     }
 }
 
@@ -53,6 +58,9 @@ pub(crate) async fn replace_definition(
     binding: Option<&Binding>,
     transition: Transition,
 ) -> Result<()> {
+    if !matches!(transition, Transition::Authorize) {
+        engine.authorizations.cancel(&connection.id);
+    }
     let edit = CredentialEdit::begin(engine, &connection.id).await;
     match transition {
         Transition::Token | Transition::Authorize => connection.active = true,
@@ -94,7 +102,7 @@ pub(crate) async fn replace_definition(
             .save_connection(connection)
             .map_err(|error| error.context("OAuth 连接已保存，但授权状态保存失败；请重新登录"));
     }
-    edit.finish(result).await
+    edit.finish(result)
 }
 
 pub(crate) fn cleanup_credentials(engine: &Engine, id: &str) -> Result<()> {
@@ -121,7 +129,7 @@ pub(crate) async fn retry_cleanup(engine: &Engine, id: &str) -> Result<()> {
     let result = cleanup_credentials(engine, id).map_err(|error| {
         error.context("先前的连接配置已保存，但旧凭据清理仍未完成；请恢复凭据库访问后重试")
     });
-    edit.finish(result).await
+    edit.finish(result)
 }
 
 pub(crate) fn complete_oauth(engine: &Engine, id: &str, revision: u64) -> Result<()> {
@@ -138,19 +146,6 @@ pub(crate) fn complete_oauth(engine: &Engine, id: &str, revision: u64) -> Result
     connection.tool_count = None;
     connection.last_error = None;
     engine.store.save_connection(&connection)
-}
-
-fn fixture_exit(point: &str) {
-    if std::env::var("MCPLINK_FAILPOINT").ok().as_deref() == Some(point)
-        && std::env::var("MCPLINK_VAULT").ok().as_deref() == Some("fixture")
-        && std::env::var_os("MCPLINK_HOME").is_some_and(|home| {
-            std::path::PathBuf::from(home)
-                .join(".mcplink-test-fixture")
-                .is_file()
-        })
-    {
-        std::process::exit(94);
-    }
 }
 
 /// Vault and SQLite are separate stores. Save the new definition and commit its
@@ -190,7 +185,10 @@ pub(crate) fn persist_definition(
     engine
         .vault
         .set(&reference, &serde_json::to_string(definition)?)?;
-    fixture_exit("definition-after-stage");
+    #[cfg(feature = "test-fixtures")]
+    if crate::vault::fixture_failpoint("definition-after-stage") {
+        std::process::exit(94);
+    }
     connection.definition_ref = reference;
     connection.revision += 1;
     connection.transport = if connection.members.is_some() {
@@ -223,7 +221,10 @@ pub(crate) fn persist_definition(
         }
         return Err(error);
     }
-    fixture_exit("definition-after-commit");
+    #[cfg(feature = "test-fixtures")]
+    if crate::vault::fixture_failpoint("definition-after-commit") {
+        std::process::exit(94);
+    }
     cleanup_credentials(engine, &connection.id).map_err(|error| {
         error.context(
             "连接配置已保存，但旧凭据清理失败；恢复凭据库访问后可重试，后台重启也会继续清理",
@@ -268,9 +269,7 @@ impl VaultCredentials {
 #[async_trait]
 impl CredentialStore for VaultCredentials {
     async fn load(&self) -> std::result::Result<Option<StoredCredentials>, AuthError> {
-        if self.check()?.status == "needs_auth" {
-            return Err(AuthError::CredentialStoreError("需要重新授权".into()));
-        }
+        self.check()?;
         self.engine
             .vault
             .get(&format!("oauth/{}", self.id))
@@ -296,6 +295,24 @@ impl CredentialStore for VaultCredentials {
             .vault
             .delete(&format!("oauth/{}", self.id))
             .map_err(|_| AuthError::CredentialStoreError("系统凭据库不可用".into()))
+    }
+    async fn on_refresh_token_rejected(
+        &self,
+        rejected: &StoredCredentials,
+    ) -> std::result::Result<(), AuthError> {
+        // rmcp invokes this hook while holding the refresh lock. Compare the
+        // grant before deleting it so a later grant can never be removed here.
+        let Some(current) = self.load().await? else {
+            return Ok(());
+        };
+        let encode = |value: &StoredCredentials| {
+            serde_json::to_value(value)
+                .map_err(|_| AuthError::CredentialStoreError("授权数据无法编码".into()))
+        };
+        if encode(&current)? == encode(rejected)? {
+            self.clear().await?;
+        }
+        Ok(())
     }
     async fn acquire_refresh_guard(
         &self,

@@ -124,10 +124,12 @@ def run(record, live=False):
         result = subprocess.run([str(driver)], input=json.dumps({**args, **(options or {})}), capture_output=True, text=True, encoding="utf-8", timeout=25)
         assert result.returncode in (0, 2), f"{name}: driver crashed"
         value = json.loads(result.stdout)
-        if phase:
-            assert result.returncode == 0 and value.get("phase") == phase, f"{name}: {value}"
         if error:
             assert result.returncode == 2 and error in value.get("error", ""), f"{name}: {value}"
+        else:
+            assert result.returncode == 0, f"{name}: {value.get('error', 'missing driver error')}"
+        if phase:
+            assert value.get("phase") == phase, f"{name}: {value}"
         scenarios.append(name)
         return value
 
@@ -214,8 +216,8 @@ def run(record, live=False):
         receipt = home / "desktop-updates/pending.json"
         receipt.parent.mkdir()
 
-        def pending(checksum=None):
-            receipt.write_text(json.dumps({"version": "0.4.0", "targets": [{"path": str(target), "sha256": checksum or digest(old)}]}))
+        def pending(checksum=None, cli=target):
+            receipt.write_text(json.dumps({"version": "0.4.0", "targets": [{"path": str(cli), "sha256": checksum or digest(old)}]}))
 
         sync = {"action": "sync", "version": "0.4.0", "sidecar": str(sidecar)}
         target.write_bytes(old)
@@ -234,6 +236,10 @@ def run(record, live=False):
         assert call("interrupted CLI rename restored and completed", sync)["synced"] and target.read_bytes() == new
         pending()
         call("wrong first-start version preserves CLI", {**sync, "version": "0.3.2"}, error="尚未完成")
+        assert call("explicitly archive stale update receipt", {**sync, "action": "archive", "version": "0.3.2"})["archived"]
+        assert not receipt.exists() and len(list(receipt.parent.glob("pending-abandoned-*.json"))) == 1
+        assert not call("archiving does not change the installed CLI", sync)["synced"] and target.read_bytes() == new
+        pending()
         target.unlink()
         outside = home / "linked-original"
         outside.write_bytes(old)
@@ -247,6 +253,28 @@ def run(record, live=False):
             assert outside.read_bytes() == old and target.is_symlink()
         target.unlink()
         target.write_bytes(old)
+        alias, real_directory = home / "cli-parent-link", home / "cli-parent-target"
+        real_directory.mkdir()
+        linked_cli = real_directory / executable
+        linked_cli.write_bytes(old)
+        if os.name == "nt":
+            subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                            "$ErrorActionPreference = 'Stop'; New-Item -ItemType Junction -Path $env:MCPLINK_FIXTURE_JUNCTION -Target $env:MCPLINK_FIXTURE_JUNCTION_TARGET | Out-Null"],
+                           env={**os.environ, "MCPLINK_FIXTURE_JUNCTION": str(alias),
+                                "MCPLINK_FIXTURE_JUNCTION_TARGET": str(real_directory)},
+                           capture_output=True, check=True, timeout=20)
+        else:
+            alias.symlink_to(real_directory, target_is_directory=True)
+        try:
+            pending(cli=alias / executable)
+            call("linked CLI parent is rejected without replacing its target", sync, error="位置已变化")
+            assert linked_cli.read_bytes() == old
+        finally:
+            if os.name == "nt":
+                alias.rmdir()
+            else:
+                alias.unlink()
+        pending()
         stage = target.with_name(f".{executable}.mcplink-update-0.4.0")
         stage.write_bytes(b"unrecognized partial file")
         call("unknown staging file preserved for review", sync, error="临时文件未通过")
@@ -258,9 +286,27 @@ def run(record, live=False):
         assert binary.is_file(), "Build mcplink-core before updater acceptance"
         version = subprocess.check_output([str(binary), "--version"], text=True).strip().split()[1]
         shutil.copyfile(binary, target)
+        shutil.copyfile(binary, sidecar)
         target.chmod(0o755)
-        value = call("recognize installed mcplink CLI before offering synchronization", {"action": "discover", "version": version, "sidecar": str(sidecar)})
+        discovery = {"action": "discover", "version": version, "sidecar": str(sidecar)}
+        value = call("recognize matching installed bytes without executing the candidate", discovery)
         assert len(value["targets"]) == 1 and Path(value["targets"][0]["path"]) == target
+        target.write_bytes(b"unrecognized same-name CLI")
+        assert call("unknown same-name CLI is excluded and preserved", discovery)["targets"] == []
+        assert target.read_bytes() == b"unrecognized same-name CLI"
+        for method, fields, accepted in [
+            ("snapshot", {}, True),
+            ("connections.probe", {"id": "fixture", "expectedRevision": 1}, True),
+            ("connections.probe", {"id": "fixture"}, False),
+            ("connections.save", {"confirmedTransferOrigin": "https://fixture.invalid"}, False),
+            ("gateway.stop", {}, False),
+            ("mcp.request", {}, False),
+            ("changes.preview", {"_bridgeExecutable": str(sidecar)}, False),
+        ]:
+            value = call(f"desktop RPC policy for {method}", {
+                "action": "desktop-rpc-contract", "method": method, "params": fields,
+            }, error=None if accepted else "桌面" if method != "connections.probe" else "连接修订")
+            assert (value.get("accepted") is True) == accepted
         # Exercise the release preparation boundary with a synthetic NSIS payload.
         # This verifies metadata/signatures, not execution of an installer.
         sys.path.insert(0, str(ROOT / "scripts"))

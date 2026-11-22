@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.request
 
 import run as e2e
 
@@ -25,7 +26,7 @@ def main():
     args = parser.parse_args()
     version = json.loads((e2e.ROOT / "package.json").read_text())["version"]
     arch = "aarch64" if platform.machine() == "arm64" else "x64"
-    dmg = args.dmg or e2e.ROOT / f"target/release/bundle/dmg/mcplink_{version}_{arch}.dmg"
+    dmg = args.dmg or e2e.ROOT / f"target/fixture-bundle/release/bundle/dmg/mcplink_{version}_{arch}.dmg"
     record = args.record.resolve()
     record.mkdir(parents=True, exist_ok=False)
     report = {"executed_at": datetime.now(timezone.utc).isoformat(), "platform": platform.platform(),
@@ -96,6 +97,24 @@ def main():
             harness.changes(old_connection, ["codex:user", "hermes:user"], mode="shared")
             configs = [harness.home / ".codex/config.toml", harness.home / ".hermes/config.yaml"]
             before = [p.read_bytes() for p in configs]
+            port = json.loads((harness.data / "runtime.json").read_text())["port"]
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=5) as health:
+                api = json.load(health)
+            report["previous_management_api"] = api.get("managementApi", 1)
+            cli_output = record / "existing generated CLI"
+            subprocess.run([str(e2e.BINARY), "cli", "generate", old_connection, "--name", "upgrade-documents",
+                            "--output", str(cli_output), "--tool", "read_document"],
+                           env=harness.environment, check=True, capture_output=True, timeout=30)
+            cli_files = {file.name: file.read_bytes() for file in cli_output.iterdir()}
+            previous_info = plistlib.loads((args.previous_app / "Contents/Info.plist").read_bytes())
+            report["previous_app_version"] = previous_info["CFBundleShortVersionString"]
+            if report["previous_management_api"] < 24:
+                current_cli = saved / "Contents/MacOS/mcplink"
+                denied = subprocess.run([str(current_cli), "status"], env=harness.environment,
+                                        capture_output=True, encoding="utf-8", timeout=10)
+                assert denied.returncode == 1 and "旧后台使用不兼容的管理协议" in json.loads(denied.stdout)["error"]["message"]
+                assert [p.read_bytes() for p in configs] == before
+                passed("new CLI rejects an actual legacy daemon before management dispatch")
             stop_daemon()
             shutil.rmtree(application)
             subprocess.run(["ditto", str(saved), str(application)], check=True)
@@ -104,6 +123,14 @@ def main():
             assert [p.read_bytes() for p in configs] == before
             report["previous_binary_sha256"] = hashlib.sha256((args.previous_app / "Contents/MacOS/mcplink").read_bytes()).hexdigest()
             passed("installing over an older initialized build retains account IDs, credentials and native configurations")
+            launched = subprocess.run([str(cli_output / "upgrade-documents"), "read_document", "--stdin"],
+                                      input='{"id":"weekly-fixture"}', encoding="utf-8",
+                                      env=harness.environment | {"MCPLINK_BIN": str(e2e.BINARY)},
+                                      check=True, capture_output=True, timeout=30)
+            called = json.loads(launched.stdout)["ok"]
+            assert called["connectionId"] == old_connection and not called["output"]["isError"]
+            assert cli_files == {file.name: file.read_bytes() for file in cli_output.iterdir() if not file.name.endswith(".lock")}
+            passed("the pre-upgrade launcher uses the upgraded CLI and original credentials without regeneration")
             stop_daemon()
             import sqlite3
             with sqlite3.connect(harness.data / "mcplink.sqlite3") as database:
@@ -157,8 +184,7 @@ def main():
                       binary_sha256=hashlib.sha256(e2e.BINARY.read_bytes()).hexdigest(),
                       native_user_config_modified=False,
                       limits=["No new macOS account, real Keychain, quarantine or Windows acceptance",
-                              "Menu bar, login startup, Dock reopening and desktop quit require separate native UI acceptance",
-                              "Previous-build compatibility is not an upgrade from a released older version"])
+                              "Menu bar, login startup, Dock reopening and desktop quit require separate native UI acceptance"])
         if args.keep:
             # Used only by the desktop QA copy; contains synthetic paths/credentials.
             keys = ("MCPLINK_HOME", "MCPLINK_DATA_DIR", "MCPLINK_VAULT", "CODEX_HOME", "HERMES_HOME", "CLAUDE_CONFIG_DIR", "PATH")

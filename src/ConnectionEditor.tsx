@@ -19,6 +19,7 @@ export function Editor({
   const [title, setTitle] = useState(connection?.title || "");
   const [type, setType] = useState("http");
   const [url, setUrl] = useState("");
+  const [approvedOrigin, setApprovedOrigin] = useState<string>();
   const [command, setCommand] = useState("");
   const [args, setArgs] = useState("");
   const [account, setAccount] = useState(connection?.accountLabel || "");
@@ -29,7 +30,11 @@ export function Editor({
   const [cwd, setCwd] = useState("");
   const [definition, setDefinition] = useState<Definition>();
   const [pending, setPending] = useState(false);
+  const saving = React.useRef(false);
   const [error, setError] = useState("");
+  const [transferHeaders, setTransferHeaders] = useState<Record<string, string>>({});
+  const [importedTools, setImportedTools] = useState<string[]>();
+  const [importRange, setImportRange] = useState<"current" | "imported">();
   const [importedCredentials, setImportedCredentials] = useState<
     CredentialInput[]
   >([]);
@@ -38,8 +43,10 @@ export function Editor({
   );
   useEffect(() => {
     if (connection) {
-      setPending(true);
-      rpc<{ connection?: Connection; definition: Definition }>(
+      let active = true;
+      setDefinition(undefined);
+      setError("");
+      void rpc<{ connection?: Connection; definition: Definition }>(
         connection.detected
           ? "connections.source_detail"
           : "connections.detail",
@@ -48,6 +55,7 @@ export function Editor({
           : { id: connection.id },
       )
         .then((result) => {
+          if (!active) return;
           const current = result.connection || connection;
           setName(current.name);
           setTitle(current.title);
@@ -64,14 +72,19 @@ export function Editor({
             JSON.stringify(result.definition.httpApi || { tools: [] }, null, 2),
           );
           setUrl(result.definition.url || "");
+          setApprovedOrigin(result.definition.privateNetworkOrigin);
           setCommand(result.definition.command || "");
           setArgs(result.definition.args.join("\n"));
           setEnvironment(JSON.stringify(result.definition.env, null, 2));
           setCustomHeaders(JSON.stringify(result.definition.headers, null, 2));
           setCwd(result.definition.cwd || "");
         })
-        .catch((error) => setError(error.message))
-        .finally(() => setPending(false));
+        .catch((error) => {
+          if (active) setError(error.message);
+        });
+      return () => {
+        active = false;
+      };
     }
   }, [connection]);
   const origin = (address: string) => {
@@ -86,8 +99,37 @@ export function Editor({
     !!definition?.url &&
     !!url &&
     origin(definition.url) !== origin(url);
+  const privateOrigin = origin(url);
+  const updateUrl = (value: string) => {
+    setUrl(value);
+    setApprovedOrigin((current) =>
+      current === origin(value) ? current : undefined,
+    );
+  };
+  const transferFields =
+    type === "http-api" && connection && !connection.detected && definition?.command
+      ? Object.keys(definition.env)
+      : [];
+  const loading = !!connection && !definition;
+  const hasAllowlist =
+    !!definition?.includeSpecified || !!definition?.includeTools?.length;
+  const reviewRange =
+    type === "http-api" &&
+    !!importedTools &&
+    !!connection &&
+    (hasAllowlist || !!definition?.excludeTools?.length);
+  const retainedToolCount = importedTools?.filter(
+    (tool) =>
+      (!hasAllowlist || definition?.includeTools?.includes(tool)) &&
+      !definition?.excludeTools?.includes(tool),
+  ).length;
+  const close = () => {
+    if (!saving.current) onClose();
+  };
   const save = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (saving.current || loading || (reviewRange && !importRange)) return;
+    saving.current = true;
     setPending(true);
     setError("");
     try {
@@ -100,6 +142,7 @@ export function Editor({
         ...definition,
         command: type === "stdio" ? command : undefined,
         url: type !== "stdio" ? url : undefined,
+        privateNetworkOrigin: type !== "stdio" ? approvedOrigin : undefined,
         httpApi: type === "http-api" ? JSON.parse(httpApi) : undefined,
       };
       if (type === "stdio") {
@@ -124,7 +167,7 @@ export function Editor({
           next.cwd = undefined;
         }
         next.headers = JSON.parse(customHeaders);
-        for (const [key, value] of Object.entries(importedValues)) {
+        for (const [key, value] of Object.entries(type === "http-api" ? importedValues : {})) {
           if (!value) continue;
           next.headers = Object.fromEntries(
             Object.entries(next.headers).filter(
@@ -149,6 +192,10 @@ export function Editor({
         next.clientSecret = undefined;
         next.oauthScopes = [];
         next.oauthCallbackPort = undefined;
+        if (importedTools && (!reviewRange || importRange === "imported")) {
+          next.includeTools = importedTools;
+          next.includeSpecified = true;
+        }
       }
       if (token && type !== "stdio") {
         next.headers = Object.fromEntries(
@@ -159,6 +206,13 @@ export function Editor({
         next.headers.Authorization = token;
         next.oauth = false;
       }
+      const credentialMappings = transferFields.flatMap((name) => {
+        const header = transferHeaders[name]?.trim();
+        return header ? [{
+          from: { field: "env", name },
+          to: { field: "headers", name: header },
+        }] : [];
+      });
       await rpc("connections.save", {
         ...(connection?.detected
           ? { sourceId: connection.sourceId, sourceName: connection.name }
@@ -167,11 +221,13 @@ export function Editor({
         title: title || name,
         accountLabel: account || "用户标签",
         definition: next,
+        ...(credentialMappings.length ? { credentialMappings } : {}),
       });
       await onDone();
     } catch (error) {
       setError((error as Error).message);
     } finally {
+      saving.current = false;
       setPending(false);
     }
   };
@@ -184,7 +240,8 @@ export function Editor({
             ? "编辑服务连接"
             : "添加 MCP 服务"
       }
-      onClose={onClose}
+      onClose={close}
+      closeDisabled={pending}
     >
       <form className="modal-body" onSubmit={(event) => void save(event)}>
         {connection?.detected && (
@@ -192,10 +249,7 @@ export function Editor({
             保存后由 mcplink 托管此连接。原客户端配置保留在原处。
           </p>
         )}
-        <fieldset
-          className="editor-fields"
-          disabled={pending || (!!connection && !definition)}
-        >
+        <fieldset className="editor-fields" disabled={pending || loading}>
           <div className="form-grid">
             <label className="field">
               <span>显示名称</span>
@@ -236,7 +290,7 @@ export function Editor({
                 <input
                   required
                   value={url}
-                  onChange={(event) => setUrl(event.target.value)}
+                  onChange={(event) => updateUrl(event.target.value)}
                   placeholder={
                     type === "http-api"
                       ? "https://api.example.com"
@@ -244,33 +298,84 @@ export function Editor({
                   }
                 />
               </label>
+              {privateOrigin.startsWith("https://") && (
+                <label className="field">
+                  <span>
+                    <input
+                      type="checkbox"
+                      checked={approvedOrigin === privateOrigin}
+                      onChange={(event) =>
+                        setApprovedOrigin(event.target.checked ? privateOrigin : undefined)
+                      }
+                    />
+                    允许此 HTTPS 来源访问内网
+                  </span>
+                  <small className="field-help">{privateOrigin}</small>
+                </label>
+              )}
               {type === "http-api" && (
                 <OpenApiImport
                   disabled={pending}
                   onApply={(result) => {
-                    setUrl(result.definition.url || "");
+                    updateUrl(result.definition.url || "");
                     setHttpApi(
                       JSON.stringify(result.definition.httpApi, null, 2),
                     );
-                    setDefinition((current) =>
-                      current
-                        ? { ...current, httpApi: result.definition.httpApi }
-                        : result.definition,
-                    );
-                    if (!name) setName(result.suggestedName);
-                    if (!title) setTitle(result.title);
+                    setName((current) => current || result.suggestedName);
+                    setTitle((current) => current || result.title);
+                    setImportedTools(result.definition.includeTools || []);
+                    setImportRange(undefined);
                     setImportedCredentials(result.credentialInputs);
                     setImportedValues({});
                   }}
                 />
               )}
-              {type === "http-api" &&
-                connection &&
-                definition?.includeSpecified && (
+              {transferFields.length > 0 && (
+                <details className="field">
+                  <summary>迁移已存环境变量</summary>
+                  <p className="field-help">填写目标请求头名称。保存时会核对目标服务并请你确认。</p>
+                  {transferFields.map((name) => (
+                    <label className="field" key={name}>
+                      <span>{name} 的目标请求头</span>
+                      <input
+                        value={transferHeaders[name] || ""}
+                        onChange={(event) => setTransferHeaders((current) => ({
+                          ...current,
+                          [name]: event.target.value,
+                        }))}
+                        placeholder="可留空"
+                        maxLength={256}
+                        autoComplete="off"
+                      />
+                    </label>
+                  ))}
+                </details>
+              )}
+              {reviewRange && (
+                <fieldset className="field" aria-label="导入后的工具范围">
                   <p className="field-help">
-                    此连接已有工具范围限制。导入后请检查允许的工具名称；新增工具仍受原范围限制。
+                    此连接已有工具范围限制。原有排除项继续生效。
                   </p>
-                )}
+                  <label>
+                    <input
+                      type="radio"
+                      name="import-range"
+                      checked={importRange === "current"}
+                      onChange={() => setImportRange("current")}
+                    />
+                    保留现有范围（本次导入中 {retainedToolCount} 项可用）
+                  </label>
+                  <label>
+                    <input
+                      type="radio"
+                      name="import-range"
+                      checked={importRange === "imported"}
+                      onChange={() => setImportRange("imported")}
+                    />
+                    使用本次选中的操作
+                  </label>
+                </fieldset>
+              )}
               {type === "http-api" && importedCredentials.length > 0 && (
                 <div className="import-credentials">
                   <p className="field-help">
@@ -417,14 +522,14 @@ export function Editor({
           </div>
         )}
         <footer className="modal-footer">
-          <button type="button" className="button" onClick={onClose}>
+          <button type="button" className="button" disabled={pending} onClick={close}>
             取消
           </button>
           <button
             className="button primary"
-            disabled={pending || (!!connection && !definition)}
+            disabled={pending || loading || (reviewRange && !importRange)}
           >
-            {pending && <Loader2 className="spin" size={15} />}
+            {(pending || (loading && !error)) && <Loader2 className="spin" size={15} />}
             {connection?.detected ? "保存并纳入托管" : "保存连接"}
           </button>
         </footer>
@@ -444,6 +549,7 @@ export function CredentialDialog({
 }) {
   const [token, setToken] = useState("");
   const [pending, setPending] = useState(false);
+  const working = React.useRef(false);
   const [error, setError] = useState("");
   const [oauth, setOauth] = useState(false);
   const [clientId, setClientId] = useState("");
@@ -473,38 +579,49 @@ export function CredentialDialog({
     };
   }, [connection.id]);
   const saveOauth = async () => {
+    const port = callbackPort.trim();
+    const parsed = port === "" ? null : Number(port);
+    if (parsed !== null && (!/^\d+$/.test(port) || !Number.isInteger(parsed) || parsed < 1 || parsed > 65535)) {
+      throw new Error("本地回调端口须为 1–65535 的整数，或留空让系统分配。");
+    }
     const result = await rpc<{ definition: Definition }>("oauth.configure", {
       id: connection.id,
       settings: {
         clientId: clientId.trim() || null,
         clientSecret: clientSecret || null,
         scopes: scopes.trim() ? scopes.trim().split(/\s+/) : [],
-        callbackPort: callbackPort ? Number(callbackPort) : null,
+        callbackPort: parsed,
       },
     });
     setClientSecret(result.definition.clientSecret || "");
     setOauthSaved(true);
   };
-  const update = async (event: React.FormEvent) => {
-    event.preventDefault();
+  const submit = async (operation: () => Promise<void>) => {
+    if (working.current) return;
+    working.current = true;
     setPending(true);
     setError("");
     try {
-      await rpc("credentials.update", {
-        id: connection.id,
-        header: "Authorization",
-        value: token,
-      });
-      await onDone();
+      await operation();
     } catch (error) {
       setError((error as Error).message);
     } finally {
+      working.current = false;
       setPending(false);
     }
   };
+  const close = () => {
+    if (!working.current) onClose();
+  };
   return (
-    <Modal title={`${connection.title} · 认证`} onClose={onClose}>
-      <form className="modal-body" onSubmit={(event) => void update(event)}>
+    <Modal title={`${connection.title} · 认证`} closeDisabled={pending} onClose={close}>
+      <form className="modal-body" onSubmit={(event) => {
+        event.preventDefault();
+        if (token) void submit(async () => {
+          await rpc("credentials.update", { id: connection.id, header: "Authorization", value: token });
+          await onDone();
+        });
+      }}>
         <p className="muted">
           认证保存在系统凭据库，使用这项共享连接的 Agent 会共用更新后的值。
         </p>
@@ -529,6 +646,7 @@ export function CredentialDialog({
             type="password"
             autoComplete="off"
             value={token}
+            disabled={pending}
             onChange={(event) => setToken(event.target.value)}
             placeholder="粘贴服务提供的令牌或完整 Bearer 值"
           />
@@ -549,6 +667,7 @@ export function CredentialDialog({
             <span>Client ID · 预注册应用</span>
             <input
               value={clientId}
+              disabled={pending || !oauthLoaded}
               onChange={(event) => {
                 setClientId(event.target.value);
                 setOauthSaved(false);
@@ -562,6 +681,7 @@ export function CredentialDialog({
             <input
               type="password"
               value={clientSecret}
+              disabled={pending || !oauthLoaded}
               onChange={(event) => {
                 setClientSecret(event.target.value);
                 setOauthSaved(false);
@@ -574,6 +694,7 @@ export function CredentialDialog({
             <span>授权 scope · 用空格分隔</span>
             <input
               value={scopes}
+              disabled={pending || !oauthLoaded}
               onChange={(event) => {
                 setScopes(event.target.value);
                 setOauthSaved(false);
@@ -584,10 +705,9 @@ export function CredentialDialog({
           <label className="field">
             <span>本地回调端口 · 可选</span>
             <input
-              type="number"
-              min={1}
-              max={65535}
+              inputMode="numeric"
               value={callbackPort}
+              disabled={pending || !oauthLoaded}
               onChange={(event) => {
                 setCallbackPort(event.target.value);
                 setOauthSaved(false);
@@ -603,18 +723,10 @@ export function CredentialDialog({
             className="button"
             type="button"
             disabled={pending || !oauthLoaded}
-            onClick={async () => {
-              setPending(true);
-              setError("");
-              try {
-                await saveOauth();
-                await onDone();
-              } catch (error) {
-                setError((error as Error).message);
-              } finally {
-                setPending(false);
-              }
-            }}
+            onClick={() => void submit(async () => {
+              await saveOauth();
+              await onDone();
+            })}
           >
             保存 OAuth 设置
           </button>
@@ -623,22 +735,12 @@ export function CredentialDialog({
             className="button"
             type="button"
             disabled={pending || !oauthLoaded}
-            onClick={async () => {
-              setPending(true);
-              setError("");
-              try {
-                await saveOauth();
-                const result = await rpc<{ url: string }>("oauth.start", {
-                  id: connection.id,
-                });
-                await rpc("browser.open", { url: result.url });
-                setOauth(true);
-              } catch (error) {
-                setError((error as Error).message);
-              } finally {
-                setPending(false);
-              }
-            }}
+            onClick={() => void submit(async () => {
+              await saveOauth();
+              const result = await rpc<{ url: string }>("oauth.start", { id: connection.id });
+              await rpc("browser.open", { url: result.url });
+              setOauth(true);
+            })}
           >
             <KeyRound size={15} />
             在浏览器授权
@@ -655,7 +757,7 @@ export function CredentialDialog({
           </div>
         )}
         <footer className="modal-footer">
-          <button type="button" className="button" onClick={onClose}>
+          <button type="button" className="button" disabled={pending} onClick={close}>
             关闭
           </button>
           <button className="button primary" disabled={pending || !token}>

@@ -23,17 +23,21 @@ export function HttpProbeDialog({
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  useEffect(() => {
+    let active = true;
     void rpc<ToolInventory>("connections.tools", { id: connection.id })
       .then((value) => {
         if (value.verification?.probe === undefined)
           throw new Error("后台不支持探测确认，请使用同一构建的桌面与后台。");
-        if (mounted.current) setPreview(value);
+        if (active) setPreview(value);
       })
       .catch((cause: Error) => {
-        if (mounted.current) setError(cause.message);
+        if (active) setError(cause.message);
       });
     return () => {
-      mounted.current = false;
+      active = false;
     };
   }, [connection.id]);
   const probe = preview?.verification?.probe;

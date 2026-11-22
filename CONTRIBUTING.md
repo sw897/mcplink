@@ -21,6 +21,7 @@ npm run desktop
 npm run build
 python3 tests/e2e/frontend.py --record artifacts/e2e/frontend/local
 npm run check
+node scripts/prepare-sidecar.mjs --debug --test-fixtures
 python3 tests/e2e/run.py
 python3 tests/e2e/agent_cli.py --record artifacts/e2e/agent-cli/local
 python3 tests/e2e/claude_sources.py --record artifacts/e2e/claude/local
@@ -28,7 +29,7 @@ python3 tests/e2e/tool_calls.py --record artifacts/e2e/tool-calls/local
 python3 tests/e2e/generated_cli.py --record artifacts/e2e/generated-cli/local
 ```
 
-检查命令会先构建并同步 debug sidecar。隔离测试使用合成 home、MCP 上游和 fixture Vault。`MCPLINK_E2E_BINARY` 可指定待测程序；每次测试应使用新的记录目录。
+`npm run check` 构建默认配置的 debug sidecar。随后显式构建的 `test-fixtures` 版本用于合成 home、MCP 上游和 fixture Vault。`MCPLINK_E2E_BINARY` 可指定待测程序。每次测试使用新的记录目录。
 
 前端通过 esbuild 构建到 `dist/`；开发输出单独使用 `.local/frontend/`，入口为 `http://127.0.0.1:1420`。`npm run dev` 监听模块和 HTML 入口的变化并刷新页面；公开静态文件在启动或构建时复制。开发端口被占用时直接失败，可用 `npm run dev -- --port 1421` 显式选择其他端口。Tauri 的 `devUrl` 使用默认端口。
 

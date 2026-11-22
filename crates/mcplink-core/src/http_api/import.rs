@@ -6,8 +6,60 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod document;
+
 pub const MAX_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_OPERATIONS: usize = 1024;
+const MAX_SERVER_BYTES: usize = 2048;
+const EXPANSION_ERROR: &str = "OpenAPI 文档展开超过容量限制，请拆分文档";
+
+struct Expansion {
+    nodes: usize,
+    bytes: usize,
+    exhausted: bool,
+}
+
+impl Default for Expansion {
+    fn default() -> Self {
+        Self {
+            nodes: 50_000,
+            bytes: 8 * 1024 * 1024,
+            exhausted: false,
+        }
+    }
+}
+
+impl Expansion {
+    fn spend(&mut self, nodes: usize, bytes: usize) -> Result<()> {
+        if nodes > self.nodes || bytes > self.bytes {
+            self.exhausted = true;
+            bail!(EXPANSION_ERROR);
+        }
+        self.nodes -= nodes;
+        self.bytes -= bytes;
+        Ok(())
+    }
+
+    fn retain(&mut self, value: &Value) -> Result<()> {
+        self.spend(1, 16)?;
+        match value {
+            Value::String(text) => self.spend(0, text.len())?,
+            Value::Object(fields) => {
+                for (key, field) in fields {
+                    self.spend(0, key.len())?;
+                    self.retain(field)?;
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    self.retain(item)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
 
 #[derive(Default, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
@@ -42,10 +94,15 @@ struct CredentialInput {
     hint: String,
 }
 
-fn resolve<'a>(mut value: &'a Value, document: &'a Value) -> Result<&'a Value> {
+fn resolve<'a>(
+    mut value: &'a Value,
+    document: &'a Value,
+    budget: &mut Expansion,
+) -> Result<&'a Value> {
     let mut visited = BTreeSet::new();
     while let Some(reference) = value.get("$ref") {
         let reference = reference.as_str().context("引用需要字符串")?;
+        budget.spend(1, reference.len())?;
         ensure!(
             reference.starts_with("#/"),
             "外部引用未读取，请先合并为本地文档"
@@ -70,18 +127,19 @@ fn resolve<'a>(mut value: &'a Value, document: &'a Value) -> Result<&'a Value> {
 fn schema(
     value: &Value,
     document: &Value,
-    budget: &mut usize,
+    budget: &mut Expansion,
     refs: &mut BTreeSet<String>,
     depth: usize,
 ) -> Result<Value> {
-    ensure!(depth < 32 && *budget > 0, "Schema 展开超过深度或容量限制");
-    *budget -= 1;
+    ensure!(depth < 32, "Schema 展开超过深度限制");
+    budget.spend(1, 16)?;
     if value.is_boolean() {
         return Ok(value.clone());
     }
     let object = value.as_object().context("Schema 需要对象或布尔值")?;
     if let Some(reference) = object.get("$ref") {
         let reference = reference.as_str().context("Schema 引用需要字符串")?;
+        budget.spend(0, reference.len())?;
         ensure!(
             reference.starts_with("#/"),
             "Schema 外部引用未读取，请先合并为本地文档"
@@ -95,11 +153,12 @@ fn schema(
             .context("Schema 本地引用不存在")?;
         let resolved = schema(target, document, budget, refs, depth + 1)?;
         refs.remove(reference);
-        let siblings: Map<_, _> = object
-            .iter()
-            .filter(|(k, _)| k.as_str() != "$ref")
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        let mut siblings = Map::new();
+        for (key, child) in object.iter().filter(|(key, _)| key.as_str() != "$ref") {
+            budget.spend(0, key.len())?;
+            budget.retain(child)?;
+            siblings.insert(key.clone(), child.clone());
+        }
         if siblings.is_empty() {
             return Ok(resolved);
         }
@@ -113,7 +172,7 @@ fn schema(
         .into_iter()
         .flatten()
         .filter(|(_, v)| v.get("readOnly") == Some(&Value::Bool(true)))
-        .map(|(k, _)| k.clone())
+        .map(|(k, _)| k.as_str())
         .collect();
     for (key, value) in object {
         // Examples/defaults may contain live credentials. Defaults are annotations,
@@ -132,12 +191,14 @@ fn schema(
         {
             continue;
         }
+        budget.spend(0, key.len())?;
         let value = match key.as_str() {
             "properties" | "$defs" | "definitions" | "patternProperties" | "dependentSchemas" => {
                 let values = value.as_object().context("Schema 属性映射无效")?;
                 let mut properties = Map::new();
                 for (name, child) in values {
-                    if key == "properties" && readonly.contains(name) {
+                    budget.spend(1, name.len())?;
+                    if key == "properties" && readonly.contains(name.as_str()) {
                         continue;
                     }
                     properties.insert(
@@ -164,15 +225,18 @@ fn schema(
                     .map(|v| schema(v, document, budget, refs, depth + 1))
                     .collect::<Result<_>>()?,
             ),
-            "required" => Value::Array(
-                value
-                    .as_array()
-                    .context("required 需要数组")?
-                    .iter()
-                    .filter(|v| !v.as_str().is_some_and(|s| readonly.contains(s)))
-                    .cloned()
-                    .collect(),
-            ),
+            "required" => {
+                budget.retain(value)?;
+                Value::Array(
+                    value
+                        .as_array()
+                        .context("required 需要数组")?
+                        .iter()
+                        .filter(|v| !v.as_str().is_some_and(|s| readonly.contains(s)))
+                        .cloned()
+                        .collect(),
+                )
+            }
             "exclusiveMinimum" | "exclusiveMaximum" if value.is_boolean() => {
                 if value == &Value::Bool(false) {
                     continue;
@@ -188,7 +252,10 @@ fn schema(
                     .context("旧版排他边界缺少数值")?
                     .clone()
             }
-            _ => value.clone(),
+            _ => {
+                budget.retain(value)?;
+                value.clone()
+            }
         };
         out.insert(key.clone(), value);
     }
@@ -210,8 +277,8 @@ fn schema(
     }
 }
 
-fn normalized_schema(value: &Value, document: &Value) -> Result<Value> {
-    schema(value, document, &mut 50_000, &mut BTreeSet::new(), 0)
+fn normalized_schema(value: &Value, document: &Value, budget: &mut Expansion) -> Result<Value> {
+    schema(value, document, budget, &mut BTreeSet::new(), 0)
 }
 
 fn slug(value: &str) -> String {
@@ -235,11 +302,24 @@ fn slug(value: &str) -> String {
 }
 
 fn server_value(value: &Value) -> Option<String> {
-    let mut url = value.get("url")?.as_str()?.to_owned();
+    let raw = value.get("url")?.as_str()?;
+    if raw.len() > MAX_SERVER_BYTES {
+        return None;
+    }
+    let mut url = raw.to_owned();
     if let Some(variables) = value.get("variables").and_then(Value::as_object) {
         for (name, definition) in variables {
             let default = definition.get("default")?.as_str()?;
-            url = url.replace(&format!("{{{name}}}"), default);
+            let marker = format!("{{{name}}}");
+            if url
+                .matches(&marker)
+                .count()
+                .saturating_mul(default.len().saturating_sub(marker.len()))
+                > MAX_SERVER_BYTES - url.len()
+            {
+                return None;
+            }
+            url = url.replace(&marker, default);
         }
     }
     if url.contains(['{', '}']) {
@@ -249,6 +329,10 @@ fn server_value(value: &Value) -> Option<String> {
 }
 
 fn checked_server(value: &str) -> Result<(String, String)> {
+    ensure!(
+        value.len() <= MAX_SERVER_BYTES,
+        "OpenAPI 服务地址超过长度限制"
+    );
     let url = url::Url::parse(value).map_err(|_| anyhow::anyhow!("请提供完整的服务地址"))?;
     ensure!(
         url.host_str().is_some()
@@ -258,14 +342,11 @@ fn checked_server(value: &str) -> Result<(String, String)> {
             && url.fragment().is_none(),
         "服务地址不能包含凭据、查询参数或片段"
     );
-    let origin = url.origin().ascii_serialization();
-    let definition = Definition {
-        url: Some(origin.clone()),
-        enabled: true,
-        ..Default::default()
-    };
-    super::endpoint(&definition)?;
-    Ok((origin, url.path().trim_end_matches('/').to_owned()))
+    crate::outbound::check_url(&url)?;
+    Ok((
+        url.origin().ascii_serialization(),
+        url.path().trim_end_matches('/').to_owned(),
+    ))
 }
 
 fn servers(document: &Value, swagger: bool) -> Vec<String> {
@@ -313,7 +394,12 @@ fn servers(document: &Value, swagger: bool) -> Vec<String> {
         .collect()
 }
 
-fn credentials(operation: &Value, document: &Value, swagger: bool) -> Result<Vec<CredentialInput>> {
+fn credentials(
+    operation: &Value,
+    document: &Value,
+    swagger: bool,
+    budget: &mut Expansion,
+) -> Result<Vec<CredentialInput>> {
     let Some(requirements) = operation
         .get("security")
         .or_else(|| document.get("security"))
@@ -344,7 +430,7 @@ fn credentials(operation: &Value, document: &Value, swagger: bool) -> Result<Vec
                 supported = false;
                 break;
             };
-            let scheme = resolve(scheme, document)?;
+            let scheme = resolve(scheme, document, budget)?;
             let (header, kind, hint) = match scheme["type"].as_str() {
                 Some("apiKey") if scheme["in"] == "header" => (
                     scheme["name"]
@@ -393,21 +479,29 @@ fn credentials(operation: &Value, document: &Value, swagger: bool) -> Result<Vec
     bail!("鉴权方案尚不支持自动映射；仅支持请求头 API Key、Basic、Bearer 或手工 OAuth Token")
 }
 
-fn parameter_schema(parameter: &Value, document: &Value, swagger: bool) -> Result<Value> {
+fn parameter_schema(
+    parameter: &Value,
+    document: &Value,
+    swagger: bool,
+    budget: &mut Expansion,
+) -> Result<Value> {
     if !swagger {
         return normalized_schema(
             parameter
                 .get("schema")
                 .context("参数缺少 schema；content 参数尚不支持")?,
             document,
+            budget,
         );
     }
     if parameter["in"] == "body" {
         return normalized_schema(
             parameter.get("schema").context("body 参数缺少 schema")?,
             document,
+            budget,
         );
     }
+    budget.retain(parameter)?;
     let mut value = parameter.as_object().context("参数需要对象")?.clone();
     for key in [
         "name",
@@ -418,7 +512,7 @@ fn parameter_schema(parameter: &Value, document: &Value, swagger: bool) -> Resul
     ] {
         value.remove(key);
     }
-    normalized_schema(&Value::Object(value), document)
+    normalized_schema(&Value::Object(value), document, budget)
 }
 
 fn simple_type(value: &Value) -> Option<&str> {
@@ -445,7 +539,8 @@ fn json_body(
     operation: &Value,
     document: &Value,
     swagger: bool,
-    parameters: &[Value],
+    parameters: &[&Value],
+    budget: &mut Expansion,
 ) -> Result<Option<(Value, bool, String)>> {
     if swagger {
         ensure!(
@@ -471,7 +566,7 @@ fn json_body(
             .unwrap_or(Some("application/json"))
             .context("请求类型尚不支持；需要 JSON body")?;
         return Ok(Some((
-            parameter_schema(parameter, document, true)?,
+            parameter_schema(parameter, document, true, budget)?,
             parameter["required"] == true,
             mime.into(),
         )));
@@ -479,7 +574,7 @@ fn json_body(
     let Some(body) = operation.get("requestBody") else {
         return Ok(None);
     };
-    let body = resolve(body, document)?;
+    let body = resolve(body, document, budget)?;
     let content = body["content"]
         .as_object()
         .context("requestBody 缺少 content")?;
@@ -491,12 +586,22 @@ fn json_body(
                 .find(|(mime, _)| super::json_content_type(mime))
         })
         .context("请求类型尚不支持；需要 application/json 或 application/*+json")?;
-    let schema = normalized_schema(entry.get("schema").unwrap_or(&Value::Bool(true)), document)?;
+    let schema = normalized_schema(
+        entry.get("schema").unwrap_or(&Value::Bool(true)),
+        document,
+        budget,
+    )?;
     Ok(Some((schema, body["required"] == true, mime.clone())))
 }
 
-fn response(operation: &Value, document: &Value, swagger: bool) -> Result<ResponseMapping> {
+fn response(
+    operation: &Value,
+    document: &Value,
+    swagger: bool,
+    budget: &mut Expansion,
+) -> Result<ResponseMapping> {
     if let Some(extension) = operation.get("x-mcplink-response") {
+        budget.retain(extension)?;
         return serde_json::from_value(extension.clone())
             .map_err(|_| anyhow::anyhow!("x-mcplink-response 格式无效"));
     }
@@ -519,7 +624,7 @@ fn response(operation: &Value, document: &Value, swagger: bool) -> Result<Respon
             if !status.starts_with('2') {
                 continue;
             }
-            let value = resolve(value, document)?;
+            let value = resolve(value, document, budget)?;
             if let Some(content) = value.get("content").and_then(Value::as_object) {
                 types.extend(content.keys().cloned());
             }
@@ -557,6 +662,7 @@ fn build_tool(
     method: &str,
     path: &str,
     name: &str,
+    budget: &mut Expansion,
 ) -> Result<(HttpTool, Vec<CredentialInput>)> {
     let ImportContext {
         document,
@@ -582,10 +688,11 @@ fn build_tool(
     for source in [path_item, operation] {
         if let Some(parameters) = source.get("parameters") {
             for parameter in parameters.as_array().context("parameters 需要数组")? {
-                let value = resolve(parameter, document)?;
+                let value = resolve(parameter, document, budget)?;
                 let location = value["in"].as_str().context("参数缺少位置")?;
                 let name = value["name"].as_str().context("参数缺少名称")?;
-                merged.insert((location.to_owned(), name.to_owned()), value.clone());
+                budget.spend(1, location.len() + name.len())?;
+                merged.insert((location, name), value);
             }
         }
     }
@@ -611,7 +718,7 @@ fn build_tool(
             parameter.get("allowReserved") != Some(&Value::Bool(true)),
             "allowReserved 参数尚不支持"
         );
-        let schema = parameter_schema(parameter, document, swagger)?;
+        let schema = parameter_schema(parameter, document, swagger, budget)?;
         let kind = simple_type(&schema).context("参数类型无法映射为标量或标量数组")?;
         ensure!(
             matches!(kind, "string" | "number" | "integer" | "boolean" | "array"),
@@ -690,7 +797,7 @@ fn build_tool(
             required.push(json!("query"));
         }
     }
-    let body = json_body(operation, document, swagger, &parameters)?;
+    let body = json_body(operation, document, swagger, &parameters, budget)?;
     let (body_template, request_content_type) = if let Some((schema, mandatory, mime)) = body {
         ensure!(
             !matches!(method, "GET" | "HEAD"),
@@ -722,10 +829,10 @@ fn build_tool(
         query_encoding,
         body: body_template,
         request_content_type,
-        response: response(operation, document, swagger)?,
+        response: response(operation, document, swagger, budget)?,
         annotations: None,
     };
-    let auth = credentials(operation, document, swagger)?;
+    let auth = credentials(operation, document, swagger, budget)?;
     Ok((tool, auth))
 }
 
@@ -734,8 +841,7 @@ pub fn preview(request: ImportRequest) -> Result<Value> {
         !request.source.trim().is_empty() && request.source.len() <= MAX_DOCUMENT_BYTES,
         "导入文档为空或超过 4 MiB"
     );
-    let document: Value = serde_yaml::from_str(&request.source)
-        .map_err(|_| anyhow::anyhow!("文档不是有效的 JSON/YAML；错误内容未回显"))?;
+    let document = document::parse(&request.source)?;
     ensure!(document.is_object(), "OpenAPI/Swagger 文档需要对象");
     let swagger = document.get("swagger").and_then(Value::as_str) == Some("2.0");
     let version = document
@@ -750,15 +856,20 @@ pub fn preview(request: ImportRequest) -> Result<Value> {
         "不支持此 OpenAPI/Swagger 版本"
     );
     let available = servers(&document, swagger);
-    let selected_server = request
-        .server_url
-        .clone()
-        .or_else(|| available.first().cloned());
+    let selected_server = request.server_url.clone().or_else(|| {
+        available
+            .first()
+            .filter(|raw| {
+                url::Url::parse(raw)
+                    .is_ok_and(|url| !crate::outbound::needs_explicit_selection(&url))
+            })
+            .cloned()
+    });
     let mut issues = Vec::new();
     let (origin, prefix) = match selected_server.as_deref() {
         Some(value) => checked_server(value)?,
         None => {
-            issues.push(json!({"code":"server_required","message":"请选择或填写完整的服务地址"}));
+            issues.push(json!({"code":"server_required","message":"请选择或填写完整的服务地址；本机和内网候选需要明确选择"}));
             (String::new(), String::new())
         }
     };
@@ -771,10 +882,13 @@ pub fn preview(request: ImportRequest) -> Result<Value> {
     let mut operations = Vec::new();
     let mut tools = Vec::new();
     let mut inputs = BTreeSet::new();
+    let mut budget = Expansion::default();
     for (path, original_path) in paths {
-        let path_item = match resolve(original_path, &document) {
+        ensure!(path.len() <= 2048, "OpenAPI 路径超过长度限制");
+        let path_item = match resolve(original_path, &document, &mut budget) {
             Ok(value) => value,
             Err(_) => {
+                ensure!(!budget.exhausted, EXPANSION_ERROR);
                 issues.push(json!({"code":"path_reference_unsupported","message":"路径引用无效、循环或不是本地引用"}));
                 continue;
             }
@@ -795,7 +909,7 @@ pub fn preview(request: ImportRequest) -> Result<Value> {
             let operation_id = operation
                 .get("operationId")
                 .and_then(Value::as_str)
-                .map(str::to_owned);
+                .map(|name| name.chars().take(256).collect::<String>());
             let name = request
                 .tool_names
                 .get(&key)
@@ -820,6 +934,7 @@ pub fn preview(request: ImportRequest) -> Result<Value> {
                     &method,
                     path,
                     &name,
+                    &mut budget,
                 )?;
                 let candidate = Definition {
                     url: Some(if origin.is_empty() {
@@ -838,6 +953,7 @@ pub fn preview(request: ImportRequest) -> Result<Value> {
                 super::validate(&candidate)?;
                 Ok::<_, anyhow::Error>((tool, auth))
             })();
+            ensure!(!budget.exhausted, EXPANSION_ERROR);
             let selected = selection.contains(&key) || (request.all && built.is_ok());
             let summary = operation
                 .get("summary")

@@ -1,6 +1,7 @@
 //! Aggregate views reference managed connections; they never own upstream credentials.
 use crate::{
     Engine,
+    catalog::{CatalogKind, CollectedCatalog},
     engine::required,
     model::{Connection, Definition, GatewayMember, digest},
 };
@@ -74,21 +75,25 @@ impl CatalogCache {
     }
 }
 
-fn member_signature(engine: &Engine, entry: &Connection) -> Result<String> {
-    let connections = engine.store.connections()?;
-    let mut signature = Vec::new();
+fn member_signature(engine: &Engine, entry: &Connection, kind: CatalogKind) -> Result<String> {
+    let index = kind.generation_index();
+    let mut signature = vec![json!(engine.pool.catalog_generation(&entry.id)[index])];
     for member in entry.members.as_ref().context("不是聚合入口")? {
-        let connection = connections
-            .iter()
-            .find(|c| c.id == member.connection_id)
-            .context("入口成员已变化，请刷新清单")?;
-        signature.push(json!([
-            connection.id,
-            connection.revision,
-            connection.active
-        ]));
+        signature.push(member_stamp(engine, member, index));
     }
     Ok(digest(&serde_json::to_vec(&signature)?))
+}
+
+fn member_stamp(engine: &Engine, member: &GatewayMember, index: usize) -> Value {
+    match engine.store.connection(&member.connection_id) {
+        Ok(connection) => json!([
+            connection.id,
+            connection.revision,
+            connection.active,
+            engine.pool.catalog_generation(&connection.id)[index]
+        ]),
+        Err(_) => json!([member.connection_id, "unavailable"]),
+    }
 }
 
 fn catalog_page(snapshot: &CatalogSnapshot, field: &str, offset: usize) -> Result<Value> {
@@ -111,11 +116,7 @@ pub fn description() -> Value {
 
 /// Cheap scoped fingerprints: no upstream discovery, Vault access or business calls.
 pub fn catalog_version(engine: &Engine, id: &str) -> Result<Value> {
-    let connections = engine.store.connections()?;
-    let entry = connections
-        .iter()
-        .find(|c| c.id == id)
-        .context("入口不存在")?;
+    let entry = engine.store.connection(id)?;
     let mut fingerprints = Vec::new();
     for (index, family) in ["tools", "resources", "prompts"].iter().enumerate() {
         let mut rows = vec![json!([
@@ -127,18 +128,11 @@ pub fn catalog_version(engine: &Engine, id: &str) -> Result<Value> {
             engine.pool.catalog_generation(id)[index]
         ])];
         if let Some(members) = &entry.members {
-            for member in members {
-                if let Some(c) = connections.iter().find(|c| c.id == member.connection_id) {
-                    rows.push(json!([
-                        c.id,
-                        c.revision,
-                        c.active,
-                        engine.pool.catalog_generation(&c.id)[index]
-                    ]));
-                } else {
-                    rows.push(json!([member.connection_id, "missing"]));
-                }
-            }
+            rows.extend(
+                members
+                    .iter()
+                    .map(|member| member_stamp(engine, member, index)),
+            );
         }
         fingerprints.push((
             family.to_string(),
@@ -268,11 +262,18 @@ pub fn save(engine: &Engine, p: &Value) -> Result<Value> {
         !title.is_empty() && title.chars().count() <= 120 && !title.chars().any(char::is_control),
         "入口名称应为 1 至 120 个字符"
     );
-    if let Some(old) = &previous
-        && old.members.as_ref() == Some(&members)
-        && old.title == title
+    if let Some(mut entry) = previous.clone()
+        && entry.members.as_ref() == Some(&members)
     {
-        return Ok(old.public_value());
+        if entry.title != title {
+            entry.title = title.into();
+            entry.edit_revision = entry
+                .edit_revision
+                .checked_add(1)
+                .context("入口编辑版本超出范围")?;
+            engine.store.save_connection(&entry)?;
+        }
+        return Ok(entry.public_value());
     }
     let mut entry = previous.clone().unwrap_or_else(|| Connection {
         id: uuid::Uuid::new_v4().to_string(),
@@ -284,6 +285,7 @@ pub fn save(engine: &Engine, p: &Value) -> Result<Value> {
         auth_kind: "gateway".into(),
         definition_ref: String::new(),
         revision: 0,
+        edit_revision: 0,
         active: true,
         status: "ready".into(),
         checked_at: None,
@@ -424,6 +426,54 @@ fn public_rows(rows: &[Value], routes: &HashMap<String, ToolRoute>) -> Vec<Value
         .collect()
 }
 
+async fn collect_member(
+    engine: &Arc<Engine>,
+    member: &GatewayMember,
+    kind: CatalogKind,
+) -> Result<CollectedCatalog> {
+    let id = &member.connection_id;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let connection = engine.store.connection(id)?;
+        let supported = if kind == CatalogKind::Tools {
+            member
+                .include_tools
+                .as_ref()
+                .is_none_or(|tools| !tools.is_empty())
+        } else {
+            let def = engine.definition(&connection)?;
+            if def.http_api.is_some()
+                || (kind == CatalogKind::Prompts && def.prompts_disabled)
+                || (kind != CatalogKind::Prompts && def.resources_disabled)
+            {
+                false
+            } else {
+                let (peer, _) = engine
+                    .pool
+                    .peer(engine.clone(), id, connection.revision)
+                    .await?;
+                peer.peer_info().is_some_and(|info| {
+                    if kind == CatalogKind::Prompts {
+                        info.capabilities.prompts.is_some()
+                    } else {
+                        info.capabilities.resources.is_some()
+                    }
+                })
+            }
+        };
+        if !supported {
+            return Ok(CollectedCatalog {
+                revision: connection.revision,
+                items: Vec::new(),
+                diagnostics: Vec::new(),
+            });
+        }
+        crate::catalog::collect(engine.clone(), &engine.pool, id, kind).await
+    })
+    .await
+    .map_err(|_| crate::mcp::ConnectionFailure::Timeout.into())
+    .and_then(|result| result)
+}
+
 pub(crate) async fn collect_entry(
     engine: Arc<Engine>,
     entry: &Connection,
@@ -431,7 +481,7 @@ pub(crate) async fn collect_entry(
 ) -> Result<EntryCatalog> {
     current(&engine, entry)?;
     let (field, key) = (kind.field(), kind.key());
-    let signature = member_signature(&engine, entry)?;
+    let signature = member_signature(&engine, entry, kind)?;
     let mut jobs = tokio::task::JoinSet::new();
     for (index, member) in entry
         .members
@@ -443,14 +493,8 @@ pub(crate) async fn collect_entry(
     {
         let engine = engine.clone();
         jobs.spawn(async move {
-            let result = tokio::time::timeout(
-                Duration::from_secs(10),
-                crate::catalog::collect(engine.clone(), &engine.pool, &member.connection_id, kind),
-            )
-            .await;
-            let result = result
-                .map_err(|_| anyhow::Error::new(crate::mcp::ConnectionFailure::Timeout))
-                .and_then(|result| result)
+            let result = collect_member(&engine, &member, kind)
+                .await
                 .map_err(|error| {
                     crate::catalog::discovery_diagnostic(&engine, &member.connection_id, &error)
                 });
@@ -514,7 +558,7 @@ pub(crate) async fn collect_entry(
         "聚合清单过大，请减少入口服务选择"
     );
     ensure!(
-        member_signature(&engine, entry)? == signature,
+        member_signature(&engine, entry, kind)? == signature,
         "入口成员已变化，请重新发现清单"
     );
     Ok(EntryCatalog {
@@ -534,8 +578,8 @@ async fn list(
 ) -> Result<Value> {
     let kind = crate::catalog::CatalogKind::from_method(method).context("不支持的清单")?;
     let field = kind.field();
-    let signature = member_signature(&engine, entry)?;
     if let Some(cursor) = params.get("cursor").filter(|v| !v.is_null()) {
+        let signature = member_signature(&engine, entry, kind)?;
         let encoded = cursor
             .as_str()
             .filter(|c| c.len() < 1024)
@@ -585,6 +629,78 @@ async fn list(
 enum RevisionPin {
     Exact(u64),
     Invalid,
+}
+
+async fn named_item(
+    engine: &Arc<Engine>,
+    entry: &Connection,
+    kind: CatalogKind,
+    target: &str,
+    expected_route: Option<&ToolRoute>,
+) -> Result<Option<(Value, ToolRoute)>> {
+    current(engine, entry)?;
+    let mut found = None;
+    for member in entry.members.as_ref().context("不是聚合入口")? {
+        if !target.starts_with(&format!("{}__", member.namespace))
+            || expected_route.is_some_and(|route| {
+                route.connection_id != member.connection_id || route.namespace != member.namespace
+            })
+        {
+            continue;
+        }
+        let catalog = collect_member(engine, member, kind).await?;
+        for mut item in catalog.items {
+            let name = item["name"].as_str().context("上游能力名称无效")?;
+            if alias(&member.namespace, name) != target
+                || (kind == CatalogKind::Tools && !member.tool_allowed(name))
+            {
+                continue;
+            }
+            ensure!(found.is_none(), "聚合清单名称冲突，请调整入口服务选择");
+            let route = ToolRoute {
+                connection_id: member.connection_id.clone(),
+                revision: catalog.revision,
+                namespace: member.namespace.clone(),
+                original_name: name.to_owned(),
+            };
+            item["name"] = json!(target);
+            found = Some((item, route));
+        }
+    }
+    current(engine, entry)?;
+    Ok(found)
+}
+
+pub(crate) async fn find_tool(
+    engine: &Arc<Engine>,
+    entry: &Connection,
+    name: &str,
+) -> Result<Option<(Value, ToolRoute)>> {
+    named_item(engine, entry, CatalogKind::Tools, name, None).await
+}
+
+fn resource_route(engine: &Engine, entry: &Connection, target: &str) -> Result<ToolRoute> {
+    let mut candidates = entry
+        .members
+        .as_ref()
+        .context("不是聚合入口")?
+        .iter()
+        .filter_map(|member| {
+            target
+                .strip_prefix(&format!("mcplink://{}/", member.namespace))
+                .filter(|uri| !uri.is_empty())
+                .map(|uri| (member, uri))
+        });
+    let (member, uri) = candidates
+        .next()
+        .context("此资源不在入口服务选择中，请刷新清单")?;
+    ensure!(candidates.next().is_none(), "聚合资源路由冲突");
+    Ok(ToolRoute {
+        connection_id: member.connection_id.clone(),
+        revision: engine.store.connection(&member.connection_id)?.revision,
+        namespace: member.namespace.clone(),
+        original_name: uri.into(),
+    })
 }
 
 #[derive(Default)]
@@ -650,89 +766,50 @@ fn dispatch(
         ) {
             return list(engine, entry, method, &params).await;
         }
-        let (key, list_method) = match method {
-            "tools/call" => ("name", "tools/list"),
-            "prompts/get" => ("name", "prompts/list"),
-            "resources/read" => ("uri", "resources/list"),
+        let (key, route) = match method {
+            "resources/read" => (
+                "uri",
+                resource_route(&engine, entry, required(&params, "uri")?)?,
+            ),
+            "tools/call" | "prompts/get" => {
+                let kind = if method == "tools/call" {
+                    CatalogKind::Tools
+                } else {
+                    CatalogKind::Prompts
+                };
+                let (item, route) = named_item(
+                    &engine,
+                    entry,
+                    kind,
+                    required(&params, "name")?,
+                    expected.route.as_ref(),
+                )
+                .await?
+                .context("此工具或提示不在入口清单中")?;
+                if let Some(hash) = &expected.schema_hash {
+                    ensure!(
+                        crate::invocation::schema_hash(&item)? == *hash,
+                        "工具 Schema 已变化，请重新核对"
+                    );
+                }
+                ("name", route)
+            }
             _ => bail!("聚合入口未实现此 MCP 能力"),
         };
-        let target = required(&params, key)?;
-        let member = entry
-            .members
-            .as_ref()
-            .context("不是聚合入口")?
-            .iter()
-            .find(|m| {
-                if key == "uri" {
-                    target.starts_with(&format!("mcplink://{}/", m.namespace))
-                } else {
-                    target.starts_with(&format!("{}__", m.namespace))
-                }
-            })
-            .context("此能力不在入口服务选择中，请刷新清单")?;
-        if let Some(route) = &expected.route {
+        if let Some(pin) = &expected.revision {
             ensure!(
-                route.connection_id == member.connection_id && route.namespace == member.namespace,
-                "入口服务选择已变化，请重新发现清单"
+                matches!(pin, RevisionPin::Exact(value) if *value == route.revision),
+                "发现期间服务已更新，请重新调用"
             );
         }
-        let (upstream_revision, original) = if key == "uri" {
-            (
-                engine.store.connection(&member.connection_id)?.revision,
-                target
-                    .strip_prefix(&format!("mcplink://{}/", member.namespace))
-                    .context("资源 URI 无效")?
-                    .to_owned(),
-            )
-        } else {
-            let catalog = crate::catalog::collect(
-                engine.clone(),
-                &engine.pool,
-                &member.connection_id,
-                crate::catalog::CatalogKind::from_method(list_method).context("不支持的清单")?,
-            )
-            .await?;
-            let revision = catalog.revision;
-            let item = catalog
-                .items
-                .into_iter()
-                .find(|item| {
-                    item["name"].as_str().is_some_and(|name| {
-                        alias(&member.namespace, name) == target
-                            && (method != "tools/call" || member.tool_allowed(name))
-                    })
-                })
-                .context("此工具或提示不在入口清单中")?;
-            if let Some(expected_revision) = &expected.revision {
-                ensure!(
-                    matches!(expected_revision, RevisionPin::Exact(value) if *value == revision),
-                    "发现期间服务已更新，请重新调用"
-                );
-            }
-            if let Some(expected_hash) = &expected.schema_hash {
-                let mut mapped = item.clone();
-                mapped["name"] = json!(target);
-                ensure!(
-                    crate::invocation::schema_hash(&mapped)? == *expected_hash,
-                    "工具 Schema 已变化，请重新核对"
-                );
-            }
-            (
-                revision,
-                item["name"]
-                    .as_str()
-                    .context("上游能力名称无效")?
-                    .to_owned(),
-            )
-        };
-        if let Some(route) = &expected.route {
+        if let Some(prior) = &expected.route {
             ensure!(
-                route.original_name == original,
+                prior.original_name == route.original_name,
                 "工具路由已变化，请重新发现清单"
             );
         }
-        let mut forwarded = request.clone();
-        forwarded["params"][key] = json!(original);
+        let mut forwarded = request;
+        forwarded["params"][key] = json!(route.original_name);
         if let Some(meta) = forwarded
             .pointer_mut("/params/_meta")
             .and_then(Value::as_object_mut)
@@ -742,12 +819,12 @@ fn dispatch(
         current(&engine, entry)?;
         let mut result = Box::pin(engine.pool.request_at_revision(
             engine.clone(),
-            &member.connection_id,
+            &route.connection_id,
             forwarded,
-            Some(upstream_revision),
+            Some(route.revision),
         ))
         .await?;
-        rewrite_result(&mut result, &member.namespace);
+        rewrite_result(&mut result, &route.namespace);
         Ok(result)
     })
 }

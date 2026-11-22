@@ -5,6 +5,7 @@ import http.server
 import json
 from pathlib import Path
 import secrets
+import sqlite3
 import subprocess
 import threading
 import time
@@ -21,7 +22,11 @@ def main():
     parser.add_argument("--profile")
     parser.add_argument("--chrome", required=True)
     parser.add_argument("--browser-driver", default="agent-browser")
-    parser.add_argument("--import-only", action="store_true", help="Run focused OpenAPI editor acceptance")
+    parser.add_argument("--frontend-dir", type=Path, default=ROOT / "dist")
+    focused = parser.add_mutually_exclusive_group()
+    focused.add_argument("--import-only", action="store_true", help="Run focused OpenAPI editor acceptance")
+    focused.add_argument("--forms-only", action="store_true", help="Run focused recovery and OpenAPI form acceptance")
+    parser.add_argument("--strict-editor-effects", action="store_true", help="Expect development React to restart the editor effect")
     args = parser.parse_args()
     record = args.record.resolve()
     record.mkdir(parents=True)
@@ -34,6 +39,14 @@ def main():
     result = {"conclusion":"FAIL"}
     checks = []
     current_action = []
+    stale_editor = {}
+    stale_held = threading.Event()
+    stale_release = threading.Event()
+    delay_inspection = threading.Event()
+    inspection_held = threading.Event()
+    inspection_release = threading.Event()
+    oauth_release = threading.Event()
+    form_requests = []
 
     class Handler(http.server.SimpleHTTPRequestHandler):
         def do_POST(self):
@@ -43,23 +56,45 @@ def main():
                     or self.headers.get("X-Fixture") != secret):
                 return self.send_error(403)
             request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            if request.get("method") == "gateway.save" and request.get("params", {}).get("title") == "异步关闭入口":
+            method = request["method"]
+            params = request.get("params", {})
+            if method == "gateway.save" and params.get("title") == "异步关闭入口":
                 time.sleep(1.5)
-            if request.get("method") not in {"httpApi.import","snapshot","connections.detail","connections.save","connections.export_config","changes.preview","changes.apply","sources.add","connections.source_detail","connections.import","connections.detach","connections.probe","changes.preview_restore","changes.restore","credentials.disconnect","changes.history","gateway.save","connections.tools","tools.describe","tools.call","cli.generate","cli.inspect","cli.check","gateway.refresh"}:
+            if method in {"gateway.save", "oauth.configure", "oauth.start", "browser.open"}:
+                form_requests.append((method, params.get("id"), params.get("settings", {}).get("callbackPort")))
+            if method == "oauth.configure" and not oauth_release.wait(30):
+                return self.send_error(504)
+            if method not in {"httpApi.import","snapshot","connections.detail","connections.save","connections.export_config","changes.preview","changes.apply","sources.add","connections.source_detail","connections.import","connections.detach","connections.probe","changes.preview_restore","changes.restore","credentials.disconnect","changes.history","gateway.save","connections.tools","tools.describe","tools.call","cli.generate","cli.inspect","cli.check","gateway.refresh","oauth.configure"}:
                 return self.send_error(403)
-            if request["method"] == "sources.add" and request.get("params") != {"agent":"codex","path":str(extra)}:
+            if method == "sources.add" and params != {"agent":"codex","path":str(extra)}:
                 return self.send_error(403)
+            stale = False
+            if method == "connections.detail" and params.get("id") == stale_editor.get("next"):
+                stale = stale_editor.pop("next", None) is not None
             proc = subprocess.run([str(BINARY),"rpc","--stdin"], input=json.dumps(request),
                                   text=True, capture_output=True, timeout=30, env=harness.environment)
+            response = proc.stdout
+            if stale:
+                stale_held.set()
+                if not stale_release.wait(30):
+                    return self.send_error(504)
+                delayed = json.loads(response)
+                delayed["ok"]["connection"]["title"] = "过期定义"
+                response = json.dumps(delayed)
+            if method == "connections.tools" and delay_inspection.is_set():
+                delay_inspection.clear()
+                inspection_held.set()
+                if not inspection_release.wait(30):
+                    return self.send_error(504)
             self.send_response(200)
             self.send_header("Content-Type","application/json")
             self.end_headers()
-            self.wfile.write(proc.stdout.encode())
+            self.wfile.write(response.encode())
 
         def log_message(self, *args):
             pass
 
-    server = http.server.ThreadingHTTPServer(("127.0.0.1",0), functools.partial(Handler,directory=str(ROOT/"dist")))
+    server = http.server.ThreadingHTTPServer(("127.0.0.1",0), functools.partial(Handler,directory=str(args.frontend_dir.resolve())))
     origin = f"http://127.0.0.1:{server.server_port}"
     threading.Thread(target=server.serve_forever, daemon=True).start()
     shim = record / "fixture.js"
@@ -77,6 +112,10 @@ if (location.origin === ORIGIN) {
           method:"POST", headers:{"Content-Type":"application/json","X-Fixture":KEY},body:JSON.stringify(args)
         })).json();
         if (args.method === "connections.tools") window.__fixtureToolDiscoveryCompleted = (window.__fixtureToolDiscoveryCompleted || 0) + 1;
+        if (args.method === "connections.detail") {
+          const completed = (window.__fixtureDetailsCompleted ??= {});
+          completed[args.params.id] = (completed[args.params.id] || 0) + 1;
+        }
         return result;
       }
       if (cmd.startsWith("plugin:event|")) return ++sequence;
@@ -104,6 +143,17 @@ if (location.origin === ORIGIN) {
 
     def wait_for(expression):
         browser("wait","--fn",expression)
+
+    def click_button(name):
+        browser("find", "role", "button", "click", "--name", name, "--exact")
+
+    def click_card_action(title, label):
+        action = ("[...document.querySelectorAll('article')].find(card => "
+                  "card.querySelector('h2')?.textContent.trim() === TITLE)?.querySelectorAll('.card-actions button')")
+        button = ("[...(" + action + " || [])].find(button => button.innerText.trim() === LABEL)")
+        button = button.replace("TITLE", json.dumps(title)).replace("LABEL", json.dumps(label))
+        wait_for(f"!!({button})")
+        browser("eval", f"({button}).click()")
 
     def modal_backdrop_acceptance():
         opener = 'document.querySelector(".header-actions .button.primary")'
@@ -157,8 +207,7 @@ if (location.origin === ORIGIN) {
         wait_for("document.querySelector(" + json.dumps(selector) + ")?.value === ''")
 
     def import_acceptance():
-        def button(name):
-            browser("find", "role", "button", "click", "--name", name, "--exact")
+        button = click_button
 
         long_path = "/items/" + "long-route-segment-" * 12 + "/{id}"
         document = {"openapi": "3.1.0", "info": {"title": "OpenAPI 界面验收"}, "servers": [{"url": api.endpoint + "/v1"}],
@@ -168,11 +217,37 @@ if (location.origin === ORIGIN) {
                               "/upload": {"post": {"requestBody": {"content": {"multipart/form-data": {"schema": {"type": "object"}}}}, "responses": {"200": {}}}}}}
         source = record / "openapi-ui.json"
         source.write_text(json.dumps(document), encoding="utf-8")
+
+        def choose_server():
+            selector = 'input[aria-label="导入服务地址"]'
+            value = json.loads(browser("eval", "document.querySelector(" + json.dumps(selector) + ").value"))
+            if not value:
+                browser("fill", selector, document["servers"][0]["url"])
+                browser("press", "Tab")
+                button("更新地址并预览")
+                wait_for("document.querySelector('dialog .openapi-file input')?.disabled === false && !document.querySelector('.openapi-content > .field-help:nth-of-type(2)')?.innerText.includes('需要明确选择')")
+
+        def choose_operation():
+            selector = f'input[aria-label="选择 GET {long_path}"]'
+            browser("scrollintoview", selector)
+            wait_for("""(() => {
+                const input = document.querySelector(SELECTOR);
+                if (!input || input.disabled) return false;
+                const rect = input.getBoundingClientRect();
+                return input.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2));
+            })()""".replace("SELECTOR", json.dumps(selector)))
+            browser("click", selector)
+            wait_for("document.querySelector(" + json.dumps(selector) + ")?.checked === true")
+
         button("添加 MCP")
         browser("select", "dialog[open] select", "http-api")
         browser("click", "dialog .openapi-import summary")
         browser("upload", "dialog input[type=file]", str(source))
         wait_for("document.querySelectorAll('.openapi-operation').length === 2")
+        assert json.loads(browser("eval", "document.querySelector('input[aria-label=\"导入服务地址\"]').value")) == ""
+        assert not api.requests
+        choose_server()
+        checks.append("a loopback OpenAPI candidate remains unselected until the user explicitly chooses it")
         assert json.loads(browser("eval", "document.querySelectorAll('.openapi-operation input:checked').length")) == 0
         assert json.loads(browser("eval", "document.querySelector('.openapi-operation.unsupported input').disabled"))
         button_disabled = "[...document.querySelectorAll('.openapi-import button')].find(b=>b.textContent.includes('生成')).disabled"
@@ -181,7 +256,8 @@ if (location.origin === ORIGIN) {
             browser("set", "viewport", str(width), "760")
             wait_for("innerWidth === " + str(width))
             assert json.loads(browser("eval", "document.documentElement.scrollWidth <= innerWidth && [...document.querySelectorAll('dialog,.modal-body,.openapi-operations')].every(e=>e.scrollWidth<=e.clientWidth+1)"))
-        browser("check", f'input[aria-label="选择 GET {long_path}"]')
+        browser("set", "viewport", "940", "760")
+        choose_operation()
         browser("fill", f'input[aria-label="GET {long_path} 工具名"]', "read_renamed")
         audit("openapi-selected")
         browser("screenshot", str(record / "openapi-selected.png"))
@@ -190,27 +266,175 @@ if (location.origin === ORIGIN) {
         editor = json.loads(browser("eval", "JSON.parse(document.querySelector('textarea[aria-label=\"HTTP API 工具与请求映射\"]').value)"))
         assert len(editor["tools"]) == 1 and editor["tools"][0]["name"] == "read_renamed"
         assert json.loads(browser("eval", "document.querySelector('.import-credentials input').value")) == ""
-        assert not api.requests
+        browser("fill", ".import-credentials input", "synthetic-discarded-draft")
+        replacement = record / "openapi-ui-replacement.json"
+        replacement.write_text(json.dumps(document), encoding="utf-8")
+
+        def select_from_file(path, name):
+            browser("click", "dialog .openapi-import summary")
+            browser("upload", "dialog input[type=file]", str(path))
+            wait_for("document.querySelectorAll('.openapi-operation').length === 2 && !document.querySelector('.openapi-operation input:checked')")
+            choose_server()
+            choose_operation()
+            browser("fill", f'input[aria-label="GET {long_path} 工具名"]', name)
+            button("生成 1 项工具配置")
+            wait_for("!document.querySelector('.openapi-import').open")
+
+        select_from_file(replacement, "read_final")
+        assert json.loads(browser("eval", "document.querySelector('.import-credentials input').value")) == ""
         button("保存连接")
         wait_for("!document.querySelector('dialog[open]')")
         connection = next(c for c in harness.rpc("snapshot")["connections"] if c["title"] == "OpenAPI 界面验收")
-        detail = harness.rpc("connections.detail", {"id": connection["id"]})
-        assert detail["definition"]["includeTools"] == ["read_renamed"] and detail["definition"]["headers"] == {}
-        button("OpenAPI 界面验收 详情")
-        button("编辑")
-        wait_for("!!document.querySelector('dialog .openapi-import summary') && !document.querySelector('dialog fieldset').disabled")
-        browser("click", "dialog .openapi-import summary")
+        params = {"id": connection["id"]}
+        definition = harness.rpc("connections.detail", params)["definition"]
+        assert definition["includeTools"] == ["read_final"] and definition["headers"] == {}
+        assert [t["name"] for t in harness.rpc("connections.tools", params)["tools"]] == ["read_final"]
+        checks.append("successive OpenAPI imports expose only the latest selection and clear discarded draft credentials")
+
+        def edit():
+            button("OpenAPI 界面验收 详情")
+            button("编辑")
+            wait_for("!!document.querySelector('dialog .openapi-import summary') && !document.querySelector('dialog fieldset').disabled")
+
+        definition["excludeTools"] = ["excluded_tool"]
+        harness.rpc("connections.save", {
+            **params, "name": connection["name"], "title": connection["title"], "definition": definition,
+        })
+        edit()
+        select_from_file(replacement, "read_updated")
+        wait_for("document.querySelector('dialog fieldset[aria-label=\"导入后的工具范围\"]')?.innerText.includes('0 项可用') && document.querySelector('dialog footer .primary').disabled")
+        browser("find", "label", "保留现有范围（本次导入中 0 项可用）", "click")
+        button("保存连接")
+        wait_for("!document.querySelector('dialog[open]')")
+        assert harness.rpc("connections.detail", params)["definition"]["includeTools"] == ["read_final"]
+        assert harness.rpc("connections.tools", params)["tools"] == []
+
+        edit()
+        select_from_file(replacement, "read_updated")
+        wait_for("document.querySelector('dialog footer .primary').disabled")
+        browser("find", "label", "使用本次选中的操作", "click")
+        button("保存连接")
+        wait_for("!document.querySelector('dialog[open]')")
+        definition = harness.rpc("connections.detail", params)["definition"]
+        assert definition["includeTools"] == ["read_updated"] and definition["excludeTools"] == ["excluded_tool"]
+        assert [t["name"] for t in harness.rpc("connections.tools", params)["tools"]] == ["read_updated"]
+        checks.append("a restricted existing connection requires a scope decision; either choice is persisted with its exclusions")
+
+        edit()
         document["servers"] = [{"url": "https://another.example/v2"}]
         source.write_text(json.dumps(document), encoding="utf-8")
-        browser("upload", "dialog input[type=file]", str(source))
-        wait_for("document.querySelectorAll('.openapi-operation').length === 2")
-        browser("check", f'input[aria-label="选择 GET {long_path}"]')
-        button("生成 1 项工具配置")
+        select_from_file(source, "read_updated")
         wait_for("!!document.querySelector('dialog .warning-banner')")
         assert not api.requests
         browser("screenshot", str(record / "openapi-origin-warning.png"))
         browser("press", "Escape")
+        wait_for("!document.querySelector('dialog[open]')")
         checks.append("OpenAPI file preview defaults to no selection, marks unsupported operations, wraps long routes at 620px, generates selected tools with empty protected credential inputs, preserves origin-change warnings and makes no API requests")
+
+        button("添加 MCP")
+        browser("find", "label", "显示名称", "fill", "内网目标验收")
+        browser("find", "label", "接入名称", "fill", "private_origin_fixture")
+        origin = "https://private.fixture.invalid:8443"
+        browser("find", "label", "MCP 地址", "fill", origin + "/mcp")
+        browser("find", "label", "允许此 HTTPS 来源访问内网", "click")
+        button("保存连接")
+        wait_for("!document.querySelector('dialog[open]')")
+        managed = next(c for c in harness.rpc("snapshot")["connections"] if c["name"] == "private_origin_fixture")
+        assert harness.rpc("connections.detail", {"id":managed["id"]})["definition"]["privateNetworkOrigin"] == origin
+        checks.append("the connection editor persists explicit approval for the displayed HTTPS origin")
+
+    def recovery_forms_acceptance():
+        browser("set", "viewport", "940", "760")
+        form_requests.clear()
+        managed = harness.rpc("connections.save", {
+            "name": "recovery_editor", "title": "恢复表单验收",
+            "definition": {"url": harness.url},
+        })["id"]
+        harness.rpc("oauth.configure", {"id": managed, "settings": {"callbackPort": 43120}})
+        entry = harness.rpc("gateway.save", {
+            "title": "缺失服务入口", "connectionIds": [managed],
+            "toolSelections": {managed: ["read_document"]},
+        })
+        with sqlite3.connect(harness.data / "mcplink.sqlite3") as db:
+            raw, = db.execute("SELECT document FROM connections WHERE id=?", (entry["id"],)).fetchone()
+            saved = json.loads(raw)
+            saved["members"].append({"connectionId": "missing-fixture-member", "namespace": "missing"})
+            db.execute("UPDATE connections SET document=? WHERE id=?", (json.dumps(saved), entry["id"]))
+
+        click_button("刷新本机配置")
+        browser("wait", "--text", "恢复表单验收")
+        stale_editor["next"] = managed
+
+        def open_editor():
+            click_button("恢复表单验收 详情")
+            click_button("编辑")
+
+        open_editor()
+        assert stale_held.wait(10), "The first definition response was not held"
+        if not args.strict_editor_effects:
+            wait_for("document.querySelector('dialog fieldset.editor-fields')?.disabled === true")
+            browser("press", "Escape")
+            wait_for("!document.querySelector('dialog[open]')")
+            open_editor()
+        title_input = "document.querySelector('dialog fieldset.editor-fields input')"
+        current_definition = f"{title_input}?.value === '恢复表单验收' && !{title_input}.matches(':disabled')"
+        wait_for(current_definition)
+        stale_release.set()
+        wait_for("window.__fixtureDetailsCompleted?.[" + json.dumps(managed) + "] >= 2")
+        assert json.loads(browser("eval", current_definition))
+        browser("press", "Escape")
+        wait_for("!document.querySelector('dialog[open]')")
+        checks.append("the later definition stays visible after an older response completes")
+
+        click_button("统一入口")
+        click_card_action("缺失服务入口", "服务与工具范围")
+        missing = "dialog .warning-banner input[type=checkbox]"
+        wait_for("document.querySelector('dialog .warning-banner')?.innerText.includes('missing-fixture-member') && document.querySelector(" + json.dumps(missing) + ")?.checked && document.querySelector('dialog footer .primary')?.disabled")
+        browser("click", missing)
+        click_button("保存入口")
+        wait_for("!!document.querySelector('dialog .detail-status')")
+        repaired = next(row for row in harness.rpc("gateway.list") if row["id"] == entry["id"])
+        assert repaired["members"] == entry["members"]
+        assert form_requests == [("gateway.save", entry["id"], None)]
+        browser("press", "Escape")
+        wait_for("!document.querySelector('dialog[open]')")
+        checks.append("a missing member is visible, blocks save until removed, and a single repair preserves the surviving scope")
+
+        click_button("账号")
+        click_card_action("恢复表单验收", "设置认证")
+        browser("click", "dialog .oauth-option summary")
+        port_input = 'dialog .oauth-option input[inputmode="numeric"]'
+        wait_for("document.querySelector(" + json.dumps(port_input) + ")?.value === '43120'")
+        for invalid in ["3.5", "1e3", "0", "65536", "-1"]:
+            browser("fill", port_input, invalid)
+            click_button("保存 OAuth 设置")
+            wait_for("document.querySelector('dialog [role=alert]')?.innerText.includes('1–65535')")
+        click_button("在浏览器授权")
+        wait_for("document.querySelector('dialog [role=alert]')?.innerText.includes('1–65535')")
+        assert form_requests == [("gateway.save", entry["id"], None)]
+        assert harness.rpc("connections.detail", {"id": managed})["definition"]["oauthCallbackPort"] == 43120
+        checks.append("invalid callback ports make zero OAuth requests and preserve the saved port")
+
+        browser("fill", port_input, "43210")
+        browser("eval", "(()=>{const b=[...document.querySelectorAll('dialog .oauth-option button')].find(b=>b.innerText==='保存 OAuth 设置');b.click();b.click()})()")
+        wait_for("document.querySelector('dialog header button')?.disabled && document.querySelector('dialog footer button')?.disabled")
+        browser("press", "Escape")
+        point = json.loads(browser("eval", """(() => {
+            const r = document.querySelector('dialog[open]').getBoundingClientRect();
+            return [Math.round(r.right + 12), Math.round(r.top + 18)];
+        })()"""))
+        assert point[0] < 940
+        browser("mouse", "move", *map(str, point))
+        browser("mouse", "down", "left")
+        browser("mouse", "up", "left")
+        assert json.loads(browser("eval", "document.querySelector('dialog[open] header button')?.disabled"))
+        oauth_release.set()
+        wait_for("!document.querySelector('dialog[open]')")
+        assert harness.rpc("connections.detail", {"id": managed})["definition"]["oauthCallbackPort"] == 43210
+        assert form_requests == [("gateway.save", entry["id"], None), ("oauth.configure", managed, 43210)]
+        browser("click", "nav button:first-child")
+        wait_for("!document.querySelector('dialog[open]')")
+        checks.append("a pending OAuth settings save ignores Esc and the backdrop, submits once, and persists the typed port")
 
     try:
         harness.rpc("connections.save", {"name":"public_http","title":"免认证服务","definition":{"url":url}})
@@ -219,6 +443,11 @@ if (location.origin === ORIGIN) {
         browser("set","viewport","940","620")
         browser("wait","--text","免认证服务")
         if args.import_only:
+            import_acceptance()
+            result["conclusion"] = "PASS"
+            return
+        if args.forms_only:
+            recovery_forms_acceptance()
             import_acceptance()
             result["conclusion"] = "PASS"
             return
@@ -639,6 +868,9 @@ if (location.origin === ORIGIN) {
         for name, title in [("gateway_alpha", "聚合服务甲"), ("gateway_beta", "聚合服务乙")]:
             harness.rpc("connections.save", {"name":name,"title":title,"accountLabel":"隔离账号甲" if name == "gateway_alpha" else "隔离账号乙","definition":{"url":harness.url,"headers":{"Authorization":"synthetic-fixture-authorization"}}})
         button("刷新本机配置")
+        wait_for("""["聚合服务甲", "聚合服务乙"].every(title =>
+            [...document.querySelectorAll('.account-card .account-heading h2')]
+                .some(heading => heading.textContent.trim() === title))""")
         button("统一入口")
         browser("click", ".header-actions button.primary")
         browser("find", "label", "入口名称", "fill", "桌面聚合入口")
@@ -926,8 +1158,24 @@ if (location.origin === ORIGIN) {
         assert failed_detail["status"] != "ready" and "HTTP 401" in failed_detail["lastError"]
         assert len(api.requests) == 3
         checks.append("a failed real probe remains failed, cannot replay from its confirmation, and local inspection still shows tools plus the last upstream failure")
+
+        delay_inspection.set()
+        button("查看工具")
+        assert inspection_held.wait(10), "The local tool inspection response was not held"
+        browser("press", "Escape")
+        wait_for("!document.querySelector('dialog[open], .toast')")
+        inspection_release.set()
+        wait_for("document.querySelector('.toast')?.innerText.includes('上次上游调用未通过')")
+        assert json.loads(browser("eval", "!document.querySelector('dialog[open]')"))
+        assert len(api.requests) == 3
+        checks.append("a delayed local tool inspection keeps a dismissed service dialog closed and sends no upstream request")
+        browser("click", "nav button:first-child")
+        recovery_forms_acceptance()
         result["conclusion"]="PASS"
     finally:
+        stale_release.set()
+        inspection_release.set()
+        oauth_release.set()
         try:
             if result["conclusion"] != "PASS":
                 # Public logs contain only allowlisted, synthetic state; raw diagnostics stay private.

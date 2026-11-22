@@ -5,6 +5,7 @@ import sys
 import threading
 
 control = Path(sys.argv[1])
+size = int(sys.argv[2]) if len(sys.argv) > 2 else 1
 lock = threading.Lock()
 stopping = threading.Event()
 initialized = threading.Event()
@@ -46,9 +47,9 @@ for line in sys.stdin:
     if method == "initialize":
         result = {"protocolVersion": "2025-11-25", "serverInfo": {"name": "catalog-fixture", "version": "1.0.0"}, "capabilities": {k: {"listChanged": True} for k in ["tools", "resources", "prompts"]}}
     elif method == "tools/list":
-        result = {"tools": [{"name": f"read_{current['tools']}", "inputSchema": {"type": "object", "properties": {}}}]}
+        result = {"tools": [{"name": f"read_{current['tools']}" + (f"_{index}" if size > 1 else ""), "inputSchema": {"type": "object", "properties": {}}} for index in range(size)]}
     elif method == "resources/list":
-        result = {"resources": [{"uri": f"fixture://item/{current['resources']}", "name": "Fixture"}]}
+        result = {"resources": [{"uri": f"fixture://item/{current['resources']}" + (f"/{index}" if size > 1 else ""), "name": "Fixture"} for index in range(size)]}
     elif method == "resources/templates/list":
         result = {"resourceTemplates": []}
     elif method == "prompts/list":

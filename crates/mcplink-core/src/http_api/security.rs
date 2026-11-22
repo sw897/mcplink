@@ -1,20 +1,54 @@
 //! Credential filtering is independent of any service's response semantics.
 use aho_corasick::{AhoCorasick, MatchKind};
 use anyhow::{Result, ensure};
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
+};
 use reqwest::header::HeaderMap;
 use serde_json::Value;
 use std::collections::BTreeSet;
 
 pub(super) struct CredentialFilter {
     matcher: Option<AhoCorasick>,
-    patterns: usize,
+}
+
+fn credential_header(name: &str) -> bool {
+    matches!(
+        name,
+        "authorization" | "proxy-authorization" | "cookie" | "api-key"
+    ) || [
+        "-token",
+        "-secret",
+        "-key",
+        "-password",
+        "-auth",
+        "-credential",
+    ]
+    .iter()
+    .any(|suffix| name.ends_with(suffix))
+}
+
+fn percent_encode(value: &str) -> String {
+    use std::fmt::Write;
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+            encoded.push(char::from(byte));
+        } else {
+            let _ = write!(&mut encoded, "%{byte:02X}");
+        }
+    }
+    encoded
 }
 
 impl CredentialFilter {
     pub(super) fn from_headers(headers: &HeaderMap, additional: &[String]) -> Result<Self> {
         let mut values = BTreeSet::new();
         for (key, value) in headers {
+            let explicitly_sensitive = additional
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case(key.as_str()));
             // These carry protocol/content metadata by default. A service may
             // explicitly mark even these headers sensitive using configuration.
             if matches!(
@@ -27,36 +61,43 @@ impl CredentialFilter {
                     | "user-agent"
                     | "host"
                     | "connection"
-            ) && !additional
-                .iter()
-                .any(|s| s.eq_ignore_ascii_case(key.as_str()))
+            ) && !explicitly_sensitive
             {
                 continue;
             }
             let raw = value
                 .to_str()
                 .map_err(|_| anyhow::anyhow!("无法建立请求头凭据过滤器"))?;
-            if raw.is_empty() {
+            if raw.is_empty()
+                || (raw.len() < 4 && !explicitly_sensitive && !credential_header(key.as_str()))
+            {
                 continue;
             }
             values.insert(raw.to_owned());
-            if (key == "authorization" || key == "proxy-authorization")
-                && let Some((scheme, token)) = raw.split_once(' ')
-            {
+            if let Some((scheme, token)) = raw.split_once(' ') {
                 let token = token.trim();
-                if !token.is_empty() {
+                let authorization = matches!(key.as_str(), "authorization" | "proxy-authorization");
+                if !token.is_empty() && (authorization || scheme.eq_ignore_ascii_case("bearer")) {
                     values.insert(token.to_owned());
                 }
-                if scheme.eq_ignore_ascii_case("basic")
-                    && let Ok(decoded) = STANDARD.decode(token)
+                if authorization
+                    && scheme.eq_ignore_ascii_case("basic")
+                    && let Ok(decoded) = STANDARD
+                        .decode(token)
+                        .or_else(|_| STANDARD_NO_PAD.decode(token))
                     && let Ok(decoded) = String::from_utf8(decoded)
                 {
-                    if let Some((_, password)) = decoded.split_once(':')
-                        && !password.is_empty()
-                    {
-                        values.insert(password.to_owned());
+                    if let Some((user, password)) = decoded.split_once(':') {
+                        values.extend(
+                            [user, password]
+                                .into_iter()
+                                .filter(|value| !value.is_empty())
+                                .map(str::to_owned),
+                        );
                     }
-                    values.insert(decoded);
+                    if !decoded.is_empty() {
+                        values.insert(decoded);
+                    }
                 }
             }
             if key == "cookie" {
@@ -75,44 +116,38 @@ impl CredentialFilter {
         );
         let originals: Vec<_> = values.iter().cloned().collect();
         for value in originals {
-            let encoded: String = url::form_urlencoded::byte_serialize(value.as_bytes()).collect();
-            values.insert(encoded.replace('+', "%20"));
-            let mut lower = encoded.as_bytes().to_vec();
-            for index in 0..lower.len().saturating_sub(2) {
-                if lower[index] == b'%' {
-                    lower[index + 1].make_ascii_lowercase();
-                    lower[index + 2].make_ascii_lowercase();
-                }
-            }
-            let lower = String::from_utf8(lower).expect("percent encoding is ASCII");
-            values.insert(lower.replace('+', "%20"));
-            values.insert(lower);
-            values.insert(encoded);
+            values.insert(percent_encode(&value));
+            values.insert(url::form_urlencoded::byte_serialize(value.as_bytes()).collect());
         }
         let variants: Vec<_> = values.iter().cloned().collect();
         for value in variants {
             let escaped = serde_json::to_string(&value)?;
             values.insert(escaped[1..escaped.len() - 1].to_owned());
         }
-        let patterns = values.len();
-        let matcher = if patterns == 0 {
+        let matcher = if values.is_empty() {
             None
         } else {
             Some(
                 AhoCorasick::builder()
                     .match_kind(MatchKind::LeftmostLongest)
+                    .ascii_case_insensitive(true)
                     .build(&values)
                     .map_err(|_| anyhow::anyhow!("无法建立凭据过滤器"))?,
             )
         };
-        Ok(Self { matcher, patterns })
+        Ok(Self { matcher })
     }
 
     pub(super) fn redact_text(&self, value: &str) -> String {
-        match &self.matcher {
-            Some(matcher) => matcher.replace_all(value, &vec!["[redacted]"; self.patterns]),
-            None => value.to_owned(),
-        }
+        let Some(matcher) = &self.matcher else {
+            return value.to_owned();
+        };
+        let mut result = String::with_capacity(value.len());
+        matcher.replace_all_with(value, &mut result, |_, _, output| {
+            output.push_str("[redacted]");
+            true
+        });
+        result
     }
 
     pub(super) fn redact_value(&self, value: &mut Value) {

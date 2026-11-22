@@ -50,35 +50,38 @@ fn executable(path: &Path) -> bool {
 }
 
 pub fn valid_launcher(agent: &Agent, path: &Path) -> bool {
-    if matches!(agent, Agent::Workbuddy | Agent::Qwenwork)
-        && cfg!(target_os = "macos")
-        && path.is_absolute()
-        && path.file_name().is_some_and(|name| {
-            if *agent == Agent::Qwenwork {
-                name == "QwenWorkCN.app" || name == "QwenWork.app" || name == "千问办公.app"
-            } else {
-                name == "WorkBuddy.app"
-            }
-        })
-    {
-        return mac_app_installed(path);
-    }
-    if *agent == Agent::Removed || !path.is_absolute() || !executable(path) {
+    if *agent == Agent::Removed || !path.is_absolute() {
         return false;
     }
-    let (_, windows_exe, _, cli) = names(agent);
+    let (_, windows_exe, mac_app, cli) = names(agent);
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return false;
     };
-    if cli.is_empty() {
-        return cfg!(windows) && name.eq_ignore_ascii_case(windows_exe);
+    if cfg!(target_os = "macos")
+        && !mac_app.is_empty()
+        && (name == mac_app || app_aliases(agent).contains(&name))
+    {
+        return mac_app_installed(path);
+    }
+    if !executable(path) {
+        return false;
     }
     if cfg!(windows) {
-        ["exe", "cmd", "bat"]
-            .iter()
-            .any(|ext| name.eq_ignore_ascii_case(&format!("{cli}.{ext}")))
+        name.eq_ignore_ascii_case(windows_exe)
+            || (!cli.is_empty()
+                && ["exe", "cmd", "bat"]
+                    .iter()
+                    .any(|ext| name.eq_ignore_ascii_case(&format!("{cli}.{ext}"))))
     } else {
         name == cli
+    }
+}
+
+fn app_aliases(agent: &Agent) -> &'static [&'static str] {
+    match agent {
+        Agent::Qwenwork => &["QwenWork.app", "千问办公.app"],
+        Agent::Doubaowork => &["豆包工作.app"],
+        _ => &[],
     }
 }
 
@@ -91,11 +94,9 @@ fn installed(agent: &Agent, store: &crate::store::Store) -> Result<bool> {
         return Ok(true);
     }
     let home = config::user_home()?;
-    let isolated = std::env::var_os("MCPLINK_HOME").is_some();
-    let local = if std::env::var_os("MCPLINK_HOME").is_none() {
-        std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join("AppData/Local"))
+    let isolated = config::absolute_env("MCPLINK_HOME").is_some();
+    let local = if !isolated {
+        config::absolute_env("LOCALAPPDATA").unwrap_or_else(|| home.join("AppData/Local"))
     } else {
         home.join("AppData/Local")
     };
@@ -115,12 +116,7 @@ fn installed(agent: &Agent, store: &crate::store::Store) -> Result<bool> {
     // Keep documented QwenWork names and renamed Chinese bundles. Ordinary
     // Doubao is a separate product and must not satisfy Doubao Work detection.
     if cfg!(target_os = "macos") {
-        let aliases: &[&str] = match agent {
-            Agent::Qwenwork => &["QwenWork.app", "千问办公.app"],
-            Agent::Doubaowork => &["豆包工作.app"],
-            _ => &[],
-        };
-        for alias in aliases {
+        for alias in app_aliases(agent) {
             installed |= (!isolated && mac_app_installed(&Path::new("/Applications").join(alias)))
                 || mac_app_installed(&home.join("Applications").join(alias));
         }
@@ -142,8 +138,7 @@ fn installed(agent: &Agent, store: &crate::store::Store) -> Result<bool> {
     }
     #[cfg(unix)]
     {
-        let nvm = std::env::var_os("NVM_DIR")
-            .map(PathBuf::from)
+        let nvm = config::absolute_env("NVM_DIR")
             .filter(|p| !isolated || p.starts_with(&home))
             .unwrap_or_else(|| home.join(".nvm"));
         if let Ok(versions) = std::fs::read_dir(nvm.join("versions/node")) {
@@ -154,15 +149,14 @@ fn installed(agent: &Agent, store: &crate::store::Store) -> Result<bool> {
         let roaming = if isolated {
             home.join("AppData/Roaming")
         } else {
-            std::env::var_os("APPDATA")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home.join("AppData/Roaming"))
+            config::absolute_env("APPDATA").unwrap_or_else(|| home.join("AppData/Roaming"))
         };
         launchers.push(roaming.join("npm"));
     }
     if let Some(paths) = std::env::var_os("PATH") {
         launchers.extend(
-            std::env::split_paths(&paths).filter(|path| !isolated || path.starts_with(&home)),
+            std::env::split_paths(&paths)
+                .filter(|path| path.is_absolute() && (!isolated || path.starts_with(&home))),
         );
     }
     installed |= !cli.is_empty()

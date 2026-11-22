@@ -3,6 +3,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import hashlib
+from http.client import RemoteDisconnected
 import http.client
 import json
 import os
@@ -362,8 +363,13 @@ class Harness:
             urllib.request.urlopen(callback+"?code=invalid&state="+query["state"][0],timeout=10)
             raise AssertionError("Callback after disconnect accepted")
         except urllib.error.HTTPError as err:
-            assert err.code==400
-        self.passed("OAuth invalid state and callback after disconnect rejected")
+            assert err.code in (400, 503)
+        except urllib.error.URLError as err:
+            assert isinstance(err.reason, (ConnectionRefusedError, ConnectionResetError))
+        except (RemoteDisconnected, ConnectionResetError):
+            pass
+        assert self.rpc("connections.detail", {"id":oauth})["connection"]["status"] == "disconnected"
+        self.passed("invalid OAuth state is rejected and disconnect cancels the local callback")
 
         # Stop our synthetic daemon, inject process exit after file replacement, then reconcile.
         runtime=json.loads((self.data/"runtime.json").read_text())

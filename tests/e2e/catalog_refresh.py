@@ -51,7 +51,8 @@ class CatalogRefresh(ToolCalls):
         single.call("tools/list")
         assert not single.notifications
         changed = self.cli("gateway", "save", "--stdin", value={"id": entry["id"], "editVersion": entry["editVersion"], "connectionIds": [upstream], "toolSelections": {upstream: []}})
-        aggregate.wait_notification("notifications/tools/list_changed")
+        for family in ["tools", "resources", "prompts"]:
+            aggregate.wait_notification(f"notifications/{family}/list_changed")
         assert aggregate.call("tools/list")["result"]["tools"] == []
         self.passed("manual refresh and policy edits notify the selected entry without rewriting native configuration")
 
@@ -60,7 +61,14 @@ class CatalogRefresh(ToolCalls):
         assert json.loads(control.with_suffix(".counts.json").read_text()) == counts
         assert counts["calls"] == 0
         self.cli("gateway", "stop")
-        time.sleep(2.5)
+        import queue
+        for client in [aggregate, single, other]:
+            assert not client.notifications
+            try:
+                line = client.responses.get(timeout=2.3)
+            except queue.Empty:
+                continue
+            raise AssertionError(f"Catalog watcher sent a message while the daemon was stopped: {line}")
         assert not (self.data / "runtime.json").exists(), "Idle catalog watchers restarted a stopped daemon"
         assert "result" in single.call("tools/list")
         aggregate.wait_notification("notifications/tools/list_changed")

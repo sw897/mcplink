@@ -55,7 +55,8 @@ class OpenCodeSources(ToolCalls):
 
         process = {"type": "local", "command": [sys.executable, str(FIXTURE), "--stdio"],
                    "environment": {"FIXTURE_PATH": "{env:MCPLINK_DATA_DIR}"},
-                   "disabled": False, "codemode": False}
+                   "disabled": False, "codemode": False,
+                   "timeout": {"startup": 15000, "catalog": 22000, "execution": 22000}}
         text = ('// synthetic leading comment\n{\n  "$schema": "https://opencode.ai/config.json",\n'
                 '  "unknown_setting": {"keep":42}, // preserve this setting\n'
                 '  "mcp": {"servers": {\n    "native_fixture": ' + json.dumps(process)
@@ -65,8 +66,22 @@ class OpenCodeSources(ToolCalls):
         definition = self.cli("connections", "show", imported)["definition"]
         assert definition["command"] == sys.executable and definition["args"] == ["••••••••[1]", "••••••••[2]"]
         assert definition["env"]["FIXTURE_PATH"] == "$" + "{env:MCPLINK_DATA_DIR}"
+        assert definition["startupTimeout"] == 15 and definition["timeout"] == 22
         assert self.cli("connections", "probe", imported)["connection"]["status"] == "ready"
+        for _ in range(2):
+            plan = self.cli("changes", "preview", "--connection", imported, "--target", source["id"])
+            assert plan["changes"][0]["after"]["timeout"] == 22
+            assert self.cli("changes", "apply", plan["planId"])["results"][0]["status"] == "applied"
+            assert self.cli("connections", "import", "--source", source["id"], "--name", "native_fixture")["id"] == imported
+        text = config.read_text()
+        assert '"startup": 15000' in text and '"execution": 22000' in text
         self.passed("current JSONC imports command arrays and environment references through the real MCP SDK")
+
+        for timeouts in [{"startup": 10500}, {"catalog": 2000, "execution": 3000}, {"catalog": 2000}]:
+            config.write_text(json.dumps({"mcp": {"servers": {"different_timeouts": process | {"timeout": timeouts}}}}))
+            self.cli("connections", "import", "--source", source["id"], "--name", "different_timeouts", exit_status=1)
+        config.write_text(text)
+        self.passed("equal whole-second OpenCode timeout phases round-trip; non-equivalent native phases remain in their source")
 
         connection = self.save("shared_notes")
         plan = self.cli("changes", "preview", "--connection", connection, "--target", source["id"])
@@ -93,6 +108,8 @@ class OpenCodeSources(ToolCalls):
                           '"username":"{env:UNCHANGED_FIXTURE}",\n"update":"disable",\n}\n')
         project_source = self.cli("sources", "add", "--agent", "opencode", "--scope", "project", "--project", str(project))
         assert "layout" not in project_source and Path(project_source["path"]) == target
+        plan = self.cli("changes", "preview", "--connection", imported, "--target", project_source["id"])
+        self.cli("changes", "apply", plan["planId"])
         self.passed("explicit project sources use the current format without a layout parameter")
 
         self.cli("connections", "probe", connection)
@@ -261,8 +278,9 @@ class OpenCodeSources(ToolCalls):
                     result = subprocess.run([executable, "--server", f"http://127.0.0.1:{port}", "mcp", "list"],
                                             cwd=native_project, env=environment, capture_output=True, text=True, timeout=30)
                     output = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", result.stdout)
-                    if result.returncode == 0 and any("shared_notes" in line and re.search(r"\bconnected\b", line, re.I)
-                                                      for line in output.splitlines()):
+                    if result.returncode == 0 and all(any(name in line and re.search(r"\bconnected\b", line, re.I)
+                                                          for line in output.splitlines())
+                                                      for name in ["shared_notes", "native_fixture"]):
                         break
                     assert time.monotonic() < deadline, result.stdout + result.stderr
                     time.sleep(.25)

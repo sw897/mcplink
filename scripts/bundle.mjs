@@ -8,6 +8,18 @@ const require = createRequire(import.meta.url);
 const env = { ...process.env };
 const args = process.argv.slice(2);
 const localSigning = args.includes("--local-signing");
+const fixtures = args.includes("--test-fixtures");
+if (args.some((arg) => arg !== "--test-fixtures" && arg.includes("test-fixtures")))
+  throw new Error("Use --test-fixtures to build a separate acceptance package");
+if (fixtures && (localSigning || env.MCPLINK_WINDOWS_SIGNING === "1"))
+  throw new Error("Acceptance packages cannot use release signing");
+if (fixtures) {
+  env.CARGO_TARGET_DIR = resolve("target/fixture-bundle");
+  for (const key of ["APPLE_SIGNING_IDENTITY", "APPLE_CERTIFICATE", "APPLE_CERTIFICATE_PASSWORD",
+    "APPLE_ID", "APPLE_PASSWORD", "APPLE_TEAM_ID", "APPLE_API_KEY", "APPLE_API_ISSUER", "APPLE_API_KEY_PATH"])
+    delete env[key];
+}
+const target = resolve(env.CARGO_TARGET_DIR || "target");
 if (localSigning && process.platform !== "darwin") {
   throw new Error("--local-signing is only available on macOS");
 }
@@ -53,8 +65,8 @@ if (process.platform === "win32") {
 }
 
 // Cargo caches may retain installers from earlier versions. Publish only this build.
-rmSync("target/release/bundle", { recursive: true, force: true });
-execFileSync(process.execPath, ["scripts/prepare-sidecar.mjs"], {
+rmSync(resolve(target, "release/bundle"), { recursive: true, force: true });
+execFileSync(process.execPath, ["scripts/prepare-sidecar.mjs", ...(fixtures ? ["--test-fixtures"] : [])], {
   stdio: "inherit",
   env,
 });
@@ -64,7 +76,7 @@ if (process.platform === "darwin") {
   )?.[1];
   if (!host) throw new Error("Unable to determine signing target");
   for (const file of [
-    "target/release/mcplink",
+    resolve(target, "release/mcplink"),
     `src-tauri/binaries/mcplink-${host}`,
   ]) {
     execFileSync(
@@ -92,7 +104,7 @@ if (process.platform === "win32" && env.MCPLINK_WINDOWS_SIGNING === "1") {
   )?.[1];
   if (!host) throw new Error("Unable to determine signing target");
   for (const file of [
-    "target/release/mcplink.exe",
+    resolve(target, "release/mcplink.exe"),
     `src-tauri/binaries/mcplink-${host}.exe`,
   ]) {
     execFileSync(
@@ -115,14 +127,15 @@ execFileSync(
   [
     require.resolve("@tauri-apps/cli/tauri.js"),
     "build",
-    ...args.filter((arg) => arg !== "--local-signing"),
+    ...(fixtures ? ["--features", "test-fixtures"] : []),
+    ...args.filter((arg) => arg !== "--local-signing" && arg !== "--test-fixtures"),
   ],
   { stdio: "inherit", env },
 );
 if (process.platform === "darwin") {
   for (const file of [
-    "target/release/mcplink",
-    "target/release/bundle/macos/mcplink.app/Contents/MacOS/mcplink",
+    resolve(target, "release/mcplink"),
+    resolve(target, "release/bundle/macos/mcplink.app/Contents/MacOS/mcplink"),
   ]) {
     execFileSync(
       "/usr/bin/codesign",

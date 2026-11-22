@@ -4,7 +4,7 @@ Register an ordinary HTTP API as a managed service. mcplink exposes its configur
 
 ## Register and call
 
-This source build uses management API 23. OpenAPI import, response conditions and protected credential relocation require matching desktop/CLI/backend builds; early 0.3.2 release packages with management API 22 do not implement them. Check the current `mcplink schema`; the CLI also rejects these configuration operations when the running backend is too old.
+This source build uses management API 24. Use matching builds of the desktop, CLI, backend and Bridge. When an older backend is running, stop it with its matching CLI or desktop before starting this build. Check the available commands with `mcplink schema`.
 
 From a source checkout:
 
@@ -100,9 +100,9 @@ mcplink http-api import --file service.yaml --operation 'GET /items/{id}'
 mcplink http-api import --stdin
 ```
 
-For stdin, provide `{ "source": "JSON or YAML text", "operations": ["GET /items/{id}"], "toolNames": {"GET /items/{id}": "get_item"} }`. Optional `serverUrl` overrides the server choice. The default selects nothing; `--all` / `all:true` explicitly selects every supported operation. Review unsupported operations even when using all. The response includes `operations`, `issues`, `credentialInputs` and a `definition` only for a valid nonempty selection. To save, place the reviewed definition inside a normal `connections save` envelope; a preview is not itself a save payload.
+For stdin, provide `{ "source": "JSON or YAML text", "operations": ["GET /items/{id}"], "toolNames": {"GET /items/{id}": "get_item"} }`. Select loopback addresses, private IP literals and local hostnames explicitly with `serverUrl` or `--server` for file input. The default selects no operations. Use `--all` / `all:true` to select every supported operation. The response includes `operations`, `issues`, `credentialInputs` and a `definition` for a valid nonempty selection. Save the reviewed definition with `connections save`.
 
-Supported documents are Swagger 2.0 and OpenAPI 3.0/3.1/3.2, bounded to 4 MiB, 1024 inspected operations and 128 selected tools. Conversion resolves bounded local references, preserves server base paths, maps scalar path/query parameters and JSON request bodies, and separates arguments into `path`, `query` and `body`. Query array serialization is preserved for supported encodings. Examples and Schema defaults are omitted instead of becoming executable request values. Header API keys, Basic, Bearer and manual OAuth tokens produce local credential-input hints; import does not perform OAuth.
+Supported documents are Swagger 2.0 and OpenAPI 3.0/3.1/3.2, bounded to 4 MiB, 1024 inspected operations and 128 selected tools. Use one JSON or YAML document with unique keys and expand YAML anchors, aliases, merge keys and explicit tags before import. The importer limits nesting and gives the entire document one budget for expanding local references. Conversion preserves server base paths, maps scalar path/query parameters and JSON request bodies, and separates arguments into `path`, `query` and `body`. Supported query array encodings are preserved. Header API keys, Basic, Bearer and manual OAuth tokens produce local credential-input hints.
 
 External/recursive references, header/cookie parameters, object query encoding, multipart/binary uploads and unsupported media types remain visibly unsupported. Missing server addresses, conflicting authentication or tool-name collisions prevent draft generation. Import never fetches external references or invokes an API. Optional operation extension `x-mcplink-response` uses the same generic response mapping below; it contains no provider-specific execution code.
 
@@ -116,11 +116,11 @@ For JSON APIs, a service can explicitly declare a scalar success condition:
 
 The condition is evaluated against the original JSON with exact value/type matching. A missing or mismatched field returns MCP `isError:true` and a nonzero tool CLI result, retaining the filtered response envelope for the Skill to interpret. Connection error metadata records a static failure reason, not the business response. Without a configured condition, mcplink does not infer a provider's business codes. Pagination, result interpretation, and operation sequencing belong in a Skill or service configuration.
 
-Before returning JSON/text through either MCP or CLI, the HTTP Adapter filters values resolved from managed/custom request headers, including token-only, Basic password, cookie value, URL-encoded and JSON-escaped echoes. Common public protocol headers such as Content-Type and User-Agent are exempt unless listed in `httpApi.sensitiveHeaders`. Both text and structured JSON output are filtered. `response.sensitivePaths` masks exact JSON Pointers in the original response before subtree selection, on success and business failure.
+Before returning JSON or text through MCP or CLI, the HTTP Adapter filters managed credential values, including Basic usernames and passwords, Bearer tokens in custom headers, cookie values, URI and form encodings, and JSON escapes. Matching ignores ASCII case. Common protocol headers and short values in ordinary headers remain visible. Use `httpApi.sensitiveHeaders` to protect an additional header regardless of value length. `response.sensitivePaths` masks exact JSON Pointers before subtree selection on success and business failure.
 
 These filters protect known request credentials and explicitly designated fields. They do not classify all private business data, detect arbitrary encodings, inspect image pixels or filter unrelated STDIO/HTTP MCP servers. A Skill still controls whether business content or delegated download URLs may be shown. Credentials belong in managed headers, not tool schemas, templates, URL queries or descriptions.
 
-An existing connection can relocate protected fields through `connections save` with its current `id`, `definition.editVersion` and `credentialMappings`: an array of `{ "from":{"field":"env","name":"OLD_KEY"}, "to":{"field":"headers","name":"X-Api-Key"} }`. Values stay in backend memory and protected storage. This requires the same connection, cannot move values to public fields, rejects duplicate destinations and stale revisions, and cannot transfer old credentials while changing an HTTP origin. Keep the ID when replacing a STDIO wrapper with an HTTP API definition so aggregate namespaces remain stable.
+An existing HTTP connection can rename a protected header at the same origin using `connections save` with its current `id`, `definition.editVersion` and `credentialMappings`. Both field names in the mapping use `field: "headers"`. To convert a STDIO connection to an HTTP API and reuse a stored environment variable, edit the connection in the desktop, fill in the destination header and confirm the displayed origin and field names in the native dialog. The connection ID and aggregate namespaces are preserved. Reconnect the account after saving. Credential values stay in protected storage and backend memory during the migration.
 
 ## Authentication and verification
 
@@ -138,7 +138,7 @@ Management callers can inspect `connections.tools`'s `verification.probe` (`null
 
 ## Limits and validation
 
-- HTTPS is required, except for loopback HTTP. Requests stay on the configured origin, do not follow redirects, and are not automatically retried.
+- HTTPS is required for network services. Use an explicit loopback URL for a local HTTP service. To use a private HTTPS origin, confirm it in the editor or put its canonical origin in `definition.privateNetworkOrigin`, for example `https://api.corp.example:8443`. Approval applies to that scheme, host and port. The connector checks actual DNS addresses, blocks reserved and link-local addresses and the daemon's own management port, and connects directly without system proxies. Adapter requests stay on the saved origin and are sent once.
 - Each definition contains 1–128 tools and at most 512 KiB of configuration. Responses are bounded to 8 MiB. The existing per-connection timeout applies to headers and the entire response body.
 - HTTP errors return an MCP tool error with the status code. Error response bodies and transport URLs are not echoed. JSON business failures use the service's optional explicit success condition.
 - A timeout or interrupted call can leave execution uncertain. Cancelling a downstream request does not promise upstream rollback.

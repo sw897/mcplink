@@ -23,6 +23,8 @@ async fn main() -> anyhow::Result<()> {
             let params = value.get("params").cloned().unwrap_or(json!({}));
             let result = if method == "process.identity" {
                 mcplink_core::vault::verify_running_code().map(|_| json!({"valid":true}))
+            } else if method == "fixture.confirm-transfer" {
+                confirm_fixture_transfer(&session, params).await
             } else if value["runningOnly"] == true {
                 session.call_running(method, params).await
             } else {
@@ -43,4 +45,31 @@ async fn main() -> anyhow::Result<()> {
         result?;
     }
     Ok(())
+}
+
+async fn confirm_fixture_transfer(session: &Session, params: Value) -> anyhow::Result<Value> {
+    #[cfg(feature = "test-fixtures")]
+    {
+        anyhow::ensure!(
+            std::env::var("MCPLINK_VAULT").as_deref() == Ok("fixture")
+                && std::env::var_os("MCPLINK_HOME").is_some_and(|home| PathBuf::from(home)
+                    .join(".mcplink-test-fixture")
+                    .is_file()),
+            "A marked fixture Vault is required"
+        );
+        let preview = session
+            .call("connections.transfer_preview", params.clone())
+            .await?;
+        let origin = preview["origin"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Origin required"))?;
+        return session
+            .save_confirmed_transfer(params, origin.to_owned())
+            .await;
+    }
+    #[cfg(not(feature = "test-fixtures"))]
+    {
+        let _ = (session, params);
+        anyhow::bail!("Fixture feature required");
+    }
 }

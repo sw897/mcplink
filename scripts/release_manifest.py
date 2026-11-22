@@ -49,6 +49,7 @@ def main():
     parser.add_argument("--artifact", type=Path, action="append", default=[])
     parser.add_argument("--binary", type=Path, action="append", default=[])
     parser.add_argument("--require-clean", action="store_true")
+    parser.add_argument("--without-fixture-vault", action="store_true")
     args = parser.parse_args()
     args.record.mkdir(parents=True, exist_ok=True)
     report = {"executed_at": datetime.now(timezone.utc).isoformat(), "platform": platform.platform()}
@@ -77,6 +78,8 @@ def main():
         if len(set(names)) != len(names):
             raise ValueError("Artifact basenames must be unique")
         report["artifacts"] = {p.name: {"sha256": sha(p), "bytes": p.stat().st_size} for p in args.artifact}
+        if args.without_fixture_vault:
+            report["fixture_vault_supported"] = False
         checksums = "".join(f"{item['sha256']}  {name}\n" for name, item in report["artifacts"].items())
         (args.record / "SHA256SUMS").write_text(checksums)
         report["conclusion"] = "PASS"

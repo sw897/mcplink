@@ -5,10 +5,11 @@ import hashlib
 import json
 from pathlib import Path
 import platform
+import sys
 import traceback
 
 from tool_calls import ToolCalls
-from run import BINARY
+from run import BINARY, ROOT
 
 
 class CatalogPagination(ToolCalls):
@@ -37,12 +38,37 @@ class CatalogPagination(ToolCalls):
         assert "error" in client.call("prompts/list", {"cursor":fresh["nextCursor"]})
         self.passed("catalog cursors cannot cross entry or capability boundaries")
 
+        self.cli("gateway", "refresh", entry["id"])
+        assert "error" in client.call("tools/list", {"cursor":fresh["nextCursor"]})
+        fresh = client.call("tools/list")["result"]
+        self.cli("gateway", "refresh", connection)
+        assert "error" in client.call("tools/list", {"cursor":fresh["nextCursor"]})
+        fresh = client.call("tools/list")["result"]
+        self.passed("explicit refresh of the entry or its member invalidates existing cursors")
+
         self.cli("credentials", "update", connection, "--stdin", value={"value":"synthetic-fixture-authorization"})
         assert "error" in client.call("tools/list", {"cursor":fresh["nextCursor"]})
         again = client.call("tools/list")["result"]
         self.cli("gateway", "save", "--stdin", value={"id":entry["id"],"editVersion":entry["editVersion"],"connectionIds":[]})
         assert "error" in client.call("tools/list", {"cursor":again["nextCursor"]})
         self.passed("member credentials and entry selection changes revoke prior catalog snapshots")
+
+        control = self.record / "paged-catalog.json"
+        state = {"tools":0,"resources":0,"prompts":0}
+        control.write_text(json.dumps(state))
+        upstream = self.cli("connections","save","--stdin",value={"name":"paged_notifications","definition":{
+            "command":sys.executable,"args":[str(ROOT/"tests/fixtures/catalog_server.py"),str(control),"132"]}})["id"]
+        notified = self.cli("gateway","save","--stdin",value={"connectionIds":[upstream]})
+        fresh_client = self.bridge(notified["id"], "paged-list-changed")
+        tools = fresh_client.call("tools/list")["result"]["nextCursor"]
+        resources = fresh_client.call("resources/list")["result"]["nextCursor"]
+        updated = control.with_suffix(".tmp")
+        updated.write_text(json.dumps(state | {"tools":1}))
+        updated.replace(control)
+        fresh_client.wait_notification("notifications/tools/list_changed")
+        assert "error" in fresh_client.call("tools/list", {"cursor":tools})
+        assert len(fresh_client.call("resources/list", {"cursor":resources})["result"]["resources"]) == 32
+        self.passed("an upstream tool notification expires tool pages while the resource snapshot stays valid")
 
 
 def main():

@@ -113,7 +113,7 @@ def main():
                 raise RuntimeError("Isolated fixture signing failed")
 
         helper = record / "mcplink-keychain"
-        run(["swiftc", "-O", str(ROOT / "scripts/macos_keychain.swift"), "-o", str(helper)])
+        run(["swiftc", "-O", "-D", "MCPLINK_TEST_FIXTURES", str(ROOT / "scripts/macos_keychain.swift"), "-o", str(helper)])
         sign(helper, "io.mcplink.keychain")
         helper_hash = hashlib.sha256(helper.read_bytes()).hexdigest()
         callers = []
@@ -194,13 +194,16 @@ def main():
                                           env=env, capture_output=True, text=True, timeout=20)
             assert changed_plan.returncode == 1 and (installed / "active.json").read_bytes() == binding_bytes
             assert cli("keychain", "authorize", "--helper", str(helper), "--preview-hash", preview["previewHash"], "--confirm", expected=1)["error"]
-            from macos_keychain_lifecycle import exercise
-            exercise(record, data, keychain, password, audit, helper, core, env, sign, cli, run, passed)
             cli("gateway", "stop")
             binding = installed / "active.json"
-            binding.write_text(json.dumps({"version": 1, "sha256": "0" * 64}))
-            assert "error" in cli("status", expected=1)
+            try:
+                binding.write_text(json.dumps({"version": 1, "sha256": "0" * 64}))
+                assert "error" in cli("status", expected=1)
+            finally:
+                binding.write_bytes(binding_bytes)
             passed.append("actual Rust daemon uses helper; wrong pin and no-UI authorization fail closed")
+            from macos_keychain_lifecycle import exercise
+            exercise(record, data, keychain, password, audit, helper, core, env, sign, cli, run, passed)
         finally:
             subprocess.run([str(core), "--no-auth-ui", "gateway", "stop"], env=env, capture_output=True, timeout=30)
         report.update(conclusion="PASS", passed=passed, helper_sha256=helper_hash)
@@ -219,8 +222,7 @@ def main():
         report["temporary_keychain_removed"] = not keychain.exists()
         (record / "report.json").write_text(json.dumps(report, indent=2) + "\n")
         print(json.dumps(report))
-        if report["conclusion"] != "PASS":
-            raise RuntimeError("Isolated Keychain acceptance did not pass or cleanup failed")
+        assert report["temporary_keychain_removed"], "Isolated Keychain cleanup failed"
 
 
 if __name__ == "__main__":

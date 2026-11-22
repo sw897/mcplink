@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use std::{
     collections::HashSet,
     ffi::OsString,
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::{Read, Write},
     path::{Component, Path, PathBuf},
     sync::Arc,
@@ -146,7 +146,16 @@ fn checked_path(path: &Path) -> Result<PathBuf> {
         }
         current.push(component.as_os_str());
         match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
+            Ok(metadata) if is_link(&metadata) => {
+                #[cfg(target_os = "macos")]
+                if matches!(current.to_str(), Some("/tmp" | "/var" | "/etc")) && current != absolute
+                {
+                    let expected = Path::new("/private").join(current.strip_prefix("/")?);
+                    if current.canonicalize()? == expected {
+                        current = expected;
+                        continue;
+                    }
+                }
                 bail!("CLI 路径包含符号链接，请核对真实位置");
             }
             Ok(_) => {}
@@ -154,16 +163,40 @@ fn checked_path(path: &Path) -> Result<PathBuf> {
             Err(_) => bail!("无法检查 CLI 路径"),
         }
     }
-    Ok(absolute)
+    Ok(current)
+}
+
+fn is_link(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_attributes()
+            & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+            != 0
+    }
+    #[cfg(not(windows))]
+    metadata.file_type().is_symlink()
 }
 
 fn read_bytes(path: &Path) -> Result<Vec<u8>> {
     let path = checked_path(path)?;
-    let metadata = fs::symlink_metadata(&path).context("无法读取 CLI 清单")?;
-    if !metadata.is_file() || metadata.len() > MANIFEST_LIMIT {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options.open(path).context("无法读取 CLI 清单")?;
+    let metadata = file.metadata()?;
+    if !crate::config_file::regular(&metadata) || metadata.len() > MANIFEST_LIMIT {
         bail!("CLI 清单必须是不超过 1 MiB 的普通文件");
     }
-    let file = File::open(path).context("无法读取 CLI 清单")?;
     let mut bytes = Vec::new();
     file.take(MANIFEST_LIMIT + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MANIFEST_LIMIT {
@@ -507,11 +540,8 @@ try {{
     let result = (|| {
         write_new(&files[0], shell.as_bytes(), true, &mut created)?;
         write_new(&files[1], powershell.as_bytes(), false, &mut created)?;
-        if std::env::var("MCPLINK_FAILPOINT").ok().as_deref() == Some("cli-after-launchers")
-            && std::env::var("MCPLINK_VAULT").ok().as_deref() == Some("fixture")
-            && std::env::var_os("MCPLINK_HOME")
-                .is_some_and(|home| PathBuf::from(home).join(".mcplink-test-fixture").is_file())
-        {
+        #[cfg(feature = "test-fixtures")]
+        if crate::vault::fixture_failpoint("cli-after-launchers") {
             bail!("合成验收：中断 CLI 文件写入");
         }
         write_new(&files[2], &bytes, false, &mut created)

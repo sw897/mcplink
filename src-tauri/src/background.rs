@@ -23,10 +23,14 @@ struct Background {
     action: tokio::sync::Mutex<()>,
     quitting: AtomicBool,
     allow_exit: AtomicBool,
-    monitor: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
-    monitor_stop: tokio::sync::watch::Sender<bool>,
+    monitor: Mutex<Option<Monitor>>,
     requests: Mutex<usize>,
     drained: tokio::sync::Notify,
+}
+
+struct Monitor {
+    stop: tokio::sync::watch::Sender<bool>,
+    task: tauri::async_runtime::JoinHandle<()>,
 }
 
 pub struct RpcActivity(AppHandle);
@@ -42,17 +46,14 @@ impl Drop for RpcActivity {
     }
 }
 
-pub fn enter_rpc(app: &AppHandle, method: &str) -> Result<Option<RpcActivity>, String> {
-    if method == "gateway.stop" {
-        return Ok(None);
-    }
+pub fn enter_rpc(app: &AppHandle) -> Result<RpcActivity, String> {
     let state = app.state::<Background>();
     let mut active = state.requests.lock().unwrap();
     if state.quitting.load(Ordering::SeqCst) {
         return Err("应用正在退出，请等待共享服务清理完成".into());
     }
     *active += 1;
-    Ok(Some(RpcActivity(app.clone())))
+    Ok(RpcActivity(app.clone()))
 }
 
 async fn drain_requests(app: &AppHandle) {
@@ -123,12 +124,6 @@ pub fn set_autostart(app: &AppHandle, enabled: bool) -> Result<Value, String> {
     Ok(result)
 }
 pub fn observe(app: &AppHandle, method: &str, response: &Value) {
-    let Some(state) = app.try_state::<Background>() else {
-        return;
-    };
-    if is_quitting(app) {
-        return;
-    }
     let value = if method == "snapshot" {
         &response["ok"]["gateway"]
     } else {
@@ -141,28 +136,31 @@ pub fn observe(app: &AppHandle, method: &str, response: &Value) {
         return;
     }
     if let Some(paused) = value["paused"].as_bool() {
-        let next = if paused { 2 } else { 1 };
-        let _ = state.pause.set_checked(paused);
-        let _ = state.pause.set_enabled(true);
-        let label = if paused {
-            "共享已暂停（重启后保持）"
-        } else {
-            "共享后台运行中"
-        };
-        let _ = state.health.set_text(label);
-        if let Some(tray) = app.tray_by_id("mcplink") {
-            let _ = tray.set_tooltip(Some(format!("mcplink · {label}")));
-        }
-        if state.state.swap(next, Ordering::SeqCst) != next {
-            let _ = app.emit("gateway-changed", ());
-        }
+        while_running(app, move |app| {
+            let state = app.state::<Background>();
+            let next = if paused { 2 } else { 1 };
+            let _ = state.pause.set_checked(paused);
+            let _ = state.pause.set_enabled(true);
+            let label = if paused {
+                "共享已暂停（重启后保持）"
+            } else {
+                "共享后台运行中"
+            };
+            let _ = state.health.set_text(label);
+            if let Some(tray) = app.tray_by_id("mcplink") {
+                let _ = tray.set_tooltip(Some(format!("mcplink · {label}")));
+            }
+            if state.state.swap(next, Ordering::SeqCst) != next {
+                let _ = app.emit("gateway-changed", ());
+            }
+        });
     }
 }
 async fn gateway(app: &AppHandle, method: &str) -> Result<Value, String> {
     let timeout = if method == "gateway.stop" { 50 } else { 20 };
     let response = tokio::time::timeout(
         std::time::Duration::from_secs(timeout),
-        crate::rpc(app.clone(), method.into(), json!({}), None),
+        crate::rpc_internal(app.clone(), method.into(), json!({}), None, false),
     )
     .await
     .map_err(|_| "连接共享后台超时".to_string())??;
@@ -173,40 +171,62 @@ async fn gateway(app: &AppHandle, method: &str) -> Result<Value, String> {
             .to_string()
     })
 }
+fn while_running(app: &AppHandle, update: impl FnOnce(&AppHandle) + Send + 'static) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if !is_quitting(&handle) {
+            update(&handle);
+        }
+    });
+}
 fn report_error(app: &AppHandle, message: String) {
-    let _ = app
-        .state::<Background>()
-        .health
-        .set_text("后台操作失败，请打开主窗口检查");
-    let _ = app.emit("desktop-error", message);
+    while_running(app, move |app| {
+        let _ = app
+            .state::<Background>()
+            .health
+            .set_text("后台操作失败，请打开主窗口检查");
+        let _ = app.emit("desktop-error", message);
+    });
 }
 fn stop_monitor(app: &AppHandle) -> Option<tauri::async_runtime::JoinHandle<()>> {
     let state = app.state::<Background>();
-    state.monitor_stop.send_replace(true);
-    state.monitor.lock().unwrap().take()
+    let monitor = state.monitor.lock().unwrap().take()?;
+    monitor.stop.send_replace(true);
+    Some(monitor.task)
 }
 fn start_monitor(app: &AppHandle) {
     let state = app.state::<Background>();
-    state.monitor_stop.send_replace(false);
-    let mut stop = state.monitor_stop.subscribe();
+    let mut monitor = state.monitor.lock().unwrap();
+    if state.quitting.load(Ordering::SeqCst) || monitor.is_some() {
+        return;
+    }
+    let (signal, mut stop) = tokio::sync::watch::channel(false);
     let handle = app.clone();
     let task = tauri::async_runtime::spawn(async move {
         loop {
-            if is_quitting(&handle) {
+            if *stop.borrow() || is_quitting(&handle) {
                 break;
             }
             if crate::updater::needs_backend_reset(&handle) {
                 let reset = gateway(&handle, "gateway.stop").await;
+                if *stop.borrow() || is_quitting(&handle) {
+                    break;
+                }
                 crate::updater::finish_startup(&handle, reset.map(|_| ()));
             }
             if gateway(&handle, "gateway.status").await.is_err() {
-                let state = handle.state::<Background>();
-                state.state.store(0, Ordering::SeqCst);
-                let _ = state.pause.set_enabled(false);
-                let _ = state.health.set_text("后台未连接（正在自动重试）");
-                if let Some(tray) = handle.tray_by_id("mcplink") {
-                    let _ = tray.set_tooltip(Some("mcplink · 后台未连接，正在重试"));
+                if *stop.borrow() {
+                    break;
                 }
+                while_running(&handle, |app| {
+                    let state = app.state::<Background>();
+                    state.state.store(0, Ordering::SeqCst);
+                    let _ = state.pause.set_enabled(false);
+                    let _ = state.health.set_text("后台未连接（正在自动重试）");
+                    if let Some(tray) = app.tray_by_id("mcplink") {
+                        let _ = tray.set_tooltip(Some("mcplink · 后台未连接，正在重试"));
+                    }
+                });
             }
             tokio::select! {
                 _ = stop.wait_for(|stopped| *stopped) => break,
@@ -214,24 +234,36 @@ fn start_monitor(app: &AppHandle) {
             }
         }
     });
-    *app.state::<Background>().monitor.lock().unwrap() = Some(task);
+    *monitor = Some(Monitor { stop: signal, task });
 }
 async fn cleanup(
     app: &AppHandle,
     monitor: Option<tauri::async_runtime::JoinHandle<()>>,
+    stop_backend: bool,
 ) -> Result<(), String> {
-    // An accepted startup helper may still be creating a daemon. Wait for it, drain
-    // desktop requests, and stop once more so neither exit nor installation leaves it behind.
-    if let Some(monitor) = monitor {
-        monitor
-            .await
-            .map_err(|_| "后台巡检未能正常结束".to_string())?;
-    }
-    gateway(app, "gateway.stop").await?;
-    tokio::time::timeout(std::time::Duration::from_secs(30), drain_requests(app))
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        if let Some(monitor) = monitor {
+            monitor
+                .await
+                .map_err(|_| "后台巡检未能正常结束".to_string())?;
+        }
+        drain_requests(app).await;
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|_| "桌面管理请求尚未结束，请等待后重试".to_string())??;
+    if stop_backend {
+        // The admission gate has already closed. This is the only request
+        // permitted to bypass it, after the previously admitted RPCs drain.
+        let session = app.state::<mcplink_core::runtime::Session>();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(50),
+            session.call("gateway.stop", json!({})),
+        )
         .await
-        .map_err(|_| "桌面管理请求尚未结束，请等待后重试".to_string())?;
-    gateway(app, "gateway.stop").await?;
+        .map_err(|_| "等待共享后台退出超时".to_string())?
+        .map_err(|error| error.to_string())?;
+    }
     Ok(())
 }
 
@@ -245,41 +277,53 @@ pub fn resume_after_update_failure(app: &AppHandle) {
     show(app);
 }
 
-pub async fn prepare_update(app: &AppHandle) -> Result<(), String> {
+fn begin_exit(app: &AppHandle, status: &str) -> bool {
     let state = app.state::<Background>();
     {
         let _active = state.requests.lock().unwrap();
         if state.quitting.swap(true, Ordering::SeqCst) {
-            return Err("应用正在退出或安装更新，请稍候".into());
+            return false;
         }
     }
     let _ = state.quit.set_enabled(false);
     let _ = state.keep.set_enabled(false);
-    let _ = state.health.set_text("正在准备软件升级…");
+    let _ = state.pause.set_enabled(false);
+    let _ = state.health.set_text(status);
+    true
+}
+
+pub async fn prepare_update(app: &AppHandle) -> Result<(), String> {
+    if !begin_exit(app, "正在准备软件升级…") {
+        return Err("应用正在退出或安装更新，请稍候".into());
+    }
     let monitor = stop_monitor(app);
-    if let Err(error) = cleanup(app, monitor).await {
+    if let Err(error) = cleanup(app, monitor, true).await {
         resume_after_update_failure(app);
         return Err(format!("升级前未能清理共享后台：{error}"));
     }
-    state.allow_exit.store(true, Ordering::SeqCst);
+    app.state::<Background>()
+        .allow_exit
+        .store(true, Ordering::SeqCst);
     Ok(())
 }
 
 pub fn quit(app: &AppHandle) {
-    let state = app.state::<Background>();
-    {
-        let _active = state.requests.lock().unwrap();
-        if state.quitting.swap(true, Ordering::SeqCst) {
-            return;
-        }
+    exit(app, true);
+}
+
+fn exit(app: &AppHandle, stop_backend: bool) {
+    let status = if stop_backend {
+        "正在退出并清理共享服务…"
+    } else {
+        "正在等待桌面请求完成…"
+    };
+    if !begin_exit(app, status) {
+        return;
     }
     let monitor = stop_monitor(app);
-    let _ = state.health.set_text("正在退出并清理共享服务…");
-    let _ = state.quit.set_enabled(false);
-    let _ = state.keep.set_enabled(false);
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let cleaned = cleanup(&app, monitor).await;
+        let cleaned = cleanup(&app, monitor, stop_backend).await;
         match cleaned {
             Ok(_) => {
                 app.state::<Background>()
@@ -288,12 +332,7 @@ pub fn quit(app: &AppHandle) {
                 app.exit(0);
             }
             Err(error) => {
-                let state = app.state::<Background>();
-                state.quitting.store(false, Ordering::SeqCst);
-                let _ = state.quit.set_enabled(true);
-                let _ = state.keep.set_enabled(true);
-                start_monitor(&app);
-                show(&app);
+                resume_after_update_failure(&app);
                 report_error(&app, format!("退出清理未完成：{error}"));
             }
         }
@@ -306,15 +345,7 @@ pub fn menu_event(app: &AppHandle, event: MenuEvent) {
     match event.id.as_ref() {
         "tray.open" => show(app),
         "tray.quit_all" => quit(app),
-        "tray.quit_keep" => {
-            let state = app.state::<Background>();
-            state.quitting.store(true, Ordering::SeqCst);
-            state.allow_exit.store(true, Ordering::SeqCst);
-            if let Some(monitor) = stop_monitor(app) {
-                monitor.abort();
-            }
-            app.exit(0);
-        }
+        "tray.quit_keep" => exit(app, false),
         "tray.autostart" => {
             let result =
                 status(app).and_then(|value| set_autostart(app, value["autostartEnabled"] != true));
@@ -333,6 +364,9 @@ pub fn menu_event(app: &AppHandle, event: MenuEvent) {
             tauri::async_runtime::spawn(async move {
                 let state = app.state::<Background>();
                 let _guard = state.action.lock().await;
+                if is_quitting(&app) {
+                    return;
+                }
                 let result = async {
                     let value = gateway(&app, "gateway.status").await?;
                     gateway(
@@ -347,9 +381,12 @@ pub fn menu_event(app: &AppHandle, event: MenuEvent) {
                 }
                 .await;
                 if let Err(error) = result {
-                    let _ = state
-                        .pause
-                        .set_checked(state.state.load(Ordering::SeqCst) == 2);
+                    while_running(&app, |app| {
+                        let state = app.state::<Background>();
+                        let _ = state
+                            .pause
+                            .set_checked(state.state.load(Ordering::SeqCst) == 2);
+                    });
                     report_error(&app, error);
                 }
             });
@@ -446,7 +483,6 @@ pub fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         quitting: AtomicBool::new(false),
         allow_exit: AtomicBool::new(false),
         monitor: Mutex::new(None),
-        monitor_stop: tokio::sync::watch::channel(false).0,
         requests: Mutex::new(0),
         drained: tokio::sync::Notify::new(),
     });
@@ -484,12 +520,19 @@ pub fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     {
         let handle = app.handle().clone();
         tauri::async_runtime::spawn(async move {
-            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                Ok(mut terminate) => {
-                    tokio::select! { _ = terminate.recv() => {}, _ = tokio::signal::ctrl_c() => {} }
+            use tokio::signal::unix::{SignalKind, signal};
+            match (
+                signal(SignalKind::terminate()),
+                signal(SignalKind::interrupt()),
+            ) {
+                (Ok(mut terminate), Ok(mut interrupt)) => loop {
+                    tokio::select! {
+                        signal = terminate.recv() => if signal.is_none() { break },
+                        signal = interrupt.recv() => if signal.is_none() { break },
+                    }
                     quit(&handle);
-                }
-                Err(error) => report_error(&handle, format!("无法监听应用退出信号：{error}")),
+                },
+                _ => report_error(&handle, "无法监听应用退出信号".into()),
             }
         });
     }

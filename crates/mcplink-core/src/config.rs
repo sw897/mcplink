@@ -38,10 +38,15 @@ pub(crate) const FIELDS: &[&str] = &[
 ];
 
 pub fn user_home() -> Result<PathBuf> {
-    std::env::var_os("MCPLINK_HOME")
-        .map(PathBuf::from)
+    absolute_env("MCPLINK_HOME")
         .or_else(|| directories::UserDirs::new().map(|dirs| dirs.home_dir().to_owned()))
         .context("无法定位当前用户目录")
+}
+
+pub(crate) fn absolute_env(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
 }
 
 pub fn opencode_home() -> Result<PathBuf> {
@@ -50,12 +55,8 @@ pub fn opencode_home() -> Result<PathBuf> {
 
 pub fn default_sources() -> Result<Vec<Source>> {
     let home = user_home()?;
-    let codex = std::env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".codex"));
-    let hermes = std::env::var_os("HERMES_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".hermes"));
+    let codex = absolute_env("CODEX_HOME").unwrap_or_else(|| home.join(".codex"));
+    let hermes = absolute_env("HERMES_HOME").unwrap_or_else(|| home.join(".hermes"));
     let mut sources = vec![
         Source {
             id: "codex:user".into(),
@@ -67,6 +68,7 @@ pub fn default_sources() -> Result<Vec<Source>> {
             plugin_root: None,
             discovery_error: None,
             scope: None,
+            legacy_ids: Vec::new(),
         },
         Source {
             id: "hermes:user".into(),
@@ -78,13 +80,13 @@ pub fn default_sources() -> Result<Vec<Source>> {
             plugin_root: None,
             discovery_error: None,
             scope: None,
+            legacy_ids: Vec::new(),
         },
         Source {
             id: "claude:user".into(),
             agent: Agent::Claude,
             label: "用户 MCP".into(),
-            path: std::env::var_os("CLAUDE_CONFIG_DIR")
-                .map(PathBuf::from)
+            path: absolute_env("CLAUDE_CONFIG_DIR")
                 .unwrap_or(home.clone())
                 .join(".claude.json"),
             project: None,
@@ -92,23 +94,26 @@ pub fn default_sources() -> Result<Vec<Source>> {
             plugin_root: None,
             discovery_error: None,
             scope: Some("user".into()),
+            legacy_ids: Vec::new(),
         },
     ];
     sources.extend(claude_plugins());
     sources.extend(crate::opencode::default_sources()?);
     sources.extend(crate::agent_config::default_sources()?);
+    for source in &mut sources {
+        if let Ok(path) = source_path(&source.path) {
+            source.path = path;
+        }
+    }
     Ok(sources)
 }
 
 pub fn claude_home() -> Result<PathBuf> {
-    Ok(std::env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .unwrap_or(user_home()?.join(".claude")))
+    Ok(absolute_env("CLAUDE_CONFIG_DIR").unwrap_or(user_home()?.join(".claude")))
 }
 
 fn claude_user_path() -> Result<PathBuf> {
-    Ok(std::env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
+    Ok(absolute_env("CLAUDE_CONFIG_DIR")
         .unwrap_or(user_home()?)
         .join(".claude.json"))
 }
@@ -126,6 +131,84 @@ pub(crate) fn canonical_path(path: &Path) -> Result<PathBuf> {
         }
     }
     Ok(canonical)
+}
+
+pub(crate) fn path_identity(path: &Path) -> String {
+    let value = path.to_string_lossy();
+    if cfg!(any(windows, target_os = "macos")) {
+        value.to_lowercase()
+    } else {
+        value.into_owned()
+    }
+}
+
+pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
+    if cfg!(any(windows, target_os = "macos")) {
+        path_identity(a) == path_identity(b)
+    } else {
+        a == b
+    }
+}
+
+pub(crate) fn in_directory(path: &Path, root: &Path) -> bool {
+    let normalized = source_path(&root.join(".mcplink-boundary"));
+    let directory = normalized
+        .as_ref()
+        .ok()
+        .and_then(|path| path.parent())
+        .unwrap_or(root);
+    let prefix = |root: &Path| {
+        let mut components = path.components();
+        root.components().all(|part| {
+            components.next().is_some_and(|candidate| {
+                same_path(
+                    Path::new(part.as_os_str()),
+                    Path::new(candidate.as_os_str()),
+                )
+            })
+        })
+    };
+    prefix(root) || prefix(directory)
+}
+
+pub(crate) fn protected_path(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| {
+        ["managed-mcp.json", "managed-settings.json"]
+            .iter()
+            .any(|candidate| same_path(Path::new(name), Path::new(candidate)))
+    }) || claude_home().is_ok_and(|root| in_directory(path, &root.join("plugins")))
+        || crate::opencode::is_managed(path)
+}
+
+/// Configuration identity follows existing directories, even before the file
+/// exists. Keep the final component for the write-time link check.
+pub(crate) fn source_path(path: &Path) -> Result<PathBuf> {
+    let absolute = std::path::absolute(path)?;
+    let file = absolute.file_name().context("配置文件路径缺少名称")?;
+    let mut parent = absolute.parent().context("配置路径缺少父目录")?;
+    let mut missing = Vec::new();
+    loop {
+        match canonical_path(parent) {
+            Ok(mut canonical) => {
+                anyhow::ensure!(canonical.is_dir(), "配置父路径须为目录");
+                canonical.extend(missing.into_iter().rev());
+                return Ok(canonical.join(file));
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                anyhow::ensure!(
+                    !fs::symlink_metadata(parent).is_ok_and(|metadata| metadata.is_symlink()),
+                    "配置目录链接无法解析"
+                );
+                missing.push(parent.file_name().context("配置目录路径无法规范化")?);
+                parent = parent.parent().context("配置父目录不存在")?;
+            }
+            Err(error) => return Err(error.context("配置目录无法访问")),
+        }
+    }
 }
 
 fn claude_project_key(project: PathBuf) -> PathBuf {
@@ -225,8 +308,7 @@ pub fn source_from_params(params: &Value, sources: &[Source]) -> Result<Source> 
         _ => None,
     };
     if let (Some(supplied), Some(expected)) = (&supplied_path, &expected)
-        && canonical_path(supplied).unwrap_or(supplied.clone())
-            != canonical_path(expected).unwrap_or(expected.clone())
+        && !same_path(&source_path(supplied)?, &source_path(expected)?)
     {
         bail!("配置路径与所选 Claude Code 作用域不符");
     }
@@ -241,9 +323,9 @@ pub fn source_from_params(params: &Value, sources: &[Source]) -> Result<Source> 
     if !path.is_absolute() {
         bail!("请选择完整的配置文件路径");
     }
-    let path = canonical_path(&path).unwrap_or(path);
+    let path = source_path(&path)?;
     for existing in sources {
-        if canonical_path(&existing.path).unwrap_or(existing.path.clone()) != path {
+        if !same_path(&existing.path, &path) {
             continue;
         }
         if existing.read_only
@@ -271,11 +353,8 @@ pub fn source_from_params(params: &Value, sources: &[Source]) -> Result<Source> 
             bail!("此文件已登记为另一配置作用域，请核对已有来源");
         }
     }
-    let plugin = path.starts_with(claude_home()?.join("plugins"));
-    let managed = path
-        .file_name()
-        .is_some_and(|name| name == "managed-mcp.json" || name == "managed-settings.json")
-        || crate::opencode::is_managed(&path);
+    let plugin = in_directory(&path, &claude_home()?.join("plugins"));
+    let managed = protected_path(&path);
     let read_only = plugin || managed || (agent == Agent::Claude && scope.is_none());
     let scope = if plugin {
         Some("plugin")
@@ -324,6 +403,7 @@ pub fn source_from_params(params: &Value, sources: &[Source]) -> Result<Source> 
         plugin_root: None,
         discovery_error: None,
         scope: scope.map(str::to_owned),
+        legacy_ids: Vec::new(),
     };
     read(&source)?;
     Ok(source)
@@ -397,6 +477,7 @@ fn claude_plugins() -> Vec<Source> {
                         plugin_root: Some(root),
                         discovery_error: None,
                         scope: Some("plugin".into()),
+                        legacy_ids: Vec::new(),
                     });
                 }
             }
@@ -414,25 +495,35 @@ fn claude_plugins() -> Vec<Source> {
             plugin_root: None,
             discovery_error: Some("Claude Code 插件登记或设置无法读取，请在原客户端核对".into()),
             scope: Some("plugin".into()),
+            legacy_ids: Vec::new(),
         }]
     })
 }
 
-pub fn read(source: &Source) -> Result<(String, Value)> {
+pub(crate) fn require_readable(source: &Source) -> Result<()> {
     if source.agent == Agent::Qwenwork {
         crate::agent_config::assert_qwen_source(source)?;
     }
     if let Some(error) = &source.discovery_error {
         bail!("{error}");
     }
-    let text = match fs::read_to_string(&source.path) {
-        Ok(value) => value,
+    Ok(())
+}
+
+pub fn read(source: &Source) -> Result<(String, Value)> {
+    require_readable(source)?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let text = match options.open(&source.path) {
+        Ok(file) => crate::config_file::read_text(&file)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(_) => bail!("无法读取配置，请检查文件访问状态"),
     };
-    if text.len() > 4 * 1024 * 1024 {
-        bail!("配置超过 4 MiB，请检查所选文件");
-    }
     let value = parse(source, &text)?;
     Ok((text, value))
 }
@@ -542,7 +633,11 @@ fn normalize_context(raw: &Value, agent: Agent, project: Option<&Path>) -> Resul
             || raw
                 .get("oauth")
                 .and_then(Value::as_object)
-                .is_some_and(|oauth| oauth.keys().any(|key| key != "clientId")))
+                .is_some_and(|oauth| {
+                    oauth
+                        .keys()
+                        .any(|key| !matches!(key.as_str(), "clientId" | "callbackPort"))
+                }))
     {
         bail!("此 Claude Code 原生字段尚不能等价托管，请保留原客户端配置或显式建立托管连接");
     }
@@ -585,6 +680,37 @@ fn normalize_context(raw: &Value, agent: Agent, project: Option<&Path>) -> Resul
             bail!("{field} 需要字符串键值映射");
         }
     }
+    let claude_oauth = if agent == Agent::Claude {
+        raw.get("oauth")
+            .map(|value| {
+                anyhow::ensure!(
+                    raw.get("url").is_some() && raw.get("command").is_none(),
+                    "Claude Code OAuth 仅适用于 HTTP 服务"
+                );
+                value.as_object().context("Claude Code oauth 需要对象")
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    let claude_client = claude_oauth
+        .and_then(|value| value.get("clientId"))
+        .map(|value| {
+            value
+                .as_str()
+                .context("Claude Code OAuth Client ID 需要非空字符串")
+        })
+        .transpose()?;
+    let claude_port = claude_oauth
+        .and_then(|value| value.get("callbackPort"))
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|port| u16::try_from(port).ok())
+                .filter(|port| *port != 0)
+                .context("Claude Code OAuth 回调端口须为 1–65535")
+        })
+        .transpose()?;
     if let Some(value) = raw.get("args")
         && !value
             .as_array()
@@ -606,15 +732,29 @@ fn normalize_context(raw: &Value, agent: Agent, project: Option<&Path>) -> Resul
     }
     let mut headers = string_map(raw.get("headers").or_else(|| raw.get("http_headers")));
     for (key, value) in string_map(raw.get("env_http_headers")) {
+        anyhow::ensure!(valid_env_name(&value), "请求头的环境变量名称无效");
         headers.insert(key, format!("${{env:{value}}}"));
     }
-    if let Some(variable) = raw.get("bearer_token_env_var").and_then(Value::as_str) {
+    if let Some(value) = raw.get("bearer_token_env_var") {
+        let variable = value
+            .as_str()
+            .filter(|name| valid_env_name(name))
+            .context("凭据环境变量名称无效")?;
+        headers.retain(|key, _| !key.eq_ignore_ascii_case("Authorization"));
         headers.insert(
             "Authorization".into(),
             format!("Bearer ${{env:{variable}}}"),
         );
     }
     let mut environment = string_map(raw.get("env"));
+    if let Some(values) = raw.get("env_vars") {
+        anyhow::ensure!(
+            values.as_array().is_some_and(|items| items
+                .iter()
+                .all(|item| item.as_str().is_some_and(valid_env_name))),
+            "继承环境变量需要本机变量名称数组"
+        );
+    }
     for key in strings(raw.get("env_vars")) {
         environment
             .entry(key.clone())
@@ -630,17 +770,12 @@ fn normalize_context(raw: &Value, agent: Agent, project: Option<&Path>) -> Resul
         env: environment,
         cwd: raw.get("cwd").and_then(Value::as_str).map(str::to_owned),
         url: raw.get("url").and_then(Value::as_str).map(str::to_owned),
+        private_network_origin: None,
         headers,
         enabled: raw.get("enabled").and_then(Value::as_bool).unwrap_or(true),
-        oauth: raw.get("auth").and_then(Value::as_str) == Some("oauth"),
-        client_id: raw
-            .pointer("/oauth/client_id")
-            .or_else(|| {
-                (agent == Agent::Claude)
-                    .then(|| raw.pointer("/oauth/clientId"))
-                    .flatten()
-            })
-            .and_then(Value::as_str)
+        oauth: claude_oauth.is_some() || raw.get("auth").and_then(Value::as_str) == Some("oauth"),
+        client_id: claude_client
+            .or_else(|| raw.pointer("/oauth/client_id").and_then(Value::as_str))
             .map(str::to_owned),
         include_tools: strings(
             raw.get("enabled_tools")
@@ -668,7 +803,7 @@ fn normalize_context(raw: &Value, agent: Agent, project: Option<&Path>) -> Resul
         original_agent: Some(agent),
         client_secret: None,
         oauth_scopes: Vec::new(),
-        oauth_callback_port: None,
+        oauth_callback_port: claude_port,
         origin_project: project.map(Path::to_path_buf),
     };
     if definition.original_agent == Some(Agent::Claude) {
@@ -679,6 +814,7 @@ fn normalize_context(raw: &Value, agent: Agent, project: Option<&Path>) -> Resul
 }
 
 pub fn validate(def: &Definition) -> Result<()> {
+    crate::outbound::validate_approval(def)?;
     crate::http_api::validate(def)?;
     if def.client_id.as_ref().is_some_and(|value| {
         value.trim().is_empty() || value.len() > 2048 || value.chars().any(char::is_control)
@@ -782,22 +918,13 @@ pub fn check_source_import(source: &Source, raw: &Value) -> Result<()> {
 }
 
 pub fn native(def: &Definition, source: &Source) -> Result<Value> {
-    if def.http_api.is_some() {
-        bail!("普通 HTTP API 需要 mcplink Adapter，请使用共享接入，不能导出为原生 MCP 地址");
-    }
+    crate::adapter_policy::validate(def, &source.agent, false)?;
     if source.agent.native_adapter() {
         return crate::agent_config::native(def, source);
     }
     let target = &source.agent;
-    validate(def)?;
     if *target == Agent::Opencode {
         return crate::opencode::native(def);
-    }
-    if def.client_secret.is_some()
-        || !def.oauth_scopes.is_empty()
-        || def.oauth_callback_port.is_some()
-    {
-        bail!("此连接含托管 OAuth 客户端参数，尚不能等价转换到原生配置；请使用共享接入");
     }
     if def
         .original_agent
@@ -834,27 +961,13 @@ pub fn native(def: &Definition, source: &Source) -> Result<Value> {
         .original_agent
         .as_ref()
         .is_some_and(|source| source != target)
-    {
-        if def
+        && def
             .original
             .get("oauth")
             .and_then(Value::as_object)
             .is_some_and(|map| map.keys().any(|key| key != "client_id"))
-        {
-            bail!("来源包含客户端专用 OAuth 参数，请保留原生直连或使用共享认证");
-        }
-        if *target == Agent::Codex
-            && (def
-                .include_tools
-                .iter()
-                .chain(&def.exclude_tools)
-                .any(|p| p.contains(['*', '?', '[']))
-                || def.resources_disabled
-                || def.prompts_disabled
-                || (def.include_specified && !def.exclude_tools.is_empty()))
-        {
-            bail!("Codex 直连无法保留来源的工具筛选语义，请使用共享接入");
-        }
+    {
+        bail!("来源包含客户端专用 OAuth 参数，请保留原生直连或使用共享认证");
     }
     let mut value = if def.original_agent.as_ref() == Some(target) {
         def.original.clone()
@@ -863,14 +976,38 @@ pub fn native(def: &Definition, source: &Source) -> Result<Value> {
     };
     let map = value.as_object_mut().context("服务配置格式无效")?;
     for field in FIELDS {
-        map.remove(*field);
+        if *target != Agent::Codex || *field != "tools" {
+            map.remove(*field);
+        }
     }
     map.insert("enabled".into(), json!(def.enabled));
     if let Some(command) = &def.command {
         map.insert("command".into(), json!(command));
         map.insert("args".into(), json!(def.args));
         if !def.env.is_empty() {
-            map.insert("env".into(), json!(def.env));
+            if *target == Agent::Codex {
+                let mut inherit = Vec::new();
+                let mut literal = BTreeMap::new();
+                for (key, value) in &def.env {
+                    if env_reference(value) == Some(key.as_str()) {
+                        inherit.push(key);
+                    } else {
+                        anyhow::ensure!(
+                            !value.contains("${"),
+                            "Codex 直连只支持同名环境变量继承，请使用共享接入"
+                        );
+                        literal.insert(key, value);
+                    }
+                }
+                if !inherit.is_empty() {
+                    map.insert("env_vars".into(), json!(inherit));
+                }
+                if !literal.is_empty() {
+                    map.insert("env".into(), json!(literal));
+                }
+            } else {
+                map.insert("env".into(), json!(def.env));
+            }
         }
         if let Some(cwd) = def
             .cwd
@@ -891,11 +1028,21 @@ pub fn native(def: &Definition, source: &Source) -> Result<Value> {
         let mut literal = BTreeMap::new();
         let mut environment = BTreeMap::new();
         for (key, value) in &def.headers {
-            if *target == Agent::Codex && value.starts_with("${env:") && value.ends_with('}') {
-                environment.insert(key.clone(), value[6..value.len() - 1].to_owned());
-            } else {
-                literal.insert(key.clone(), value.clone());
+            if *target == Agent::Codex {
+                if let Some(variable) = bearer_reference(key, value) {
+                    map.insert("bearer_token_env_var".into(), json!(variable));
+                    continue;
+                }
+                if let Some(variable) = env_reference(value) {
+                    environment.insert(key, variable);
+                    continue;
+                }
+                anyhow::ensure!(
+                    !value.contains("${"),
+                    "Codex 直连请求头需要字面值或完整单变量引用，请使用共享接入"
+                );
             }
+            literal.insert(key, value);
         }
         if !literal.is_empty() {
             map.insert(header_key.into(), json!(literal));
@@ -950,9 +1097,13 @@ pub fn native(def: &Definition, source: &Source) -> Result<Value> {
         tools.as_object_mut().unwrap().remove("exclude");
         if def.resources_disabled {
             tools["resources"] = json!(false);
+        } else if tools["resources"] == false {
+            tools["resources"] = json!(true);
         }
         if def.prompts_disabled {
             tools["prompts"] = json!(false);
+        } else if tools["prompts"] == false {
+            tools["prompts"] = json!(true);
         }
         if def.include_specified || !def.include_tools.is_empty() {
             tools["include"] = json!(def.include_tools);
@@ -978,6 +1129,57 @@ pub fn entry(source: &Source, name: &str) -> Result<Option<Value>> {
         .cloned())
 }
 
+pub(crate) fn matches_written_entry(
+    source: &Source,
+    change: &crate::model::Change,
+    current: Option<&Value>,
+) -> bool {
+    if current == change.after.as_ref() {
+        return true;
+    }
+    // Earlier TOML and YAML writers left unknown fields from the previous
+    // entry on disk. Only accept the exact legacy result derived from the
+    // saved transaction, including the original values of those fields.
+    if !matches!(source.agent, Agent::Codex | Agent::Hermes) {
+        return false;
+    }
+    let (Some(before), Some(mut after), Some(current)) = (
+        change.before.as_ref().and_then(Value::as_object),
+        change.after.as_ref().and_then(Value::as_object).cloned(),
+        current.and_then(Value::as_object),
+    ) else {
+        return false;
+    };
+    for (key, value) in before {
+        if !FIELDS.contains(&key.as_str()) {
+            after.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
+    current == &after
+}
+
+pub(crate) fn preserve_native_policy(
+    source: &Source,
+    value: &mut Value,
+    before: Option<&Value>,
+    shared: bool,
+) -> Result<()> {
+    if source.agent == Agent::Pi {
+        return crate::pi_config::preserve_presentation(value, before);
+    }
+    let keys: &[&str] = match source.agent {
+        Agent::Codex => &["required", "default_tools_approval_mode", "tools"],
+        Agent::Hermes if shared => &["tools"],
+        _ => &[],
+    };
+    for key in keys {
+        if let Some(setting) = before.and_then(|entry| entry.get(*key)) {
+            value[*key] = setting.clone();
+        }
+    }
+    Ok(())
+}
+
 pub fn set_native_enabled(value: &mut Value, source: &Source, enabled: bool) -> Result<()> {
     if source.agent.native_adapter() {
         return crate::agent_config::set_enabled(value, &source.agent, enabled);
@@ -1001,7 +1203,12 @@ pub fn render(source: &Source, text: &str, name: &str, value: Option<&Value>) ->
     if source.read_only {
         bail!("该来源只读，请在原客户端或插件中维护配置；可将连接接入其他可写来源");
     }
-    match source.agent {
+    let original = parse(source, text)?;
+    let before = original["mcp_servers"].get(name);
+    if before == value {
+        return Ok(text.to_owned());
+    }
+    let rendered = match source.agent {
         Agent::Codex => {
             use toml_edit::{DocumentMut, Item, Table};
             let mut document = text
@@ -1023,12 +1230,18 @@ pub fn render(source: &Source, text: &str, name: &str, value: Option<&Value>) ->
                 let table = servers[name]
                     .as_table_mut()
                     .context("服务配置需要标准 TOML 表")?;
-                for field in FIELDS {
-                    if value.get(*field).is_none() {
-                        table.remove(field);
-                    }
+                let obsolete: Vec<_> = table
+                    .iter()
+                    .filter(|(key, _)| value.get(*key).is_none())
+                    .map(|(key, _)| key.to_owned())
+                    .collect();
+                for field in obsolete {
+                    table.remove(&field);
                 }
                 for (key, item) in desired.as_table().iter() {
+                    if before.and_then(|entry| entry.get(key)) == value.get(key) {
+                        continue;
+                    }
                     let mut replacement = item.clone();
                     if let (Some(old), Some(new)) = (
                         table.get(key).and_then(Item::as_value),
@@ -1061,12 +1274,15 @@ pub fn render(source: &Source, text: &str, name: &str, value: Option<&Value>) ->
                 let server = servers
                     .get_mapping(name)
                     .context("服务配置需要 YAML 映射")?;
-                for field in FIELDS {
-                    if value.get(*field).is_none() {
-                        server.remove(*field);
+                if let Some(previous) = before.and_then(Value::as_object) {
+                    for field in previous.keys().filter(|key| value.get(*key).is_none()) {
+                        server.remove(field.as_str());
                     }
                 }
                 for (key, value) in value.as_object().context("服务配置无效")? {
+                    if before.and_then(|entry| entry.get(key)) == Some(value) {
+                        continue;
+                    }
                     server.set(
                         key.as_str(),
                         yaml_edit::Document::from_str(&serde_yaml::to_string(value)?)?,
@@ -1090,7 +1306,12 @@ pub fn render(source: &Source, text: &str, name: &str, value: Option<&Value>) ->
         }
         Agent::Opencode => crate::opencode::render(text, name, value),
         _ => crate::agent_config::render(source, text, name, value),
-    }
+    }?;
+    anyhow::ensure!(
+        parse(source, &rendered)?["mcp_servers"].get(name) == value,
+        "生成的原生条目与预览不一致，请检查配置"
+    );
+    Ok(rendered)
 }
 
 pub fn safe_name(name: &str) -> Result<()> {
@@ -1111,39 +1332,76 @@ pub fn name_key(name: &str) -> String {
         .collect()
 }
 
+pub(crate) fn valid_env_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().enumerate().all(|(index, c)| {
+            c == b'_' || c.is_ascii_alphabetic() || (index > 0 && c.is_ascii_digit())
+        })
+}
+
+pub(crate) fn env_reference(value: &str) -> Option<&str> {
+    let inner = value.strip_prefix("${")?.strip_suffix('}')?;
+    let name = inner.strip_prefix("env:").unwrap_or(inner);
+    // Unqualified path references are distinct from environment variables.
+    (valid_env_name(name)
+        && !matches!(
+            inner,
+            "userHome" | "workspaceFolder" | "workspaceFolderBasename"
+        ))
+    .then_some(name)
+}
+
+pub(crate) fn bearer_reference<'a>(name: &str, value: &'a str) -> Option<&'a str> {
+    if name.eq_ignore_ascii_case("Authorization") {
+        env_reference(value.strip_prefix("Bearer ")?)
+    } else {
+        None
+    }
+}
+
 pub fn resolve(input: &str, project: Option<&Path>) -> Result<String> {
-    let mut result = input.to_owned();
-    result = result.replace("${userHome}", &user_home()?.to_string_lossy());
-    if let Some(project) = project {
-        result = result.replace("${workspaceFolder}", &project.to_string_lossy());
-        result = result.replace(
-            "${workspaceFolderBasename}",
-            project.file_name().and_then(|v| v.to_str()).unwrap_or(""),
-        );
-    }
+    let mut expanded = String::with_capacity(input.len());
+    let mut remaining = input;
     for _ in 0..32 {
-        let Some(start) = result.find("${") else {
-            return Ok(result);
+        let Some((literal, variable)) = remaining.split_once("${") else {
+            expanded.push_str(remaining);
+            return Ok(expanded);
         };
-        let end = result[start..].find('}').context("环境变量引用不完整")? + start;
-        let reference = result[start + 2..end]
-            .strip_prefix("env:")
-            .unwrap_or(&result[start + 2..end]);
-        let (name, fallback) = reference
-            .split_once(":-")
-            .map_or((reference, None), |(name, value)| (name, Some(value)));
-        if name.is_empty()
-            || !name.bytes().enumerate().all(|(index, c)| {
-                c == b'_' || c.is_ascii_alphabetic() || (index > 0 && c.is_ascii_digit())
-            })
-        {
-            bail!("环境变量引用格式不受支持");
+        let (reference, rest) = variable.split_once('}').context("环境变量引用不完整")?;
+        expanded.push_str(literal);
+        match reference {
+            "userHome" => expanded.push_str(&user_home()?.to_string_lossy()),
+            "workspaceFolder" => expanded.push_str(
+                &project
+                    .context("工作目录变量需要项目来源")?
+                    .to_string_lossy(),
+            ),
+            "workspaceFolderBasename" => expanded.push_str(
+                project
+                    .context("工作目录变量需要项目来源")?
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default(),
+            ),
+            _ => {
+                let reference = reference.strip_prefix("env:").unwrap_or(reference);
+                let (name, fallback) = reference
+                    .split_once(":-")
+                    .map_or((reference, None), |(name, value)| (name, Some(value)));
+                anyhow::ensure!(
+                    valid_env_name(name) && fallback.is_none_or(|text| !text.contains("${")),
+                    "环境变量引用格式不受支持"
+                );
+                let value = std::env::var(name)
+                    .ok()
+                    .or_else(|| fallback.map(str::to_owned))
+                    .with_context(|| format!("需要在运行环境配置变量 {name}"))?;
+                expanded.push_str(&value);
+            }
         }
-        let value = std::env::var(name)
-            .ok()
-            .or_else(|| fallback.map(str::to_owned))
-            .with_context(|| format!("需要在运行环境配置变量 {name}"))?;
-        result.replace_range(start..=end, &value);
+        remaining = rest;
     }
-    bail!("环境变量嵌套引用超过限制")
+    anyhow::ensure!(!remaining.contains("${"), "环境变量引用超过 32 项");
+    expanded.push_str(remaining);
+    Ok(expanded)
 }

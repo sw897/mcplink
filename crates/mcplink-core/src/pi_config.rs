@@ -171,23 +171,6 @@ pub fn normalize(raw: &Value, project: Option<&Path>) -> Result<Definition> {
 }
 
 pub fn native(def: &Definition, source: &Source) -> Result<Value> {
-    config::validate(def)?;
-    crate::client_import::check_portable(def)?;
-    if def.oauth
-        || def.client_id.is_some()
-        || def.client_secret.is_some()
-        || !def.oauth_scopes.is_empty()
-        || def.oauth_callback_port.is_some()
-        || def.timeout.is_some()
-        || def.startup_timeout.is_some()
-        || def.include_specified
-        || !def.include_tools.is_empty()
-        || !def.exclude_tools.is_empty()
-        || def.resources_disabled
-        || def.prompts_disabled
-    {
-        bail!("Pi Agent 的原生认证、进度超时或工具限制不能等价直连，请使用共享代理");
-    }
     if def
         .cwd
         .as_deref()

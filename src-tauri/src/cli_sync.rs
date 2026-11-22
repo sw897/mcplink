@@ -1,123 +1,123 @@
-use crate::update_signature::sha256;
+use crate::update_files::{self, Directory};
 use semver::Version;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
-    fs,
-    io::Write,
+    ffi::OsStr,
+    fs::File,
+    io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    process::Stdio,
-    time::Duration,
 };
-use tokio::io::AsyncReadExt;
+
+const BINARY_LIMIT: u64 = 256 * 1024 * 1024;
+const RECEIPT_LIMIT: u64 = 64 * 1024;
+const MAX_TARGETS: usize = 32;
+const BINARY: &str = if cfg!(windows) {
+    "mcplink.exe"
+} else {
+    "mcplink"
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CliTarget {
     pub path: PathBuf,
     pub sha256: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Receipt {
     pub version: Version,
     pub targets: Vec<CliTarget>,
 }
 
-fn regular_in_home(path: &Path, home: &Path) -> bool {
-    fs::symlink_metadata(path).is_ok_and(|m| m.is_file() && !m.file_type().is_symlink())
-        && path
-            .parent()
-            .and_then(|p| p.canonicalize().ok())
-            .zip(home.canonicalize().ok())
-            .is_some_and(|(p, h)| p.starts_with(h))
+fn target_directory<'a>(path: &'a Path, home: &Path) -> Result<(Directory, &'a OsStr), String> {
+    if !home.is_absolute() || !path.starts_with(home) {
+        return Err("独立 CLI 不在用户目录内".into());
+    }
+    update_files::open(path).map_err(|_| "独立 CLI 位置已变化，已保留原文件".into())
+}
+
+fn hash_open(file: &mut File) -> io::Result<String> {
+    let mut hash = Sha256::new();
+    if io::copy(&mut file.take(BINARY_LIMIT + 1), &mut hash)? > BINARY_LIMIT {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "CLI is too large",
+        ));
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+fn hash_at(directory: &Directory, name: &OsStr) -> Result<Option<String>, String> {
+    match directory.open_file(name) {
+        Ok(mut file) => hash_open(&mut file)
+            .map(Some)
+            .map_err(|_| "独立 CLI 文件不符合升级条件".into()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err("独立 CLI 位置已变化，已保留原文件".into()),
+    }
 }
 
 pub fn hash_file(path: &Path) -> Result<String, String> {
-    let meta = fs::symlink_metadata(path).map_err(|_| "无法读取独立 CLI 文件")?;
-    if !meta.is_file() || meta.file_type().is_symlink() || meta.len() > 256 * 1024 * 1024 {
-        return Err("独立 CLI 文件不符合升级条件".into());
-    }
-    Ok(sha256(
-        &fs::read(path).map_err(|_| "无法读取独立 CLI 文件")?,
-    ))
+    let (directory, name) = update_files::open(path).map_err(|_| "无法读取独立 CLI 文件")?;
+    hash_at(&directory, name)?.ok_or_else(|| "无法读取独立 CLI 文件".into())
 }
 
-/// Recognize the current CLI, then pin its bytes; installation never accepts a frontend path.
-pub async fn discover(home: &Path, sidecar: &Path, current: &Version) -> Vec<CliTarget> {
-    let binary = if cfg!(windows) {
-        "mcplink.exe"
-    } else {
-        "mcplink"
+/// Recognize existing bytes from the bundled build. Discovery never launches a candidate.
+pub fn discover(home: &Path, sidecar: &Path) -> Vec<CliTarget> {
+    let Ok(trusted_hash) = hash_file(sidecar) else {
+        return Vec::new();
     };
     let mut candidates = BTreeSet::from([
-        home.join(".cargo/bin").join(binary),
-        home.join(".local/bin").join(binary),
+        home.join(".cargo/bin").join(BINARY),
+        home.join(".local/bin").join(BINARY),
     ]);
-    if let Some(path) = std::env::var_os("PATH") {
-        for entry in std::env::split_paths(&path) {
-            if entry.is_absolute() && entry.starts_with(home) {
-                candidates.insert(entry.join(binary));
-            }
-        }
+    if let Some(paths) = std::env::var_os("PATH") {
+        candidates.extend(
+            std::env::split_paths(&paths)
+                .filter(|entry| entry.is_absolute() && entry.starts_with(home))
+                .map(|entry| entry.join(BINARY)),
+        );
     }
     let sidecar = sidecar.canonicalize().ok();
-    let mut targets = Vec::new();
-    for path in candidates {
-        if !regular_in_home(&path, home) || path.canonicalize().ok() == sidecar {
-            continue;
-        }
-        let Ok(before) = hash_file(&path) else {
-            continue;
-        };
-        let mut command = tokio::process::Command::new(&path);
-        command
-            .arg("--version")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true);
-        #[cfg(windows)]
-        command.creation_flags(0x0800_0000);
-        let Ok(mut child) = command.spawn() else {
-            continue;
-        };
-        let probe = async {
-            let mut output = Vec::new();
-            child
-                .stdout
-                .take()?
-                .take(4097)
-                .read_to_end(&mut output)
-                .await
-                .ok()?;
-            let status = child.wait().await.ok()?;
-            Some((status, output))
-        };
-        let Ok(Some((status, output))) = tokio::time::timeout(Duration::from_secs(3), probe).await
-        else {
-            continue;
-        };
-        let version = std::str::from_utf8(&output)
-            .ok()
-            .and_then(|s| s.trim().strip_prefix("mcplink "))
-            .and_then(|s| Version::parse(s).ok());
-        if status.success()
-            && version.as_ref() == Some(current)
-            && hash_file(&path).ok().as_ref() == Some(&before)
-        {
-            targets.push(CliTarget {
+    candidates
+        .into_iter()
+        .filter_map(|path| {
+            let (directory, name) = target_directory(&path, home).ok()?;
+            if path.canonicalize().ok() == sidecar
+                || hash_at(&directory, name).ok().flatten().as_ref() != Some(&trusted_hash)
+            {
+                return None;
+            }
+            Some(CliTarget {
                 path,
-                sha256: before,
-            });
-        }
-    }
-    targets
+                sha256: trusted_hash.clone(),
+            })
+        })
+        .take(MAX_TARGETS)
+        .collect()
+}
+
+fn is_hash(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn valid_target(target: &CliTarget) -> bool {
+    target.path.is_absolute()
+        && target.path.file_name() == Some(OsStr::new(BINARY))
+        && is_hash(&target.sha256)
 }
 
 pub fn validate_targets(targets: &[CliTarget], home: &Path) -> Result<(), String> {
+    if targets.len() > MAX_TARGETS || !targets.iter().all(valid_target) {
+        return Err("升级恢复记录的 CLI 路径或校验值无效".into());
+    }
     for target in targets {
-        if !regular_in_home(&target.path, home) || hash_file(&target.path)? != target.sha256 {
+        let (directory, name) = target_directory(&target.path, home)?;
+        if hash_at(&directory, name)?.as_ref() != Some(&target.sha256) {
             return Err(format!(
                 "独立 CLI 已变化，请重新下载后确认：{}",
                 target.path.display()
@@ -127,26 +127,26 @@ pub fn validate_targets(targets: &[CliTarget], home: &Path) -> Result<(), String
     Ok(())
 }
 
-pub fn private_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
-    let parent = path.parent().ok_or("无法定位升级状态目录")?;
-    fs::create_dir_all(parent).map_err(|_| "无法创建升级状态目录")?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
-            .map_err(|_| "无法保护升级状态目录")?;
-    }
-    let mut file =
-        tempfile::NamedTempFile::new_in(parent).map_err(|_| "无法写入升级状态，请稍后重试")?;
+fn private_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
+    let directory = Directory::ensure(path.parent().ok_or("无法定位升级状态目录")?)
+        .map_err(|_| "无法保护升级状态目录")?;
+    let name = path.file_name().ok_or("无法定位升级状态文件")?;
+    let temporary = format!(".mcplink-state-{}", uuid::Uuid::new_v4());
+    let temporary = OsStr::new(&temporary);
     let bytes = serde_json::to_vec(value).map_err(|_| "升级状态格式无效")?;
-    if file
-        .write_all(&bytes)
-        .and_then(|_| file.as_file().sync_all())
-        .is_err()
-    {
-        return Err("保存升级状态失败".into());
+    if bytes.len() as u64 > RECEIPT_LIMIT {
+        return Err("升级状态过大".into());
     }
-    file.persist(path).map_err(|_| "无法原子保存升级状态")?;
+    let mut file = directory
+        .create(temporary)
+        .map_err(|_| "无法创建升级状态文件")?;
+    let written = file.write_all(&bytes).and_then(|_| file.sync_all());
+    drop(file);
+    let saved = written.and_then(|_| directory.rename(temporary, name, true));
+    if saved.is_err() {
+        let _ = directory.remove(temporary);
+        return Err("无法原子保存升级状态".into());
+    }
     Ok(())
 }
 
@@ -160,38 +160,68 @@ pub fn write_receipt(
     private_json(path, &Receipt { version, targets })
 }
 
-pub fn read_receipt(path: &Path) -> Result<Option<Receipt>, String> {
-    if fs::symlink_metadata(path).is_ok_and(|m| !m.is_file() || m.file_type().is_symlink()) {
-        return Err("升级恢复记录必须是普通文件".into());
+fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, String> {
+    let file = update_files::open(path).and_then(|(directory, name)| directory.open_file(name));
+    let file = match file {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("升级恢复记录必须是普通文件".into()),
+    };
+    let mut bytes = Vec::new();
+    file.take(RECEIPT_LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "无法读取升级恢复记录")?;
+    if bytes.len() as u64 > RECEIPT_LIMIT {
+        return Err("升级恢复记录过大".into());
     }
-    match fs::read(path) {
-        Ok(bytes) if bytes.len() <= 64 * 1024 => {
-            let receipt: Receipt =
-                serde_json::from_slice(&bytes).map_err(|_| "升级恢复记录损坏，请检查独立 CLI")?;
-            if receipt.targets.len() > 32
-                || receipt.targets.iter().any(|t| {
-                    !t.path.is_absolute()
-                        || t.path.file_name().and_then(|n| n.to_str())
-                            != Some(if cfg!(windows) {
-                                "mcplink.exe"
-                            } else {
-                                "mcplink"
-                            })
-                        || t.sha256.len() != 64
-                        || !t.sha256.bytes().all(|b| b.is_ascii_hexdigit())
-                })
-            {
-                return Err("升级恢复记录的 CLI 路径或校验值无效".into());
-            }
-            Ok(Some(receipt))
-        }
-        Ok(_) => Err("升级恢复记录过大".into()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(_) => Err("无法读取升级恢复记录".into()),
-    }
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|_| "升级恢复记录损坏，请检查独立 CLI".into())
 }
 
-/// Idempotent first-start synchronization. Unknown or edited files are always preserved.
+pub fn read_receipt(path: &Path) -> Result<Option<Receipt>, String> {
+    let value: Option<Receipt> = read_json(path)?;
+    if value.as_ref().is_some_and(|receipt| {
+        receipt.targets.len() > MAX_TARGETS || !receipt.targets.iter().all(valid_target)
+    }) {
+        return Err("升级恢复记录的 CLI 路径或校验值无效".into());
+    }
+    Ok(value)
+}
+
+/// Keep an abandoned receipt available for inspection without retrying its CLI changes.
+pub fn archive_stale_receipt(path: &Path, current: &Version) -> Result<(), String> {
+    if read_receipt(path)?.is_none_or(|receipt| receipt.version == *current) {
+        return Err("没有需要清除的旧版升级记录".into());
+    }
+    let (directory, name) = update_files::open(path).map_err(|_| "无法定位升级状态文件")?;
+    let archive = format!("pending-abandoned-{}.json", uuid::Uuid::new_v4());
+    directory
+        .rename(name, OsStr::new(&archive), false)
+        .map_err(|_| "无法归档旧版升级记录".into())
+}
+
+fn stage_cli(directory: &Directory, stage: &OsStr, sidecar: &mut File) -> io::Result<()> {
+    let mut file = directory.create(stage)?;
+    let result = (|| {
+        sidecar.seek(SeekFrom::Start(0))?;
+        if io::copy(&mut sidecar.take(BINARY_LIMIT + 1), &mut file)? > BINARY_LIMIT {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "CLI is too large",
+            ));
+        }
+        file.set_permissions(sidecar.metadata()?.permissions())?;
+        file.sync_all()
+    })();
+    drop(file);
+    if result.is_err() {
+        let _ = directory.remove(stage);
+    }
+    result
+}
+
+/// Idempotent first-start synchronization. Each rename stays in the validated directory.
 pub fn apply_receipt(
     path: &Path,
     home: &Path,
@@ -205,108 +235,61 @@ pub fn apply_receipt(
     if &receipt.version != current {
         return Err("上次升级尚未完成，独立 CLI 保持原样；请重新检查更新".into());
     }
-    let new_hash = hash_file(sidecar)?;
+    let (directory, name) = update_files::open(sidecar).map_err(|_| "无法定位应用 CLI")?;
+    let mut sidecar = directory.open_file(name).map_err(|_| "无法读取应用 CLI")?;
+    let new_hash = hash_open(&mut sidecar).map_err(|_| "应用 CLI 文件不符合升级条件")?;
     let mut backups = Vec::new();
-    for target in &receipt.targets {
-        let name = target
-            .path
-            .file_name()
-            .ok_or("独立 CLI 路径无效")?
-            .to_string_lossy();
-        let stage = target
-            .path
-            .with_file_name(format!(".{name}.mcplink-update-{}", receipt.version));
-        let backup = target
-            .path
-            .with_file_name(format!(".{name}.mcplink-backup-{}", &target.sha256[..16]));
-        if fs::symlink_metadata(&target.path)
-            .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
-            && regular_in_home(&backup, home)
-            && hash_file(&backup)? == target.sha256
-        {
-            fs::rename(&backup, &target.path)
+    for target in receipt.targets {
+        let (directory, name) = target_directory(&target.path, home)?;
+        let stage_name = format!(".{BINARY}.mcplink-update-{}", receipt.version);
+        let backup_name = format!(".{BINARY}.mcplink-backup-{}", &target.sha256[..16]);
+        let stage = OsStr::new(&stage_name);
+        let backup = OsStr::new(&backup_name);
+        let existing_backup = hash_at(&directory, backup)?;
+        let mut existing = hash_at(&directory, name)?;
+        if existing.is_none() && existing_backup.as_ref() == Some(&target.sha256) {
+            directory
+                .rename(backup, name, false)
                 .map_err(|_| "未能恢复上次中断的独立 CLI，请检查文件权限")?;
+            existing = hash_at(&directory, name)?;
         }
-        if !regular_in_home(&target.path, home) {
-            return Err("独立 CLI 位置已变化，已保留原文件".into());
-        }
-        let old_hash = hash_file(&target.path)?;
-        if old_hash == new_hash {
-            if regular_in_home(&backup, home)
-                && hash_file(&backup).ok().as_ref() == Some(&target.sha256)
-                && fs::remove_file(&backup).is_err()
-            {
-                backups.push(CliTarget {
-                    path: backup,
-                    sha256: target.sha256.clone(),
-                });
+        if existing.as_ref() != Some(&new_hash) {
+            if existing.as_ref() != Some(&target.sha256) {
+                return Err("独立 CLI 已被修改，已保留原文件；请手动同步或重试".into());
             }
-            continue;
-        }
-        if old_hash != target.sha256 {
-            return Err("独立 CLI 已被修改，已保留原文件；请手动同步或重试".into());
-        }
-        if fs::symlink_metadata(&stage).is_ok() {
-            if regular_in_home(&stage, home) && hash_file(&stage)? == new_hash {
-                fs::remove_file(&stage).map_err(|_| "无法清理已校验的 CLI 临时文件")?;
-            } else {
-                return Err(format!(
-                    "CLI 临时文件未通过校验，已保留原程序。请检查并移除 {} 后重试",
-                    stage.display()
-                ));
+            if let Some(hash) = hash_at(&directory, stage)? {
+                if hash != new_hash {
+                    return Err("CLI 临时文件未通过校验，已保留原程序".into());
+                }
+                directory
+                    .remove(stage)
+                    .map_err(|_| "无法清理已校验的 CLI 临时文件")?;
+            }
+            if hash_at(&directory, backup)?.is_some() {
+                return Err("CLI 回滚文件仍在使用，请检查后重试".into());
+            }
+            stage_cli(&directory, stage, &mut sidecar)
+                .map_err(|_| "独立 CLI 复制失败，原文件已保留")?;
+            if hash_at(&directory, stage)?.as_ref() != Some(&new_hash) {
+                let _ = directory.remove(stage);
+                return Err("独立 CLI 复制或校验失败，原文件已保留".into());
+            }
+            directory.rename(name, backup, false).map_err(|error| {
+                format!("独立 CLI 正被使用或没有写入权限，请停止相关 Agent 后重试（{error}）")
+            })?;
+            let backed_up =
+                hash_at(&directory, backup).is_ok_and(|hash| hash.as_ref() == Some(&target.sha256));
+            if !backed_up || directory.rename(stage, name, false).is_err() {
+                let _ = directory.rename(backup, name, false);
+                return Err("独立 CLI 替换失败，请核对原文件与回滚文件后重试".into());
             }
         }
-        if fs::symlink_metadata(&backup).is_ok() {
-            return Err(format!(
-                "CLI 回滚文件仍在使用，请检查 {} 后重试",
-                backup.display()
-            ));
-        }
-        let mut options = fs::OpenOptions::new();
-        options.create_new(true).write(true);
-        let mut file = options
-            .open(&stage)
-            .map_err(|_| "无法创建独立 CLI 升级文件")?;
-        let copied = fs::File::open(sidecar)
-            .and_then(|mut input| std::io::copy(&mut input, &mut file))
-            .and_then(|_| file.sync_all());
-        drop(file);
-        if copied.is_err()
-            || fs::set_permissions(
-                &stage,
-                fs::metadata(sidecar)
-                    .map_err(|_| "无法读取新 CLI 权限")?
-                    .permissions(),
-            )
-            .is_err()
+        if hash_at(&directory, backup).ok().flatten().as_ref() == Some(&target.sha256)
+            && directory.remove(backup).is_err()
         {
-            let _ = fs::remove_file(&stage);
-            return Err("独立 CLI 复制失败，原文件已保留".into());
-        }
-        if hash_file(&stage)? != new_hash || hash_file(&target.path)? != old_hash {
-            let _ = fs::remove_file(&stage);
-            return Err("独立 CLI 在升级时变化，未替换原文件".into());
-        }
-        if fs::rename(&target.path, &backup).is_err() {
-            let _ = fs::remove_file(&stage);
-            return Err("独立 CLI 正被使用或没有写入权限，请停止相关 Agent 后重试".into());
-        }
-        if fs::rename(&stage, &target.path).is_err() {
-            let restored = fs::rename(&backup, &target.path).is_ok();
-            let _ = fs::remove_file(&stage);
-            return Err(if restored {
-                "独立 CLI 替换失败，已恢复原文件".into()
-            } else {
-                format!(
-                    "独立 CLI 替换失败，原程序保存在 {}；请恢复后重试",
-                    backup.display()
-                )
-            });
-        }
-        if fs::remove_file(&backup).is_err() {
             backups.push(CliTarget {
-                path: backup,
-                sha256: old_hash,
+                path: target.path.with_file_name(backup),
+                sha256: target.sha256,
             });
         }
     }
@@ -318,30 +301,33 @@ pub fn apply_receipt(
 
 fn cleanup_backups(receipt: &Path, home: &Path) {
     let path = receipt.with_file_name("cli-backups.json");
-    let Ok(bytes) = fs::read(&path) else {
+    let Ok(Some(targets)) = read_json::<Vec<CliTarget>>(&path) else {
         return;
     };
-    if bytes.len() > 64 * 1024 {
+    if targets.len() > MAX_TARGETS {
         return;
     }
-    let Ok(targets) = serde_json::from_slice::<Vec<CliTarget>>(&bytes) else {
-        return;
-    };
     let remaining: Vec<_> = targets
         .into_iter()
         .filter(|target| {
-            target
-                .path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with(".mcplink") && n.contains(".mcplink-backup-"))
-                && regular_in_home(&target.path, home)
-                && hash_file(&target.path).ok().as_ref() == Some(&target.sha256)
-                && fs::remove_file(&target.path).is_err()
+            if !is_hash(&target.sha256) {
+                return false;
+            }
+            let expected = format!(".{BINARY}.mcplink-backup-{}", &target.sha256[..16]);
+            if target.path.file_name() != Some(OsStr::new(&expected)) {
+                return false;
+            }
+            let Ok((directory, name)) = target_directory(&target.path, home) else {
+                return false;
+            };
+            hash_at(&directory, name).ok().flatten().as_ref() == Some(&target.sha256)
+                && directory.remove(name).is_err()
         })
         .collect();
     if remaining.is_empty() {
-        let _ = fs::remove_file(&path);
+        if let Ok((directory, name)) = update_files::open(&path) {
+            let _ = directory.remove(name);
+        }
     } else {
         let _ = private_json(&path, &remaining);
     }

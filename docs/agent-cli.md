@@ -8,7 +8,7 @@ MCP 转 CLI 是 mcplink 的核心能力之一：从工具 Schema 发现参数，
 
 `mcplink` CLI 与桌面使用同一个管理核心、后台、系统凭据库和配置事务。命令不启动桌面或浏览器；后台在首次管理调用时按需启动。`schema` 和 `skill` 离线可用。
 
-客户端与来源支持范围见[Agent 兼容矩阵](agent-discovery.md)。原生文件写入需要客户端已安装，当前源码 management API 为 23；HTTP API 新映射和凭据迁移要求 API 23，CLI 契约诊断要求 API 22。早期 0.3.2 发布包为 API 22；桌面、CLI 和后台应使用同一构建。管理 Skill 的复制安装目标另见下文。
+客户端与来源支持范围见[Agent 兼容矩阵](agent-discovery.md)。原生文件写入需要客户端已安装。当前源码使用 management API 24，桌面、CLI、Bridge 和后台应使用同一构建。升级前请用旧版本退出后台。管理 Skill 的复制安装目标另见下文。
 
 ## 安装与发现
 
@@ -51,7 +51,7 @@ Cargo 默认将程序放入 `~/.cargo/bin`，该目录需在 PATH 中。也可�
 
 `mcplink schema` 提供版本化 JSON，包括命令树、参数、允许值、stdin 对象字段、输出和退出码。每条命令也支持 `--help`。
 
-可用全局 `--data-dir /absolute/path` 或 `MCPLINK_DATA_DIR` 指定管理数据。`CODEX_HOME`、`HERMES_HOME` 决定默认原生配置来源；自定义项目/profile 用 `sources add` 显式添加。`MCPLINK_HOME`、`MCPLINK_VAULT=fixture` 是隔离验收环境约定，不应在真实账号环境启用 fixture Vault。
+可用全局 `--data-dir /absolute/path` 或 `MCPLINK_DATA_DIR` 指定管理数据。`CODEX_HOME`、`HERMES_HOME` 决定默认原生配置来源，自定义项目/profile 用 `sources add` 显式添加。隔离验收构建可在带标记的 `MCPLINK_HOME` 下使用 `MCPLINK_VAULT=fixture`。常规构建使用系统凭据库。
 
 macOS 可用全局 `--no-auth-ui` 禁止本进程显示钥匙串授权弹窗，未获授权时直接失败；按需启动的后台也沿用该限制。桌面、Bridge 和 daemon 默认禁止交互，避免巡检或恢复自动弹出口令框。固定助手的普通读写同样始终禁止交互。它不授予访问权限、不放宽钥匙串 ACL 或保存密钥。已有授权后的无交互验收可用 `mcplink --no-auth-ui status`。
 
@@ -79,9 +79,9 @@ macOS 可用全局 `--no-auth-ui` 禁止本进程显示钥匙串授权弹窗，�
 | `credentials login ID` | 返回 OAuth URL 和过期时间，不打开浏览器。 |
 | `credentials oauth-config ID --stdin` | 配置预注册 OAuth 应用、scope 与回调端口，不启动登录。 |
 | `changes preview --connection ID --target SOURCE_ID [--mode direct\|shared] [--action ACTION]` | 生成 10 分钟有效的脱敏计划，不写原生配置。两个标志都可重复。 |
-| `changes apply PLAN_ID` | 应用指定计划，检查修订与文件哈希，逐目标报告结果。 |
+| `changes apply PLAN_ID` | 应用 10 分钟内的预览，检查修订和文件哈希，逐目标报告。完成后用同一 ID 重查结果。 |
 | `changes reconcile` | 核对已写入但尚未完成记账的记录，返回仍待核对的数量，不重写配置文件。 |
-| `changes history [--before CURSOR]` / `changes restore OPERATION_ID` | 每页最多 25 条，用末项 cursor 读取更早记录；按操作 ID 恢复。 |
+| `changes history [--before CURSOR]` / `changes restore OPERATION_ID` | 每页最多 25 条，用末项 cursor 读取更早记录。按操作 ID 恢复条目。 |
 | `gateway status` / `gateway pause` / `gateway resume` / `gateway stop` | 查看或切换共享状态，或等待当前后台清理退出。 |
 | `gateway list` / `gateway save --stdin` | 查看或保存聚合入口的成员服务引用；不复制账号授权。 |
 | `mcp describe ID` / `mcp request ID --stdin` | 查看上游能力，或派发一条协议请求，不自动重试。 |
@@ -99,9 +99,11 @@ Claude Code 支持可写 user，以及显式添加的 local/project 作用域；
 
 此路径使用 Claude 的原生配置入口和插件目录结构；配置位置与插件格式参照 [Claude MCP 文档](https://code.claude.com/docs/en/mcp) 和 [插件清单文档](https://code.claude.com/docs/en/plugins-reference)。
 
+完整原生文件备份保存在当前数据目录的 `backups/OPERATION_ID.config`，通常保留 30 天。历史中的 `backupRetained` 和 `backupExpiresAt` 显示登记状态及到期时间，内容从本机文件查看。还在待核对的操作可用 `changes reconcile` 重查，备份保留到状态确定。按操作 ID 恢复使用独立的系统凭据库快照，整文件备份到期后仍可按历史恢复条目。
+
 ## 标准输入
 
-编辑已有连接时，取 `connections show ID` 返回的 `definition`，连同其中的 `editVersion` 提交。带路径或参数的地址使用保留标记，启动参数按原编号显示为 `••••••••[1]` 等引用。可以移动引用、删除参数或填写新值。后台按读取时的连接与版本还原，版本过期须重新读取。完整的新定义可以直接通过 stdin 传入。
+每次保存已有连接都须提交 `connections show ID` 返回的 `definition.editVersion`，改名称或账号标签也须携带。同一连接的带路径或参数地址显示为保留标记，启动参数按原编号显示为 `••••••••[1]` 等引用。后台核对版本后还原这些值。更改启动命令、参数或工作目录时，请重新填写保留的启动参数和需要使用的环境变量。版本过期须重新读取。完整的新定义可直接通过 stdin 传入。
 
 标准输入必须是一条 UTF-8 JSON 对象，最多 8 MiB，传完后关闭管道。凭据及可能含凭据的完整定义经 stdin 传入，不使用 argv、Shell 字面量、临时凭据文件或日志。
 
@@ -218,13 +220,19 @@ mcplink cli rebind ./notes-cli/notes.mcplink.json --connection LOCAL_CONNECTION_
 
 `gateway stop` 需要 management API 11，等待上游进程树清理和后台运行锁释放；后台原本未运行时直接成功，不启动后台或创建数据目录。它不改变持久化的暂停偏好，后续 Agent 调用仍可按需启动后台。桌面仍在运行时也会通过巡检恢复后台；需要停止并退出应用时使用桌面菜单。持续阻止共享调用请使用 `gateway pause`。退出进行中的调用会报告结果待核对，不自动重试。
 
+托管 HTTPS 服务需要访问内网时，在 `connections save` 的 `definition.privateNetworkOrigin` 填写该连接的准确 HTTPS 来源，例如 `https://api.corp.example:8443`。桌面编辑器也可确认显示的来源。明确配置的 loopback 服务可用 HTTP。后台管理端口、链路本地地址和保留地址禁止用作共享上游。
+
 ## OAuth 客户端配置
 
 `credentials oauth-config ID --stdin` 接受部分更新对象，可选 `clientId`、`clientSecret`、`scopes`（字符串数组）和 `callbackPort`（1–65535）。省略字段保留原值；`clientId`、`clientSecret`、`callbackPort` 可用 `null` 清除。机密的 `••••••••` 掩码表示保留已存值。`scopes: []` 使用服务建议的 scope，回调端口留空自动分配，回调路径为 `/callback`。
 
 使用你有权使用的注册应用和权限。机密经 stdin 传入系统凭据库，管理输出只返回掩码；不将机密写入命令参数或文件。配置完成后运行 `credentials login ID`，由用户打开返回的 URL 同意授权，再运行 `connections probe ID`。支持 DCR 的上游可不提供预注册应用；不支持 DCR 的上游须先配置 Client ID 及其要求的客户端机密。机密客户端的 `client_secret_basic` / `client_secret_post` 按发现的元数据选择。
 
-配置本身保留当前 Token/OAuth 模式。更改已有 OAuth 的端点、应用身份、机密、scope 或回调配置会使旧 grant 失效，须重新授权。授权发现、注册或回调监听准备失败时保留原认证；返回授权 URL 后进入新的授权会话。含托管 OAuth 参数的连接使用共享入口，不能直接转换为原生 Agent 配置。
+配置本身保留当前 Token/OAuth 模式。更改已有 OAuth 的端点、应用身份、机密、scope 或回调配置会使旧 grant 失效，须重新授权。授权发现、注册或回调监听准备失败时保留原认证。返回授权 URL 后进入新的授权会话。客户端机密或范围无法等价写入原生设置时使用共享入口。
+
+临时网络或上游故障会保留已存的 grant。若连接显示需要认证，可先运行 `mcplink connections probe ID` 重新核验已有授权，桌面可使用「检查连接」或「检查工具」。核验仍返回认证失败时，再按上游流程登录。
+
+同一连接再次运行 `credentials login ID` 会取消前次等待授权，并可复用配置的回调端口。变更连接定义、更新凭据、断开或停止后台也会取消相关授权。网络准备和换令牌期间可以管理其他连接。
 
 不支持 DCR 的上游需要预注册应用及其要求的客户端认证。业务权限来自上游与应用注册，scope 按实际契约选择，不能把资源端建议的 scope 当作已获权限。协议和认证限制见[兼容说明](compatibility.md)。
 
@@ -284,6 +292,7 @@ OAuth 的最终同意可能要求用户交互，系统凭据库首次访问也�
 
 ```sh
 npm run check
+node scripts/prepare-sidecar.mjs --debug --test-fixtures
 python3 tests/e2e/agent_cli.py --record artifacts/e2e/agent-cli/local-run
 python3 tests/e2e/run.py
 python3 tests/e2e/claude_sources.py --record artifacts/e2e/claude/local-run

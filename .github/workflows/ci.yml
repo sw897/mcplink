@@ -1,30 +1,54 @@
 name: Build and isolated acceptance
+run-name: ${{ inputs.windows_native_fault && inputs.windows_native_fault != 'none' && format('Windows native gates ({0})', inputs.windows_native_fault) || '' }}
 
 on:
   push:
     branches: ["**"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      windows_native_fault:
+        description: Windows fixture fault on the release-acceptance branch
+        type: choice
+        default: none
+        options: [none, acl-failure, missing-nsis]
 
 permissions:
   contents: read
   actions: read
 
 concurrency:
-  group: acceptance-${{ github.workflow }}-${{ github.ref }}
+  group: acceptance-${{ github.workflow }}-${{ github.ref }}-${{ inputs.windows_native_fault || 'none' }}
   cancel-in-progress: true
 
 jobs:
   build:
+    name: >-
+      ${{ inputs.windows_native_fault && inputs.windows_native_fault != 'none'
+        && format('Windows native diagnostics ({0})', inputs.windows_native_fault)
+        || format('build ({0})', matrix.os) }}
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, windows-2025]
+        os: ${{ fromJSON(inputs.windows_native_fault && inputs.windows_native_fault != 'none' && '["windows-2025"]' || '["macos-15","windows-2025"]') }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: ${{ matrix.os == 'windows-2025' && 75 || 60 }}
     env:
       PYTHONUTF8: "1"
+      WINDOWS_NATIVE_GATES: >-
+        ${{ matrix.os == 'windows-2025'
+          && (!inputs.windows_native_fault || inputs.windows_native_fault == 'none'
+            || (github.event_name == 'workflow_dispatch' && github.repository == 'sw897/mcplink'
+              && startsWith(github.ref, 'refs/heads/codex/release-acceptance-'))) }}
+      WINDOWS_NATIVE_RECORD: artifacts/e2e/ci-windows-native
+      WINDOWS_NATIVE_FAULT: ${{ inputs.windows_native_fault || 'none' }}
     steps:
+      - name: Validate Windows diagnostic scope
+        if: env.WINDOWS_NATIVE_FAULT != 'none' && env.WINDOWS_NATIVE_GATES != 'true'
+        shell: pwsh
+        run: |
+          Write-Error "Windows fixture faults require a manual run on a release-acceptance branch in sw897/mcplink"
+          exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -52,14 +76,80 @@ jobs:
           restore-keys: |
             rust-v1-${{ runner.os }}-${{ runner.arch }}-
       - run: npm ci
+        id: npm_install
       - name: Frontend build and development server acceptance
         timeout-minutes: 3
         run: python -u tests/e2e/frontend.py --record artifacts/e2e/ci-frontend
       - run: npm run check
+        id: workspace_check
+      - name: Preserve the default Windows CLI for native migration
+        if: env.WINDOWS_NATIVE_GATES == 'true' && steps.workspace_check.outcome == 'success'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path "$env:WINDOWS_NATIVE_RECORD/default" -Force | Out-Null
+          Copy-Item target/debug/mcplink.exe "$env:WINDOWS_NATIVE_RECORD/default/mcplink.exe"
+      - name: Rust workspace tests
+        run: cargo test --workspace --locked
+      - name: Build isolated fixture CLI
+        id: fixture_cli
+        if: ${{ !cancelled() && (success() || (env.WINDOWS_NATIVE_GATES == 'true' && steps.npm_install.outcome == 'success')) }}
+        run: node scripts/prepare-sidecar.mjs --debug --test-fixtures
+      - name: Preserve the Windows fixture CLI for native ACL
+        if: ${{ !cancelled() && env.WINDOWS_NATIVE_GATES == 'true' && steps.fixture_cli.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path "$env:WINDOWS_NATIVE_RECORD/fixture" -Force | Out-Null
+          Copy-Item target/debug/mcplink.exe "$env:WINDOWS_NATIVE_RECORD/fixture/mcplink.exe"
+      - name: Windows native NTFS ACL
+        if: ${{ !cancelled() && env.WINDOWS_NATIVE_GATES == 'true' }}
+        timeout-minutes: 5
+        run: python -u tests/e2e/windows_native_gates.py acl --record "$env:WINDOWS_NATIVE_RECORD" --fault "$env:WINDOWS_NATIVE_FAULT"
+      - name: Download pinned public Windows release baseline
+        if: ${{ !cancelled() && env.WINDOWS_NATIVE_GATES == 'true' }}
+        timeout-minutes: 4
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python -u tests/e2e/windows_native_gates.py download-baseline --record "$env:WINDOWS_NATIVE_RECORD"
+      - name: Windows Credential Manager migration
+        if: ${{ !cancelled() && env.WINDOWS_NATIVE_GATES == 'true' }}
+        timeout-minutes: 5
+        run: python -u tests/e2e/windows_native_gates.py credentials --record "$env:WINDOWS_NATIVE_RECORD"
+      - name: Cache Windows bundler downloads
+        if: ${{ !cancelled() && runner.os == 'Windows' && env.WINDOWS_NATIVE_FAULT != 'missing-nsis' && (success() || env.WINDOWS_NATIVE_GATES == 'true') }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/AppData/Local/tauri/mcplink-downloads
+          key: windows-bundler-v1-${{ hashFiles('package-lock.json', 'scripts/prepare_windows_bundler.py') }}
+      - name: Prepare verified Windows bundler tools
+        id: windows_bundler_tools
+        if: ${{ !cancelled() && runner.os == 'Windows' && env.WINDOWS_NATIVE_FAULT != 'missing-nsis' && (success() || env.WINDOWS_NATIVE_GATES == 'true') }}
+        timeout-minutes: 6
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python -u scripts/prepare_windows_bundler.py
+      - name: Build the Windows candidate NSIS once
+        if: >-
+          !cancelled() && env.WINDOWS_NATIVE_GATES == 'true' && env.WINDOWS_NATIVE_FAULT != 'missing-nsis'
+          && steps.npm_install.outcome == 'success' && steps.windows_bundler_tools.outcome == 'success'
+        timeout-minutes: 25
+        shell: pwsh
+        env:
+          MCPLINK_WINDOWS_SIGNING: "0"
+        run: |
+          npm run bundle
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -u tests/e2e/windows_native_gates.py candidate --record "$env:WINDOWS_NATIVE_RECORD"
+      - name: Windows native NSIS overlay
+        if: ${{ !cancelled() && env.WINDOWS_NATIVE_GATES == 'true' }}
+        timeout-minutes: 8
+        run: python -u tests/e2e/windows_native_gates.py nsis --record "$env:WINDOWS_NATIVE_RECORD"
+      - name: Summarize Windows native release gates
+        if: ${{ !cancelled() && env.WINDOWS_NATIVE_GATES == 'true' }}
+        run: python -u tests/e2e/windows_native_gates.py summary --record "$env:WINDOWS_NATIVE_RECORD" --fault "$env:WINDOWS_NATIVE_FAULT"
       - name: Process-local authentication and Bridge recovery
         timeout-minutes: 3
         run: |
-          cargo build --locked -p mcplink-core --example runtime_session
+          cargo build --locked -p mcplink-core --features test-fixtures --example runtime_session
           python -u tests/e2e/runtime_session.py --record artifacts/e2e/ci-runtime-session
       - name: Fixed macOS credential helper and caller identity boundaries
         if: runner.os == 'macOS'
@@ -67,19 +157,24 @@ jobs:
         run: |
           cargo build --locked -p mcplink-desktop --example updater_contract
           python -u tests/e2e/macos_keychain.py --record artifacts/e2e/ci-macos-keychain --github-hosted-keychain-default
-      - name: Cache Windows bundler downloads
-        if: runner.os == 'Windows'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/AppData/Local/tauri/mcplink-downloads
-          key: windows-bundler-v1-${{ hashFiles('package-lock.json', 'scripts/prepare_windows_bundler.py') }}
-      - name: Prepare verified Windows bundler tools
-        if: runner.os == 'Windows'
-        timeout-minutes: 6
+      - name: Windows configuration recovery before packaging
+        if: runner.os == 'Windows' && github.repository == 'sw897/mcplink' && startsWith(github.ref, 'refs/heads/codex/release-acceptance-')
+        timeout-minutes: 5
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: python -u scripts/prepare_windows_bundler.py
-      - run: npm run bundle
+          MCPLINK_E2E_BINARY: target/debug/mcplink.exe
+        run: python -u tests/e2e/config_integrity.py --record artifacts/e2e/ci-windows-storage-preflight
+      - name: Windows remote transports before packaging
+        if: runner.os == 'Windows' && github.repository == 'sw897/mcplink' && startsWith(github.ref, 'refs/heads/codex/release-acceptance-')
+        timeout-minutes: 5
+        env:
+          MCPLINK_E2E_BINARY: target/debug/mcplink.exe
+        run: python -u tests/e2e/remote_transports.py --record artifacts/e2e/ci-windows-remote-preflight
+      - name: Windows updater recovery before packaging
+        if: runner.os == 'Windows' && github.repository == 'sw897/mcplink' && startsWith(github.ref, 'refs/heads/codex/release-acceptance-')
+        timeout-minutes: 8
+        run: python -u tests/e2e/updater.py --record artifacts/e2e/ci-windows-updater-preflight
+      - name: Build isolated installer for native acceptance
+        run: npm run bundle -- --test-fixtures
       - name: Find a previous successful installer for upgrade acceptance
         env:
           GH_TOKEN: ${{ github.token }}
@@ -94,10 +189,11 @@ jobs:
         run: |
           import os
           from pathlib import Path
-          binary = Path.cwd() / ("target/release/mcplink.exe" if os.name == "nt" else "target/release/bundle/macos/mcplink.app/Contents/MacOS/mcplink")
+          root = Path.cwd() / "target/fixture-bundle/release"
+          binary = root / ("mcplink.exe" if os.name == "nt" else "bundle/macos/mcplink.app/Contents/MacOS/mcplink")
           assert binary.is_file(), binary
           version = __import__('json').loads(Path('package.json').read_text())['version']
-          installers = list(Path('target/release/bundle').rglob('*setup.exe' if os.name == 'nt' else '*.dmg'))
+          installers = list((root / 'bundle').rglob('*setup.exe' if os.name == 'nt' else '*.dmg'))
           assert len(installers) == 1 and f'_{version}_' in installers[0].name, 'Stale or ambiguous installer output'
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
               output.write(f"MCPLINK_E2E_BINARY={binary}\n")
@@ -109,7 +205,7 @@ jobs:
           import json, subprocess, sys
           from pathlib import Path
           version = json.loads(Path('package.json').read_text())['version']
-          installer = next(Path('target/release/bundle/nsis').glob(f'*_{version}_*setup.exe'))
+          installer = next(Path('target/fixture-bundle/release/bundle/nsis').glob(f'*_{version}_*setup.exe'))
           subprocess.run([sys.executable, '-u', 'tests/e2e/windows_desktop.py', '--installer', str(installer), '--record', 'artifacts/e2e/ci-windows-native-desktop'], check=True)
       - name: Configuration integrity and recovery
         timeout-minutes: 5
@@ -137,7 +233,9 @@ jobs:
               driver.chmod(driver.stat().st_mode | 0o111)
           subprocess.run([str(driver.resolve()), '--version'], check=True)
           subprocess.run(['node', '--version'], check=True)
-          subprocess.run([sys.executable, '-u', 'tests/e2e/desktop_ui.py', '--record', 'artifacts/e2e/ci-renderer', '--session', 'mcplink-ci-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}', '--chrome', str(chrome), '--browser-driver', str(driver.resolve())], check=True)
+          renderer = [sys.executable, '-u', 'tests/e2e/desktop_ui.py', '--session', 'mcplink-ci-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}', '--chrome', str(chrome), '--browser-driver', str(driver.resolve())]
+          subprocess.run([*renderer, '--record', 'artifacts/e2e/ci-renderer'], check=True)
+          subprocess.run([*renderer, '--record', 'artifacts/e2e/ci-renderer-import', '--import-only'], check=True)
       - name: Restore project Node runtime
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
@@ -267,7 +365,7 @@ jobs:
           import os, subprocess, sys
           from pathlib import Path
           version = __import__('json').loads(Path('package.json').read_text())['version']
-          installer = next(Path('target/release/bundle/nsis').glob(f'*_{version}_*setup.exe'))
+          installer = next(Path('target/fixture-bundle/release/bundle/nsis').glob(f'*_{version}_*setup.exe'))
           previous = os.environ.get('MCPLINK_PREVIOUS_INSTALLER')
           subprocess.run([sys.executable, '-u', 'tests/e2e/windows_installer.py', '--installer', str(installer), '--record', 'artifacts/e2e/ci-windows-installed', *(['--previous-installer', previous] if previous else [])], check=True)
       - name: Daemon exit and process cleanup acceptance
@@ -277,9 +375,13 @@ jobs:
         timeout-minutes: 8
         run: python -u tests/e2e/updater.py --record artifacts/e2e/ci-updater
       - name: Windows preview release entry point
-        if: runner.os == 'Windows'
-        timeout-minutes: 12
-        run: npm run release:windows
+        if: env.WINDOWS_NATIVE_GATES == 'true'
+        timeout-minutes: 25
+        run: npm run release:windows -- --ci-prebuilt
+      - name: Installed Windows authentication and MCP smoke
+        if: env.WINDOWS_NATIVE_GATES == 'true'
+        timeout-minutes: 8
+        run: python -u tests/e2e/windows_native_gates.py installed-mcp --record "$env:WINDOWS_NATIVE_RECORD"
       - name: Curate public Windows distribution files
         if: runner.os == 'Windows'
         shell: python {0}
@@ -293,14 +395,17 @@ jobs:
       - name: macOS DMG acceptance
         if: runner.os == 'macOS'
         run: |
+          python3 tests/e2e/installed_app.py --dmg "target/fixture-bundle/release/bundle/dmg/mcplink_$(node -p 'require("./package.json").version')_aarch64.dmg" --record artifacts/e2e/ci-installed
+          npm run bundle
           python3 tests/e2e/verify_package.py --record artifacts/e2e/ci-package
-          python3 tests/e2e/installed_app.py --record artifacts/e2e/ci-installed
+          python3 tests/e2e/release_vault.py --binary target/release/bundle/macos/mcplink.app/Contents/MacOS/mcplink --record artifacts/e2e/ci-release-vault
+          python3 tests/e2e/release_vault.py --binary target/release/mcplink --record artifacts/e2e/ci-standalone-vault
       - name: Record source baseline
         shell: bash
         run: |
           suffix=""
           if [[ "$RUNNER_OS" == "Windows" ]]; then suffix=".exe"; fi
-          python scripts/release_manifest.py --require-clean --record artifacts/build/source --binary "target/release/mcplink${suffix}" --binary "target/release/mcplink-desktop${suffix}"
+          python scripts/release_manifest.py --require-clean --without-fixture-vault --record artifacts/build/source --binary "target/release/mcplink${suffix}" --binary "target/release/mcplink-desktop${suffix}"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: packages-${{ matrix.os }}
@@ -313,6 +418,11 @@ jobs:
 
 
   public-source:
+    name: >-
+      ${{ inputs.windows_native_fault && inputs.windows_native_fault != 'none'
+        && format('Windows native diagnostics ({0}, source audit skipped)', inputs.windows_native_fault)
+        || 'public-source' }}
+    if: ${{ !inputs.windows_native_fault || inputs.windows_native_fault == 'none' }}
     runs-on: macos-15-intel
     timeout-minutes: 15
     steps:

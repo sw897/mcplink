@@ -10,8 +10,9 @@ using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
 public static class McplinkWindow {
-  private delegate bool ChildCallback(IntPtr hwnd, IntPtr data);
-  [DllImport("user32.dll")] private static extern bool EnumChildWindows(IntPtr hwnd, ChildCallback callback, IntPtr data);
+  private delegate bool WindowCallback(IntPtr hwnd, IntPtr data);
+  [DllImport("user32.dll")] private static extern bool EnumWindows(WindowCallback callback, IntPtr data);
+  [DllImport("user32.dll")] private static extern bool EnumChildWindows(IntPtr hwnd, WindowCallback callback, IntPtr data);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetClassName(IntPtr hwnd, StringBuilder name, int count);
   [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint process);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
@@ -22,6 +23,22 @@ public static class McplinkWindow {
     var name = new StringBuilder(256);
     GetClassName(hwnd, name, name.Capacity);
     return name.ToString();
+  }
+  public static IntPtr VisibleHost(uint owner) {
+    var host = IntPtr.Zero;
+    EnumWindows(delegate(IntPtr hwnd, IntPtr data) {
+      uint process;
+      GetWindowThreadProcessId(hwnd, out process);
+      if (process == owner && IsWindowVisible(hwnd)) {
+        var name = ClassName(hwnd);
+        if (name == "Tauri Window" || name == "Tao Window") {
+          host = hwnd;
+          return false;
+        }
+      }
+      return true;
+    }, IntPtr.Zero);
+    return host;
   }
   public static IntPtr[] Candidates(IntPtr host, uint owner) {
     var windows = new List<IntPtr>();
@@ -130,9 +147,10 @@ function Wait-Text([string]$Text) {
 }
 Write-Output 'NATIVE_STEP window'
 $script:handle = Wait-Until {
-    $process = Get-Process -Id $DesktopProcess -ErrorAction Stop
-    $process.Refresh()
-    if ($process.MainWindowHandle -ne 0 -and [McplinkWindow]::IsWindowVisible($process.MainWindowHandle)) { $process.MainWindowHandle }
+    Get-Process -Id $DesktopProcess -ErrorAction Stop | Out-Null
+    # Startup can expose other top-level windows before the Tauri host exists.
+    $window = [McplinkWindow]::VisibleHost($DesktopProcess)
+    if ($window -ne [IntPtr]::Zero) { $window }
 } 'visible owned Tauri window (interactive Windows desktop required)'
 [McplinkWindow]::MoveWindow($script:handle, 0, 0, 1000, 740, $true) | Out-Null
 [McplinkWindow]::SetForegroundWindow($script:handle) | Out-Null

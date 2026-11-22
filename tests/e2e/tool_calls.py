@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import platform
+import sqlite3
 import subprocess
 import time
 import traceback
@@ -23,6 +24,21 @@ class ToolCalls(AgentCli):
         with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/stats",timeout=5) as response:
             return json.load(response)
 
+    def control(self, gate, action):
+        request = urllib.request.Request(f"http://127.0.0.1:{self.port}/control",
+            data=json.dumps({"gate":gate,"action":action}).encode(),
+            headers={"Content-Type":"application/json"})
+        with urllib.request.urlopen(request, timeout=5) as response:
+            assert json.load(response)["ok"]
+
+    def wait_gate(self, name, previous, timeout=10):
+        deadline = time.monotonic()+timeout
+        while time.monotonic() < deadline:
+            if self.stats()["gates"].get(name,0) > previous:
+                return
+            time.sleep(0.02)
+        raise AssertionError("fixture gate not reached: "+name)
+
     def save(self, name, **definition):
         base={"url":f"http://127.0.0.1:{self.port}/mcp-tools","headers":{"Authorization":"synthetic-fixture-authorization"}}
         return self.cli("connections","save","--stdin",value={"name":name,"definition":base|definition})["id"]
@@ -31,6 +47,53 @@ class ToolCalls(AgentCli):
         args=["call",connection,tool,"--stdin"]
         if schema_hash is not None: args += ["--schema-hash",schema_hash]
         return self.cli(*args,value=value,exit_status=exit_status)
+
+    def aggregate_route_cases(self):
+        healthy = self.save("small__healthy", url=self.url)
+        disabled = self.save("disabled_families", url=self.url, resourcesDisabled=True, promptsDisabled=True)
+        unsupported = self.save("tools_only", url=f"http://127.0.0.1:{self.port}/mcp-tools-only")
+        entry = self.cli("gateway","save","--stdin",value={"connectionIds":[healthy,disabled,unsupported]})
+        client = self.bridge(entry["id"], "capability-filtering")
+        for method, field in [("resources/list","resources"),("resources/templates/list","resourceTemplates"),("prompts/list","prompts")]:
+            result = client.call(method)["result"]
+            assert result[field] and not result["_meta"]["mcplink"]["upstreamErrors"], result
+        assert self.stats()["unsupportedLists"] == 0
+        self.passed("aggregate discovery skips disabled and unadvertised capabilities without upstream errors")
+
+        resource = client.call("resources/list")["result"]["resources"][0]["uri"]
+        before = self.stats()["resourceReads"]
+        revision = self.cli("connections","show",healthy)["connection"]["revision"]
+        meta = {"mcplink":{"expectedUpstreamRevision":revision}}
+        assert "result" in client.call("resources/read", {"uri":resource,"_meta":meta})
+        self.cli("credentials","update",healthy,"--stdin",value={"value":"synthetic-fixture-authorization"})
+        assert "error" in client.call("resources/read", {"uri":resource,"_meta":meta})
+        assert self.stats()["resourceReads"] == before+1
+        self.passed("aggregate resource reads verify the pinned member revision before forwarding")
+
+        unrelated = self.save("gated_catalog",url=f"http://127.0.0.1:{self.port}/mcp-gated-catalog")
+        entry = self.cli("gateway","save","--stdin",value={"connectionIds":[unrelated,healthy]})
+        alias = entry["members"][1]["namespace"] + "__read_document"
+        prior = self.stats()["gates"].get("unrelated-catalog",0)
+        self.control("unrelated-catalog","arm")
+        try:
+            descriptor = self.cli("connections","tools",entry["id"],"--tool",alias)
+            result = self.invoke(entry["id"],alias,{"id":"weekly-fixture"},schema_hash=descriptor["schemaHash"])
+            assert result["output"]["isError"] is False
+            assert self.stats()["gates"].get("unrelated-catalog",0) == prior
+        finally:
+            self.control("unrelated-catalog","release")
+        self.passed("named aggregate describe and invocation never discover an unrelated member")
+
+        legacy = self.cli("gateway","save","--stdin",value={"connectionIds":[healthy,disabled]})
+        with sqlite3.connect(self.data / "mcplink.sqlite3") as db:
+            document = json.loads(db.execute("SELECT document FROM connections WHERE id=?",(legacy["id"],)).fetchone()[0])
+            document["members"][0]["namespace"] = "legacy"
+            document["members"][1]["namespace"] = "legacy__child"
+            db.execute("UPDATE connections SET document=? WHERE id=?",(json.dumps(document),legacy["id"]))
+        alias = "legacy__child__read_document"
+        assert self.invoke(legacy["id"],alias,{"id":"weekly-fixture"})["output"]["isError"] is False
+        assert "result" in self.bridge(legacy["id"], "legacy-overlap").call("tools/call",{"name":alias,"arguments":{"id":"weekly-fixture"}})
+        self.passed("CLI and Bridge route exact discovered names when legacy namespaces share a prefix")
 
     def run(self):
         offline=self.record/"offline"
@@ -192,6 +255,7 @@ class ToolCalls(AgentCli):
         assert "结果" in failure["error"]["message"]
         assert self.stats()["calls"]==count+1
         self.passed("a connection closed after receipt is reported as uncertain and the tool is not resent")
+        self.aggregate_route_cases()
         return {"connection":connection}
 
 

@@ -1,5 +1,6 @@
 """Real daemon/Bridge acceptance for cached authentication, denial and recovery."""
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -70,8 +71,18 @@ class Acceptance(AgentCli):
             "command": sys.executable, "args": [str(ROOT / "tests/fixtures/mcp_server.py"), "--stdio"]}})["id"]
         bridge = self.bridge(connection, "session-cache-entry")
         assert "result" in bridge.call("tools/list")
-        key = self.data / "fixture-vault" / hashlib.sha256(b"runtime-key").hexdigest()
-        original = key.read_bytes(); key.unlink()
+        key = self.data / "fixture-vault" / hashlib.sha256(b"definition/runtime-auth-v1").hexdigest()
+        original = key.read_bytes()
+        try:
+            key.write_bytes(base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"="))
+            rejected = self.cli("gateway", "status", exit_status=1)
+            assert "后台身份验证失败" in rejected["error"]["message"]
+            assert session.call("gateway.status")["paused"] is False
+        finally:
+            key.write_bytes(original)
+        self.passed("daemon rejects a fresh client with the wrong key without affecting the authenticated session")
+
+        key.unlink()
         try:
             identifiers = [session.send("gateway.status") for _ in range(12)]
             assert all("ok" in session.receive(identifier) for identifier in identifiers)
@@ -98,7 +109,7 @@ class Acceptance(AgentCli):
         session.call("mcp.catalog", {"id": connection}, error=True, runningOnly=True)
         time.sleep(2.3)
         assert not (self.data / "runtime.json").exists(), "Bridge catalog observer must not restart a stopped daemon"
-        key.write_text("synthetic-replacement-runtime-key")
+        key.write_bytes(base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"="))
         assert session.call("gateway.status")["paused"] is False
         after = json.loads((self.data / "runtime.json").read_text())
         assert after["pid"] != runtime["pid"]

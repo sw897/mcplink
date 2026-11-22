@@ -5,16 +5,27 @@ mcplink 自有代码使用 MIT。具体依赖解析由 Cargo.lock 与 package-lo
 | 依赖 | 锁定版本 | 用途 | 许可 |
 | --- | --- | --- | --- |
 | Tauri / tauri-build / dialog plugin | 2.12.5 / 2.7.4 / 2.8.4 | 原生窗口、打包、文件选择 | MIT / Apache-2.0 |
+| tauri-plugin-autostart / tauri-plugin-single-instance | 2.7.0 / 2.5.5 | 登录启动与桌面单实例 | MIT / Apache-2.0 |
 | tauri-plugin-updater / minisign-verify / semver / tempfile | 2.14.1 / 0.3.0 / 1.0.28 / 3.27.0 | 平台安装、版本绑定签名校验、版本比较、原子升级记录 | MIT / Apache-2.0；MIT；MIT / Apache-2.0；MIT / Apache-2.0 |
 | React / React DOM | 19.3.1 | 桌面界面 | MIT |
 | rmcp | 3.9.0 | MCP 客户端/服务端、传输和 OAuth | Apache-2.0 |
+| saphyr-parser | 0.4.0 | OpenAPI YAML 的增量事件解析，用于在构造文档前控制结构预算 | MIT / Apache-2.0 |
+| tokio-util | 0.7.20 | 上游会话与 OAuth 任务取消 | MIT |
+| keyring-core | 1.0.1 | 查询本应用的旧计划键名以迁移保留策略，复用已有 Keyring 后端 | MIT / Apache-2.0 |
 | jsonschema | 0.60.2 | 调用工具前校验输入 Schema；禁用 HTTP/文件引用获取 | MIT |
 | jsonc-parser | 0.34.0 | JSON/JSONC 校验及保留注释、空白的配置编辑 | MIT |
 | tokio / axum | 1.54.1 / 0.8.9 | 异步运行时、本地 HTTP | MIT |
+| hyper / hyper-util | 1.12.0 / 0.1.21 | 本机管理 HTTP 连接与请求头限额 | MIT |
+| aws-lc-rs | 1.19.0 | 本机管理通道的 HMAC-SHA-256、AES-256-GCM 与系统随机数 | ISC AND (Apache-2.0 OR ISC) |
+| memmap2 | 0.9.12 | 将有界私有暂存更新包交给签名与安装接口 | MIT / Apache-2.0 |
+| flate2 / tar | 1.1.11 / 0.4.46 | macOS 更新归档的解压与预检 | MIT / Apache-2.0 |
+| plist | 1.10.3 | macOS 应用和凭据助手属性表校验 | MIT |
+| aho-corasick | 1.1.5 | 查找并过滤凭据文本 | Unlicense / MIT |
 | reqwest | 0.13.5 | rustls HTTP 客户端 | MIT / Apache-2.0 |
 | rusqlite | 0.41.1 | SQLite，内嵌 SQLite 3.54.1 | MIT；SQLite public domain |
 | keyring | 4.2.0 | 系统凭据库 | MIT / Apache-2.0 |
-| windows-sys | 0.61.2 | Windows 后台进程启动与父进程句柄隔离 | MIT / Apache-2.0 |
+| process-wrap | 10.0.1 | 约束并清理上游 MCP 进程树 | MIT / Apache-2.0 |
+| windows / windows-sys | 0.62.2 / 0.61.2 | Windows Job Object、后台启动与文件接口 | MIT / Apache-2.0 |
 | toml / toml_edit | 0.9.12 / 0.23.10 | TOML 读取和保留格式编辑 | MIT / Apache-2.0 |
 | serde_yaml / yaml-edit | 0.9.34 / 0.3.6 | YAML 读取和保留格式编辑 | MIT / Apache-2.0；Apache-2.0 |
 | serde / serde_json | 1.0.229 / 1.0.154 | 序列化 | MIT / Apache-2.0 |
@@ -26,4 +37,4 @@ mcplink 自有代码使用 MIT。具体依赖解析由 Cargo.lock 与 package-lo
 | Inter variable font | 5.3.0 | 本地字体 | OFL-1.1 |
 | esbuild / TypeScript | 0.28.2 / 5.9.3 | 前端构建、类型检查 | MIT；Apache-2.0 |
 
-`serde_yaml` 已标记 deprecated，当前用于只读解析；YAML 修改由 yaml-edit 完成。后续升级需要重新运行配置保存与恢复场景。SDK 和原生 Agent 协议同时演进，升级应先跑端到端兼容场景。
+`serde_yaml` 已标记 deprecated，仍用于原生客户端配置适配的读取和 YAML 值转换。文件编辑由 yaml-edit 完成。OpenAPI 导入使用 saphyr-parser。后续升级需要重新运行配置保存与恢复场景。SDK 和原生 Agent 协议同时演进，升级应先跑端到端兼容场景。

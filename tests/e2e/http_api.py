@@ -28,9 +28,19 @@ def tool(name="echo", path="/echo/{id}", response=None):
 class ApiServer:
     def __init__(self):
         self.requests = []
+        self.client_ports = []
+        self.deadline_release = threading.Event()
         harness = self
 
         class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def handle(self):
+                try:
+                    super().handle()
+                except (ConnectionResetError, BrokenPipeError):
+                    pass
+
             def log_message(self, *args):
                 pass
 
@@ -43,11 +53,24 @@ class ApiServer:
             def respond(self):
                 raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
                 path = urllib.parse.urlsplit(self.path)
-                harness.requests.append({"path": path.path, "query": urllib.parse.parse_qs(path.query), "body": json.loads(raw) if raw else None, "authorization": self.headers.get("Authorization"), "contentType": self.headers.get("Content-Type")})
+                harness.client_ports.append(self.client_address[1])
+                request = {"path": path.path, "query": urllib.parse.parse_qs(path.query), "body": json.loads(raw) if raw else None, "authorization": self.headers.get("Authorization"), "contentType": self.headers.get("Content-Type")}
+                harness.requests.append(request)
                 if path.path.startswith("/slow/"):
                     time.sleep(1)
-                status, mime, body = 200, "application/json", json.dumps(harness.requests[-1]).encode()
-                if self.headers.get("Authorization") != "Bearer fixture-http-api":
+                if path.path == "/deadline":
+                    harness.deadline_release.wait(12)
+                status, mime, body = 200, "application/json", json.dumps(request).encode()
+                if path.path == "/redaction":
+                    basic = self.headers["Authorization"].split(" ", 1)[1]
+                    username, password = base64.b64decode(basic).decode().split(":", 1)
+                    token = self.headers["X-Custom-Credential"].split(" ", 1)[1]
+                    body = json.dumps({
+                        "name": username.upper(), "encoded": urllib.parse.quote(username, safe=""),
+                        "password": password, "key": token.lower(), "variant": urllib.parse.quote_plus(token),
+                        "version": "version 1", "number": 1, "sensitive": self.headers["X-Metadata"],
+                    }).encode()
+                elif self.headers.get("Authorization") != "Bearer fixture-http-api":
                     status, body = 401, b'{"secret":"upstream-private-body"}'
                 elif path.path == "/png":
                     mime, body = "image/png", PNG
@@ -90,6 +113,7 @@ class ApiServer:
         self.endpoint = f"http://127.0.0.1:{self.http.server_port}"
 
     def close(self):
+        self.deadline_release.set()
         self.http.shutdown()
         self.http.server_close()
 
@@ -105,6 +129,36 @@ class HttpApi(AgentCli):
         return self.cli("connections", "save", "--stdin", value={"name": name, "definition": {
             "url": self.endpoint, "headers": {"Authorization": "Bearer fixture-http-api"},
             "httpApi": {"tools": tools, **options}}})
+
+    def response_boundaries(self):
+        descriptor = {"name":"read_fixture","description":"Read fixture output","inputSchema":{"type":"object"},
+                      "method":"GET","path":"/redaction","response":{"type":"json"}}
+        credentials = {"Authorization":"Basic "+base64.b64encode(b"fixture~user:name-fixture").decode(),
+                       "X-Custom-Credential":"Bearer fixture mixed+Token", "X-API-Version":"1", "X-Metadata":"7"}
+        connection = self.cli("connections","save","--stdin",value={"name":"response_boundaries","definition":{
+            "url":self.endpoint,"headers":credentials,"httpApi":{"tools":[descriptor],"sensitiveHeaders":["X-Metadata"]}}})["id"]
+        first = self.cli("call",connection,"read_fixture","--stdin",value={})["output"]
+        peer = self.bridge(connection,"response-boundaries")
+        second = peer.call("tools/call",{"name":"read_fixture","arguments":{}})["result"]
+        for output in (first, second):
+            fields = output["structuredContent"]
+            for key in ("name","encoded","password","key","variant","sensitive"):
+                assert fields[key] == "[redacted]", key
+            assert fields["version"] == "version 1" and fields["number"] == 1
+        assert self.api.client_ports[-2] == self.api.client_ports[-1]
+        self.passed("CLI and Bridge reuse the HTTP connection and redact synthetic Basic and Bearer variants while preserving short public version values")
+
+        slow = self.cli("connections","save","--stdin",value={"name":"http_deadline","definition":{
+            "url":self.endpoint,"headers":{"Authorization":"Bearer fixture-http-api"},"timeout":5,
+            "httpApi":{"tools":[descriptor | {"path":"/deadline"}]}}})["id"]
+        before = len(self.requests)
+        try:
+            error = self.cli("call",slow,"read_fixture","--stdin",value={},exit_status=1)
+            assert "超时" in error["error"]["message"] and "不要自动重试" in error["error"]["message"]
+        finally:
+            self.api.deadline_release.set()
+        assert len(self.requests) == before + 1
+        self.passed("an HTTP timeout reports the uncertain result and the upstream sees exactly one request")
 
     def run(self):
         payload = {"id": "a/b ?", "count": 2, "enabled": False, "items": [1, 2]}
@@ -211,6 +265,7 @@ class HttpApi(AgentCli):
         self.cli("call", connection, "echo", "--stdin", value=payload, exit_status=1)
         self.cli("gateway", "resume")
         self.passed("base64 mapping, masked edit, credential recovery and shared pause use the existing lifecycle")
+        self.response_boundaries()
 
     def close_http(self):
         self.api.close()

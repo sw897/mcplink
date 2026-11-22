@@ -7,9 +7,12 @@ import os
 from pathlib import Path
 import platform
 import shutil
+import socket
 import subprocess
 import sys
 import traceback
+import urllib.parse
+import urllib.request
 
 from tool_calls import ToolCalls
 from run import BINARY,FIXTURE
@@ -126,6 +129,37 @@ class ClaudeWritable(ToolCalls):
         assert encoded==variables
         self.passed("Claude native variables normalize and round-trip without confusing reserved environment names with managed project variables")
 
+        with socket.socket() as callback:
+            callback.bind(("127.0.0.1", 0))
+            port = callback.getsockname()[1]
+        oauth = {"clientId": "mcplink-synthetic-client", "callbackPort": port}
+        document = json.loads(user.read_text())
+        document["mcpServers"]["native_oauth"] = {"type": "http", "url": self.url, "oauth": oauth}
+        user.write_text(json.dumps(document))
+        oauth_id = self.cli("connections", "import", "--source", "claude:user", "--name", "native_oauth")["id"]
+        detail = self.cli("connections", "show", oauth_id)
+        assert detail["connection"]["authKind"] == "oauth" and detail["definition"]["oauth"] is True
+        assert detail["definition"]["clientId"] == oauth["clientId"] and detail["definition"]["oauthCallbackPort"] == port
+        self.cli("connections", "probe", oauth_id, exit_status=1)
+        login = self.cli("credentials", "login", oauth_id)
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(login["url"]).query)
+        assert query["client_id"] == [oauth["clientId"]] and query["redirect_uri"] == [f"http://127.0.0.1:{port}/callback"]
+        with urllib.request.urlopen(login["url"], timeout=15) as response:
+            assert response.status == 200
+        assert self.cli("connections", "probe", oauth_id)["connection"]["status"] == "ready"
+        for _ in range(2):
+            plan = self.cli("changes", "preview", "--connection", oauth_id, "--target", "claude:user")
+            self.cli("changes", "apply", plan["planId"])
+        assert json.loads(user.read_text())["mcpServers"]["native_oauth"]["oauth"] == oauth
+        for bad in ["oauth", {"clientId": " "}, {"callbackPort": 0}]:
+            document = json.loads(user.read_text())
+            document["mcpServers"]["invalid_oauth"] = {"type": "http", "url": self.url, "oauth": bad}
+            user.write_text(json.dumps(document))
+            self.cli("connections", "import", "--source", "claude:user", "--name", "invalid_oauth", exit_status=1)
+        document["mcpServers"].pop("invalid_oauth")
+        user.write_text(json.dumps(document))
+        self.passed("Claude OAuth objects preserve public client and fixed callback semantics through import, login, probes and repeated writes")
+
         managed=self.record/"managed-mcp.json";managed.write_text('{"mcpServers":{}}')
         protected=self.cli("sources","add","--agent","claude","--scope","user","--path",str(managed))
         assert protected["readOnly"] and protected["scope"]=="managed"
@@ -159,6 +193,8 @@ class ClaudeWritable(ToolCalls):
             native_env=self.environment|{"PWD":str(project)}
             result=subprocess.run([executable,"mcp","get","scoped_notes"],cwd=project,env=native_env,capture_output=True,text=True,timeout=50)
             assert result.returncode==0 and "Connected" in result.stdout and "Local" in result.stdout,result.stdout+result.stderr
+            oauth_check = subprocess.run([executable, "mcp", "get", "native_oauth"], cwd=project, env=native_env, capture_output=True, text=True, timeout=50)
+            assert oauth_check.returncode == 0 and self.url in oauth_check.stdout, oauth_check.stdout + oauth_check.stderr
             direct=subprocess.run([executable,"mcp","get","native_variables"],cwd=project,env=native_env,capture_output=True,text=True,timeout=50)
             assert direct.returncode==0 and "Connected" in direct.stdout,direct.stdout+direct.stderr
             self.passed("the specified native Claude CLI loads the local shared entry and completes its MCP health check",{"version":version.stdout.strip(),"native_project_keys":list(native_scope_contract),"scope":"native configuration load and MCP health, no model/tool execution claim"})

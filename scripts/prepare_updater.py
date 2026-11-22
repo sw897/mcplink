@@ -6,7 +6,6 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import plistlib
-import posixpath
 import shutil
 import stat
 import subprocess
@@ -55,11 +54,7 @@ def app_tar(source, output, version, fixture=False):
             assert path.parts[0] == "mcplink.app" and item.filename not in paths, "Unexpected app ZIP member"
             paths.add(item.filename)
             mode = item.external_attr >> 16
-            assert item.is_dir() or stat.S_ISREG(mode) or stat.S_ISLNK(mode), "Unsupported app ZIP entry"
-            if stat.S_ISLNK(mode):
-                link = archive.read(item).decode()
-                destination = PurePosixPath(posixpath.normpath(str(path.parent / link)))
-                assert not PurePosixPath(link).is_absolute() and destination.parts[0] == "mcplink.app", "App symlink escapes bundle"
+            assert item.is_dir() or stat.S_ISREG(mode), "Updater app entries must be directories or regular files"
         info = plistlib.loads(archive.read("mcplink.app/Contents/Info.plist"))
         assert info["CFBundleShortVersionString"] == version, "App/version mismatch"
         identifier = info["CFBundleIdentifier"]
@@ -75,10 +70,6 @@ def app_tar(source, output, version, fixture=False):
                 member.uname = member.gname = ""
                 if item.is_dir():
                     member.type, member.mode = tarfile.DIRTYPE, 0o755
-                    tar.addfile(member)
-                elif stat.S_ISLNK(mode):
-                    member.type, member.mode = tarfile.SYMTYPE, 0o777
-                    member.linkname = archive.read(item).decode()
                     tar.addfile(member)
                 else:
                     member.mode = 0o755 if mode & 0o111 else 0o644

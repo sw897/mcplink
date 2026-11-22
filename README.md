@@ -46,7 +46,7 @@ flowchart LR
 
 The desktop source includes on-demand GitHub Release updates with signed packages, explicit install confirmation and synchronization of recognized standalone CLIs. Install the first updater-enabled release manually; the existing published 0.3.2 does not include this feature.
 
-0.3.2 沿用数据语义版本 5；当前源码的 management API 为 23，新增通用响应规则、凭据过滤和 OpenAPI 导入。已发布的早期 0.3.2 包为 API 22，不能仅凭应用版本判断功能；桌面、CLI 和后台应采用同一构建。较早的程序仍会拒绝它不支持的数据目录。
+当前源码的 management API 为 24，使用经过双向认证的本机加密会话，数据语义版本沿用 5。升级前请用旧版本退出后台，再一起升级桌面、CLI 和 Bridge。原生配置指向独立 CLI 时，也需要更新该 CLI。
 
 macOS 预览包为 **ad-hoc 签名、未公证**，Windows 包 **未签名**。本版本不宣称正式发布者签名或系统信任；实际状态和源码提交见平台构建清单，下载后按平台 SHA256SUMS 核对。Intel Mac 和 Linux 暂无已验收的安装包。兼容性、签名和校验详见[发布说明](docs/release-notes.md)与[发布指南](docs/release.md)。成功的 [CI 构建](https://github.com/sw897/mcplink/actions/workflows/ci.yml)也提供 `packages-*` 工件。
 

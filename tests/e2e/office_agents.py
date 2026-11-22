@@ -389,6 +389,9 @@ def main():
         restored_sources = [s for s in snapshot()["sources"] if s["agent"] == "workbuddy" and Path(s["path"]) == path]
         assert len(restored_sources) == 1 and restored_sources[0]["readOnly"]
         assert restored_sources[0]["id"] == "workbuddy:legacy"
+        binding = next(b for b in snapshot()["bindings"] if b.get("connectionId") == native)
+        assert binding["sourceId"] == source["id"] and not binding.get("missing")
+        assert harness.rpc("connections.import", {"sourceId":"workbuddy:legacy","name":"work_remote"})["id"] == native
         assert "只读" in harness.rpc("changes.preview", {"connectionId":local,"targetSourceIds":["workbuddy:legacy"]}, error=True)
         passed("restored historical WorkBuddy sources keep their IDs and read-only boundary")
     except Exception as exception:

@@ -1,13 +1,14 @@
 use crate::{
-    config,
+    config, config_file,
     mcp::McpPool,
     model::*,
     store::{ConnectionDeletion, Store},
-    vault::{Vault, private_dir, private_write},
+    vault::{Vault, canonical_uuid, private_write},
 };
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::{
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::{
@@ -23,10 +24,14 @@ pub struct Engine {
     pub store: Arc<Store>,
     pub vault: Vault,
     pub pool: McpPool,
+    pub(crate) outbound: crate::outbound::Outbound,
+    pub(crate) authorizations: crate::oauth::Authorizations,
+    imports: Arc<tokio::sync::Semaphore>,
     pub(crate) catalog: crate::gateway::CatalogCache,
     pub mutation: Mutex<()>,
     pub paused: AtomicBool,
     pub shutdown: tokio::sync::watch::Sender<bool>,
+    pub(crate) shutdown_result: tokio::sync::watch::Sender<Option<Result<(), String>>>,
 }
 
 impl Engine {
@@ -46,7 +51,7 @@ impl Engine {
             Err(_) => bail!("无法读取数据目录身份"),
         }
     }
-    pub fn open(data: PathBuf) -> Result<Arc<Self>> {
+    pub fn open(data: PathBuf, management_port: u16) -> Result<Arc<Self>> {
         let store = Arc::new(Store::open(&data)?);
         let paused = store.gateway_paused()?;
         let vault = Vault::new(&data)?;
@@ -56,12 +61,18 @@ impl Engine {
             store,
             vault,
             pool: McpPool::default(),
+            outbound: crate::outbound::Outbound::new(management_port)?,
+            authorizations: crate::oauth::Authorizations::default(),
+            imports: Arc::new(tokio::sync::Semaphore::new(2)),
             catalog: crate::gateway::CatalogCache::default(),
             mutation: Mutex::new(()),
             paused: AtomicBool::new(paused),
             shutdown: tokio::sync::watch::channel(false).0,
+            shutdown_result: tokio::sync::watch::channel(None).0,
         });
+        engine.store.clear_abandoned_authorizations()?;
         engine.reconcile()?;
+        engine.maintain_change_storage();
         for (id, _) in engine.store.pending_credential_cleanup()? {
             if crate::lifecycle::cleanup_credentials(&engine, &id).is_err() {
                 eprintln!("mcplink: 连接 {id} 的旧凭据清理待重试");
@@ -79,24 +90,78 @@ impl Engine {
     }
 
     pub fn sources(&self) -> Result<Vec<Source>> {
-        let mut sources = config::default_sources()?;
-        for stored in self.store.sources()? {
-            if let Some(position) = sources.iter().position(|s| {
-                s.id == stored.id
-                    || (matches!(stored.agent, Agent::Workbuddy | Agent::Qwenwork)
-                        && s.agent == stored.agent
-                        && s.path
-                            == config::canonical_path(&stored.path).unwrap_or(stored.path.clone())
-                        && s.project == stored.project)
-            }) {
-                if (stored.agent == Agent::Opencode && stored.path == sources[position].path)
-                    || matches!(stored.agent, Agent::Workbuddy | Agent::Qwenwork)
-                {
-                    sources[position] = stored;
+        let referenced = self.store.referenced_source_ids()?;
+        let mut sources = Vec::new();
+        for mut source in config::default_sources()? {
+            if let Some(index) = source
+                .legacy_ids
+                .iter()
+                .position(|id| referenced.contains(id))
+            {
+                if referenced.contains(&source.id) {
+                    // Both identities have history. Expose both without moving
+                    // ownership or previous operation references between them.
+                    let mut historical = source.clone();
+                    historical.id = source.legacy_ids.remove(index);
+                    historical.legacy_ids.clear();
+                    sources.push(historical);
+                } else {
+                    std::mem::swap(&mut source.id, &mut source.legacy_ids[index]);
                 }
-            } else {
-                sources.push(stored);
             }
+            sources.push(source);
+        }
+        for mut stored in self.store.sources()? {
+            if let Ok(path) = config::source_path(&stored.path) {
+                stored.path = path;
+            }
+            let same_scope = |source: &Source| {
+                source.agent == stored.agent
+                    && config::same_path(&source.path, &stored.path)
+                    && source.scope == stored.scope
+                    && source.project == stored.project
+            };
+            let position = sources
+                .iter()
+                .position(|source| source.id == stored.id)
+                .or_else(|| sources.iter().position(same_scope));
+            match position.map(|position| &mut sources[position]) {
+                Some(source) if source.id == stored.id => {
+                    if same_scope(source)
+                        && matches!(
+                            stored.agent,
+                            Agent::Opencode | Agent::Workbuddy | Agent::Qwenwork
+                        )
+                    {
+                        source.label = stored.label;
+                        source.read_only |= stored.read_only;
+                    }
+                }
+                Some(source)
+                    if referenced.contains(&source.id) && referenced.contains(&stored.id) =>
+                {
+                    source.read_only |= stored.read_only;
+                    stored.read_only = source.read_only;
+                    sources.push(stored);
+                }
+                Some(source) => {
+                    let registered_read_only = stored.read_only
+                        && matches!(stored.agent, Agent::Workbuddy | Agent::Qwenwork);
+                    source.read_only |= stored.read_only;
+                    if referenced.contains(&source.id) && !registered_read_only {
+                        source.legacy_ids.push(stored.id);
+                    } else {
+                        source
+                            .legacy_ids
+                            .push(std::mem::replace(&mut source.id, stored.id));
+                        source.label = stored.label;
+                    }
+                }
+                None => sources.push(stored),
+            }
+        }
+        for source in &mut sources {
+            source.read_only |= config::protected_path(&source.path);
         }
         if let Some(error) = crate::agent_config::qwen_storage_error()? {
             for source in sources
@@ -111,9 +176,12 @@ impl Engine {
     }
 
     pub fn source(&self, id: &str) -> Result<Source> {
-        self.sources()?
-            .into_iter()
+        let sources = self.sources()?;
+        sources
+            .iter()
             .find(|source| source.id == id)
+            .or_else(|| sources.iter().find(|source| source.has_id(id)))
+            .cloned()
             .context("配置来源不存在")
     }
 
@@ -130,10 +198,15 @@ impl Engine {
         let bindings = self.store.bindings()?;
         let mut scopes = Vec::new();
         let mut detected = Vec::new();
+        let mut observed_bindings = HashSet::new();
+        let mut aliases = HashMap::new();
         let mut rows: Vec<Value> = connections.iter().map(Connection::public_value).collect();
         let sources = self.sources()?;
         let agents = crate::discovery::inventory(&sources, &self.store)?;
         for source in sources {
+            for legacy in &source.legacy_ids {
+                aliases.insert(legacy.clone(), source.id.clone());
+            }
             let result = config::scan(&source);
             let error = result.as_ref().err().map(ToString::to_string);
             scopes.push(json!({"id":source.id,"agent":source.agent,"label":source.label,"path":source.path,"project":source.project,"scope":source.scope,"exists":source.path.exists(),"error":error,"readOnly":source.read_only}));
@@ -141,7 +214,11 @@ impl Engine {
                 for entry in entries {
                     let binding = bindings
                         .iter()
-                        .find(|b| b.source_id == source.id && b.name == entry.name);
+                        .find(|b| source.has_id(&b.source_id) && b.name == entry.name);
+                    if let Some(binding) = binding {
+                        observed_bindings
+                            .insert((binding.source_id.as_str(), binding.name.as_str()));
+                    }
                     let connection_id = binding.map(|binding| binding.connection_id.clone());
                     let id = format!(
                         "detected:{}",
@@ -159,7 +236,8 @@ impl Engine {
                                 .iter()
                                 .any(|c| c.id == b.connection_id && c.revision != b.revision)
                     });
-                    detected.push(json!({"id":id,"connectionId":connection_id,"sourceId":source.id,"agent":source.agent,"scope":source.scope,"project":source.project,"name":entry.name,"enabled":entry.definition.enabled,"transport":entry.definition.transport(),"changed":changed,"needsUpdate":needs_update,"error":entry.error,"mode":binding.map(|b|b.mode.as_str()).unwrap_or("direct")}));
+                    let source_id = binding.map_or(source.id.as_str(), |b| b.source_id.as_str());
+                    detected.push(json!({"id":id,"connectionId":connection_id,"sourceId":source_id,"agent":source.agent,"scope":source.scope,"project":source.project,"name":entry.name,"enabled":entry.definition.enabled,"transport":entry.definition.transport(),"changed":changed,"needsUpdate":needs_update,"error":entry.error,"mode":binding.map(|b|b.mode.as_str()).unwrap_or("direct")}));
                 }
             }
         }
@@ -186,11 +264,11 @@ impl Engine {
             }
         }
         for binding in &bindings {
-            if !detected
-                .iter()
-                .any(|row| row["sourceId"] == binding.source_id && row["name"] == binding.name)
-            {
-                let source = scopes.iter().find(|s| s["id"] == binding.source_id);
+            if !observed_bindings.contains(&(binding.source_id.as_str(), binding.name.as_str())) {
+                let source_id = aliases
+                    .get(&binding.source_id)
+                    .unwrap_or(&binding.source_id);
+                let source = scopes.iter().find(|s| s["id"] == *source_id);
                 let unavailable = source.is_none_or(|s| !s["error"].is_null());
                 let agent = source
                     .and_then(|s| s["agent"].as_str())
@@ -270,6 +348,7 @@ impl Engine {
 
     fn import(&self, source_id: &str, name: &str) -> Result<Value> {
         let source = self.source(source_id)?;
+        let source_id = source.id.as_str();
         let entry = config::scan(&source)?
             .into_iter()
             .find(|entry| entry.name == name)
@@ -278,7 +357,7 @@ impl Engine {
             .store
             .bindings()?
             .iter()
-            .find(|b| b.source_id == source_id && b.name == name)
+            .find(|b| source.has_id(&b.source_id) && b.name == name)
         {
             return Ok(self
                 .store
@@ -323,6 +402,7 @@ impl Engine {
             .into(),
             definition_ref: String::new(),
             revision: 0,
+            edit_revision: 0,
             active: true,
             status: "configured".into(),
             checked_at: None,
@@ -358,7 +438,7 @@ impl Engine {
             .store
             .bindings()?
             .iter()
-            .any(|b| b.source_id == source.id && b.name == name)
+            .any(|b| source.has_id(&b.source_id) && b.name == name)
         {
             bail!("该服务已纳入托管，请刷新后编辑");
         }
@@ -378,9 +458,7 @@ impl Engine {
         Ok((entry, version))
     }
 
-    async fn save(&self, p: &Value) -> Result<Value> {
-        let name = required(p, "name")?;
-        config::safe_name(name)?;
+    fn requested_definition(p: &Value) -> Result<Definition> {
         let mut definition: Definition =
             serde_json::from_value(p.get("definition").cloned().context("缺少服务配置")?)
                 .context("服务配置格式有误")?;
@@ -388,6 +466,43 @@ impl Engine {
             .pointer("/definition/enabled")
             .and_then(Value::as_bool)
             .unwrap_or(true);
+        definition.original = Value::Null;
+        definition.original_agent = None;
+        definition.origin_project = None;
+        Ok(definition)
+    }
+
+    fn transfer_preview(&self, p: &Value) -> Result<Value> {
+        let connection = self.store.connection(required(p, "id")?)?;
+        anyhow::ensure!(
+            connection.members.is_none()
+                && p.get("sourceId").is_none()
+                && p.pointer("/definition/editVersion").and_then(Value::as_str)
+                    == Some(connection.edit_version().as_str()),
+            "连接已更新或编辑版本不匹配，请重新打开编辑窗口"
+        );
+        let old = self.definition(&connection)?;
+        let mut next = Self::requested_definition(p)?;
+        anyhow::ensure!(
+            old.url.is_none() && next.http_api.is_some(),
+            "此确认仅用于本地进程迁移到 HTTP API"
+        );
+        next.origin_project.clone_from(&old.origin_project);
+        let origin = next.http_origin()?;
+        let fields = crate::credential_transfer::apply(
+            p.get("credentialMappings").context("缺少需要迁移的字段")?,
+            &old,
+            &mut next,
+            Some(&origin),
+        )?;
+        config::validate(&next)?;
+        Ok(json!({"origin":origin,"fields":fields}))
+    }
+
+    async fn save(&self, p: &Value, confirmed_transfer_origin: Option<&str>) -> Result<Value> {
+        let name = required(p, "name")?;
+        config::safe_name(name)?;
+        let mut definition = Self::requested_definition(p)?;
         let existing = p
             .get("id")
             .and_then(Value::as_str)
@@ -404,6 +519,9 @@ impl Engine {
         let edit_version = p.pointer("/definition/editVersion");
         if draft.is_some() && (existing.is_some() || edit_version.is_none()) {
             bail!("请重新打开来源配置以保存托管连接");
+        }
+        if existing.is_some() && edit_version.is_none() {
+            bail!("更新已有连接需要当前 editVersion，请重新读取连接");
         }
         let expected_version = draft
             .as_ref()
@@ -437,15 +555,9 @@ impl Engine {
                 .map(|old| self.definition(old))
                 .transpose()?,
         };
-        if let Some(mappings) = p.get("credentialMappings") {
-            if existing.is_none() || draft.is_some() || edit_version.is_none() {
-                bail!("凭据字段迁移仅用于带编辑版本的已有托管连接");
-            }
-            crate::credential_transfer::apply(
-                mappings,
-                previous.as_ref().context("原连接不存在")?,
-                &mut definition,
-            )?;
+        let mappings = p.get("credentialMappings");
+        if mappings.is_some() && (existing.is_none() || draft.is_some()) {
+            bail!("凭据字段迁移仅用于带编辑版本的已有托管连接");
         }
         let mut changed_origin = false;
         if let Some(old_definition) = &previous {
@@ -457,9 +569,42 @@ impl Engine {
                 }
                 definition.url.clone_from(&old_definition.url);
             }
+            definition
+                .origin_project
+                .clone_from(&old_definition.origin_project);
+            let mut inherited_args = false;
+            for value in &mut definition.args {
+                if value.starts_with("••••••••") {
+                    inherited_args = true;
+                    let slot = value
+                        .strip_prefix("••••••••[")
+                        .and_then(|v| v.strip_suffix(']'))
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .and_then(|i| i.checked_sub(1))
+                        .filter(|_| edit_version.is_some())
+                        .context("启动参数引用无效，请重新读取连接")?;
+                    *value = old_definition
+                        .args
+                        .get(slot)
+                        .cloned()
+                        .context("启动参数引用已失效")?;
+                }
+            }
             changed_origin = definition.changed_origin(old_definition);
             if changed_origin {
                 definition.discard_inherited_auth(old_definition);
+                if definition.private_network_origin == old_definition.private_network_origin {
+                    definition.private_network_origin = None;
+                }
+                anyhow::ensure!(!inherited_args, "更改服务来源需要重新填写受保护的启动参数");
+            }
+            if let Some(mappings) = mappings {
+                crate::credential_transfer::apply(
+                    mappings,
+                    old_definition,
+                    &mut definition,
+                    confirmed_transfer_origin,
+                )?;
             }
             if definition.client_secret.as_deref() == Some("••••••••") {
                 definition.client_secret = Some(
@@ -487,31 +632,11 @@ impl Engine {
                         .context("需要重新填写该环境变量")?;
                 }
             }
-            for value in &mut definition.args {
-                if value.starts_with("••••••••") {
-                    let slot = value
-                        .strip_prefix("••••••••[")
-                        .and_then(|v| v.strip_suffix(']'))
-                        .and_then(|v| v.parse::<usize>().ok())
-                        .and_then(|i| i.checked_sub(1))
-                        .filter(|_| edit_version.is_some())
-                        .context("启动参数引用无效，请重新读取连接")?;
-                    *value = old_definition
-                        .args
-                        .get(slot)
-                        .cloned()
-                        .context("启动参数引用已失效")?;
-                }
-            }
-            definition.original.clone_from(&old_definition.original);
-            definition
-                .original_agent
-                .clone_from(&old_definition.original_agent);
-            definition
-                .origin_project
-                .clone_from(&old_definition.origin_project);
-            if changed_origin {
-                definition.clear_native_auth();
+            if !changed_origin {
+                definition.original.clone_from(&old_definition.original);
+                definition
+                    .original_agent
+                    .clone_from(&old_definition.original_agent);
             }
         }
         config::validate(&definition)?;
@@ -526,6 +651,7 @@ impl Engine {
             auth_kind: "none".into(),
             definition_ref: String::new(),
             revision: 0,
+            edit_revision: 0,
             active: true,
             status: "configured".into(),
             checked_at: None,
@@ -541,17 +667,23 @@ impl Engine {
         {
             bail!("已有 Agent 绑定时请保留接入名称，或先移除相关绑定");
         }
-        connection.name = name.into();
-        connection.title = p
-            .get("title")
-            .and_then(Value::as_str)
-            .unwrap_or(name)
-            .into();
-        connection.account_label = p
+        let title = p.get("title").and_then(Value::as_str).unwrap_or(name);
+        let account_label = p
             .get("accountLabel")
             .and_then(Value::as_str)
-            .unwrap_or("用户标签")
-            .into();
+            .unwrap_or("用户标签");
+        if connection.name != name
+            || connection.title != title
+            || connection.account_label != account_label
+        {
+            connection.edit_revision = connection
+                .edit_revision
+                .checked_add(1)
+                .context("连接编辑版本超出范围")?;
+            connection.name = name.into();
+            connection.title = title.into();
+            connection.account_label = account_label.into();
+        }
         let same_definition = previous.as_ref() == Some(&definition);
         if !connection.definition_ref.is_empty() && same_definition {
             crate::lifecycle::retry_cleanup(self, &connection.id).await?;
@@ -578,7 +710,7 @@ impl Engine {
         Ok(connection.public_value())
     }
 
-    fn preview(&self, p: &Value) -> Result<Value> {
+    fn preview(&self, p: &Value, executable: Option<&Path>) -> Result<Value> {
         let ids: Vec<String> =
             if let Some(values) = p.get("connectionIds").and_then(Value::as_array) {
                 values
@@ -602,6 +734,10 @@ impl Engine {
         if ids.is_empty() || targets.is_empty() {
             bail!("请选择服务与目标 Agent");
         }
+        anyhow::ensure!(
+            ids.len().saturating_mul(targets.len()) <= crate::change_storage::MAX_CHANGES,
+            "一次最多预览 128 项配置变更，请分批操作"
+        );
         let binding_target = p.get("bindingTarget").filter(|v| !v.is_null());
         if let Some(target) = binding_target
             && (ids.len() != 1 || targets.len() != 1 || targets[0] != required(target, "sourceId")?)
@@ -610,6 +746,17 @@ impl Engine {
         }
         let bindings = self.store.bindings()?;
         let mut changes = Vec::new();
+        let mut plan_bytes = 0;
+        let mut add_change = |change: Change| -> Result<()> {
+            plan_bytes += serde_json::to_vec(&change)?.len();
+            anyhow::ensure!(
+                changes.len() < crate::change_storage::MAX_CHANGES
+                    && plan_bytes <= crate::change_storage::MAX_PLAN_SIZE,
+                "一次预览的配置过多，请分批操作"
+            );
+            changes.push(change);
+            Ok(())
+        };
         let mut virtual_files = std::collections::HashMap::<PathBuf, String>::new();
         let mut touched = std::collections::HashSet::new();
         let mut connections = Vec::new();
@@ -635,8 +782,7 @@ impl Engine {
                     );
                 }
                 crate::discovery::require_installed(&source.agent, &self.store)?;
-                if fs::symlink_metadata(&source.path)
-                    .is_ok_and(|meta| meta.file_type().is_symlink())
+                if fs::symlink_metadata(&source.path).is_ok_and(|meta| !config_file::regular(&meta))
                 {
                     bail!("目标配置为符号链接，请添加真实配置文件作为来源");
                 }
@@ -655,6 +801,10 @@ impl Engine {
                                 members.iter().any(|m| m.connection_id == b.connection_id)
                             })
                     }) {
+                        anyhow::ensure!(
+                            !self.store.entry_pending(&source.id, &previous.name)?,
+                            "此配置已有写入待核对，请检查历史并重试"
+                        );
                         let document = config::parse(&source, &text)?;
                         let before = document
                             .pointer("/mcp_servers")
@@ -678,7 +828,7 @@ impl Engine {
                         } else {
                             text.clone()
                         };
-                        changes.push(Change {
+                        add_change(Change {
                             id: uuid::Uuid::new_v4().to_string(),
                             connection_id: previous.connection_id.clone(),
                             source_id: source.id.clone(),
@@ -686,6 +836,7 @@ impl Engine {
                             mode: "shared".into(),
                             action: "remove".into(),
                             expected_hash: digest(text.as_bytes()),
+                            target_path: Some(source.path.clone()),
                             revision: self.store.connection(&previous.connection_id)?.revision,
                             previous_binding: Some(previous.clone()),
                             entry_version: Some(
@@ -694,7 +845,7 @@ impl Engine {
                             restore_unmanaged: false,
                             before,
                             after: None,
-                        });
+                        })?;
                         text = rendered;
                     }
                 }
@@ -710,6 +861,10 @@ impl Engine {
                 let name = binding
                     .map(|b| b.name.clone())
                     .unwrap_or_else(|| connection.name.clone());
+                anyhow::ensure!(
+                    !self.store.entry_pending(&source.id, &name)?,
+                    "此配置已有写入待核对，请检查历史并重试"
+                );
                 if !touched.insert((
                     source.path.clone(),
                     source.scope.clone(),
@@ -766,10 +921,7 @@ impl Engine {
                     let mut value = if matches!(action, "disable" | "enable") {
                         before.clone().context("目标尚未接入此服务")?
                     } else if actual_mode == "shared" {
-                        let bridge = self.bridge_config(
-                            &connection.id,
-                            p.get("_bridgeExecutable").and_then(Value::as_str),
-                        )?;
+                        let bridge = self.bridge_config(&connection.id, executable)?;
                         config::native(&serde_json::from_value(bridge)?, &source)?
                     } else {
                         config::native(&definition, &source)?
@@ -780,8 +932,13 @@ impl Engine {
                     if action == "enable" {
                         config::set_native_enabled(&mut value, &source, true)?;
                     }
-                    if source.agent == Agent::Pi {
-                        crate::pi_config::preserve_presentation(&mut value, before.as_ref())?;
+                    if action == "upsert" {
+                        config::preserve_native_policy(
+                            &source,
+                            &mut value,
+                            before.as_ref(),
+                            mode == "shared",
+                        )?;
                     }
                     Some(value)
                 };
@@ -791,7 +948,12 @@ impl Engine {
                     config::render(&source, &text, &name, after.as_ref())?
                 };
                 virtual_files.insert(source.path.clone(), rendered);
-                changes.push(Change {
+                anyhow::ensure!(
+                    virtual_files.values().map(String::len).sum::<usize>()
+                        <= crate::change_storage::PREVIEW_BUDGET,
+                    "一次预览的配置过多，请分批操作"
+                );
+                add_change(Change {
                     id: uuid::Uuid::new_v4().to_string(),
                     connection_id: connection.id.clone(),
                     entry_version: Some(self.store.entry_version(&source.id, &name)?),
@@ -800,12 +962,13 @@ impl Engine {
                     mode: actual_mode.into(),
                     action: action.into(),
                     expected_hash: digest(text.as_bytes()),
+                    target_path: Some(source.path),
                     revision: connection.revision,
                     previous_binding: binding.cloned(),
                     restore_unmanaged: false,
                     before,
                     after,
-                });
+                })?;
             }
             connections.push(connection);
         }
@@ -814,19 +977,18 @@ impl Engine {
             changes,
             created_at: now(),
         };
-        self.vault
-            .set(&format!("plan/{}", plan.id), &serde_json::to_string(&plan)?)?;
         let summary = plan
             .changes
             .iter()
             .map(|change| self.change_summary(change))
             .collect::<Result<Vec<_>>>()?;
+        self.save_preview(&plan)?;
         let mut display = connections[0].public_value();
         if connections.len() > 1 {
             display["title"] = json!(format!("{} 项服务", connections.len()));
         }
         Ok(
-            json!({"planId":plan.id,"connection":display,"changes":summary,"expiresAt":plan.created_at+600}),
+            json!({"planId":plan.id,"connection":display,"changes":summary,"expiresAt":plan.created_at+crate::change_storage::PREVIEW_SECONDS}),
         )
     }
 
@@ -882,7 +1044,7 @@ impl Engine {
         )
     }
 
-    fn export_config(&self, p: &Value) -> Result<Value> {
+    fn export_config(&self, p: &Value, executable: Option<&Path>) -> Result<Value> {
         let agent: Agent =
             serde_json::from_value(p["targetAgent"].clone()).context("请选择导入客户端")?;
         if !agent.supports_import() {
@@ -916,9 +1078,7 @@ impl Engine {
                 if connection.members.is_none() && connection.status != "ready" {
                     bail!("请先检查共享连接并完成账号认证")
                 }
-                serde_json::from_value(
-                    self.bridge_config(&connection.id, p["_bridgeExecutable"].as_str())?,
-                )?
+                serde_json::from_value(self.bridge_config(&connection.id, executable)?)?
             } else {
                 self.definition(&connection)?
             };
@@ -931,33 +1091,32 @@ impl Engine {
             "gatewayPaused":self.paused.load(Ordering::SeqCst),"requiresImport":true}))
     }
 
-    fn bridge_config(&self, id: &str, client_executable: Option<&str>) -> Result<Value> {
-        let executable = client_executable
-            .map(PathBuf::from)
-            .map(Ok)
-            .unwrap_or_else(std::env::current_exe)
-            .context("无法定位 mcplink 程序")?;
+    fn bridge_config(&self, id: &str, executable: Option<&Path>) -> Result<Value> {
+        let executable = match executable {
+            Some(path) => path.to_owned(),
+            None => std::env::current_exe().context("无法定位 mcplink 程序")?,
+        };
         if !executable.is_absolute() || !executable.is_file() {
             bail!("无法定位共享入口程序，请从已安装应用重新预览");
         }
-        let mut env = json!({"MCPLINK_DATA_DIR":self.data});
-        for key in ["MCPLINK_HOME", "MCPLINK_VAULT"] {
-            if let Ok(value) = std::env::var(key) {
-                env[key] = json!(value);
+        let env = json!({"MCPLINK_DATA_DIR":self.data});
+        #[cfg(feature = "test-fixtures")]
+        let env = {
+            let mut env = env;
+            for key in ["MCPLINK_HOME", "MCPLINK_VAULT"] {
+                if let Ok(value) = std::env::var(key) {
+                    env[key] = json!(value);
+                }
             }
-        }
+            env
+        };
         Ok(
             json!({"command":executable,"args":["bridge","--connection",id],"env":env,"enabled":true}),
         )
     }
 
     fn apply_change(&self, change: &Change, plan_id: &str) -> Result<()> {
-        if self
-            .store
-            .pending_operations()?
-            .iter()
-            .any(|op| op["sourceId"] == change.source_id && op["name"] == change.name)
-        {
+        if self.store.entry_pending(&change.source_id, &change.name)? {
             bail!("此配置已有写入待核对，请检查历史并重试");
         }
         if change.action == "restore" && change.after.is_some() && !change.restore_unmanaged {
@@ -983,73 +1142,65 @@ impl Engine {
             bail!("目标绑定或变更记录已更新，请重新预览");
         }
         let source = self.source(&change.source_id)?;
-        if source.read_only {
-            bail!("该来源为只读，请核对配置位置");
-        }
+        let path = Self::change_path(change, &source)?;
         crate::discovery::require_installed(&source.agent, &self.store)?;
-        let (text, _) = config::read(&source)?;
-        if digest(text.as_bytes()) != change.expected_hash {
-            bail!("目标文件已变化，请重新预览");
-        }
+        let _lock = config_file::lock(&path)?;
+        let reference = format!("change/{}", change.id);
         if change.before.is_none() && change.after.is_none() {
-            let reference = format!("change/{}", change.id);
+            let (text, _) = config::read(&source)?;
+            anyhow::ensure!(
+                digest(text.as_bytes()) == change.expected_hash,
+                "目标文件已变化，请重新预览"
+            );
+            self.store.stage_change(&change.id, false)?;
             self.vault
                 .set(&reference, &serde_json::to_string(change)?)?;
             self.store
-                .record_operation(change, plan_id, &reference, "")?;
+                .record_operation(change, plan_id, &reference, None)?;
             return self.finish_change(change, plan_id);
         }
-        let parent = source.path.parent().context("配置位置无效")?;
-        private_dir(parent)?;
-        let lockfile = fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(parent.join(".mcplink.lock"))?;
-        fs2::FileExt::try_lock_exclusive(&lockfile)
-            .context("另一个配置操作正在进行，请稍后重试")?;
-        let (current, _) = config::read(&source)?;
-        if digest(current.as_bytes()) != change.expected_hash {
-            bail!("目标文件已被外部修改，请重新预览");
-        }
-        let rendered = config::render(&source, &current, &change.name, change.after.as_ref())?;
-        let reference = format!("change/{}", change.id);
+        let target = config_file::Target::open(&path, true).context("无法打开目标配置目录")?;
+        let current = target.read()?;
+        anyhow::ensure!(
+            digest(current.text.as_bytes()) == change.expected_hash,
+            "目标文件已变化，请重新预览"
+        );
+        let rendered = config::render(&source, &current.text, &change.name, change.after.as_ref())?;
+        let backup = self.config_backup(&change.id);
+        self.store.stage_change(&change.id, true)?;
         self.vault
             .set(&reference, &serde_json::to_string(change)?)?;
-        let backup = self
-            .data
-            .join("backups")
-            .join(format!("{}.config", change.id));
-        self.store
-            .record_operation(change, plan_id, &reference, &backup.to_string_lossy())?;
-        let result = (|| -> Result<()> {
-            private_write(&backup, current.as_bytes())?;
-            if std::env::var("MCPLINK_FAILPOINT").ok().as_deref() == Some("before-write")
-                && std::env::var("MCPLINK_VAULT").ok().as_deref() == Some("fixture")
-            {
-                bail!("测试注入的写入前中断");
-            }
-            if digest(config::read(&source)?.0.as_bytes()) != change.expected_hash {
-                bail!("目标文件已被外部修改，请重新预览");
-            }
-            crate::vault::write_config(&source.path, rendered.as_bytes())?;
-            Ok(())
-        })();
-        if let Err(error) = result {
-            self.store
-                .finish_operation(&change.id, "failed", Some(&error.to_string()))?;
-            return Err(error);
+        private_write(&backup, current.text.as_bytes())?;
+        #[cfg(feature = "test-fixtures")]
+        if crate::vault::fixture_failpoint("before-write") {
+            bail!("测试注入的写入前中断");
         }
-        // From this point the file is committed. Keep its intent pending until
-        // binding, history and (for a restore) the original operation commit together.
-        if std::env::var("MCPLINK_FAILPOINT").ok().as_deref() == Some("after-write")
-            && std::env::var("MCPLINK_VAULT").ok().as_deref() == Some("fixture")
-        {
+        target.replace(&current, rendered.as_bytes(), || {
+            self.store.record_operation(
+                change,
+                plan_id,
+                &reference,
+                Some(&backup.to_string_lossy()),
+            )
+        })?;
+        // From the recorded intent until file sync and the final SQL transaction
+        // succeed, recovery owns both snapshots and the target remains pending.
+        #[cfg(feature = "test-fixtures")]
+        if crate::vault::fixture_failpoint("after-write") {
             std::process::exit(93);
         }
         self.finish_change(change, plan_id)
             .context("配置已写入，绑定待核对；可重试计划或重启后台")
+    }
+
+    fn change_path(change: &Change, source: &Source) -> Result<PathBuf> {
+        anyhow::ensure!(!source.read_only, "该来源为只读，请核对配置位置");
+        config::require_readable(source)?;
+        let path = &source.path;
+        if let Some(previous) = &change.target_path {
+            anyhow::ensure!(previous == path, "配置来源位置已变化，请重新预览");
+        }
+        Ok(path.clone())
     }
 
     fn finish_change(&self, change: &Change, plan: &str) -> Result<()> {
@@ -1073,19 +1224,22 @@ impl Engine {
     }
 
     fn apply(&self, id: &str) -> Result<Value> {
-        let plan: ChangePlan = serde_json::from_str(
-            &self
-                .vault
-                .get(&format!("plan/{id}"))?
-                .context("预览已失效，请重新预览")?,
-        )?;
-        if now() > plan.created_at + 600 {
-            bail!("预览已过期，请重新预览");
-        }
+        anyhow::ensure!(canonical_uuid(id), "预览已失效，请重新预览");
         self.reconcile()?;
+        if let Some(result) = self.preview_result(id, false)? {
+            self.prune_previews()?;
+            return Ok(result);
+        }
+        let Some(plan) = self.load_preview(id)? else {
+            self.prune_previews()?;
+            return self
+                .preview_result(id, true)?
+                .context("预览已失效或过期，请重新预览");
+        };
         let mut results = Vec::new();
         for change in &plan.changes {
             let (status, message) = if let Some(done) = self.store.find_operation(&change.id)? {
+                anyhow::ensure!(done["planId"] == id, "配置预览与已有操作记录不匹配");
                 (
                     done["status"].clone(),
                     "该目标已有执行记录，请核对历史结果".into(),
@@ -1108,7 +1262,11 @@ impl Engine {
             };
             results.push(json!({"sourceId":change.source_id,"name":change.name,"status":status,"operationId":change.id,"message":message}));
         }
-        Ok(json!({"results":results}))
+        let result = json!({"results":results});
+        self.store.record_preview_result(id, &result)?;
+        self.prune_previews()?;
+        self.clean_failed_changes()?;
+        Ok(result)
     }
 
     fn restore(&self, id: &str, preview: bool) -> Result<Value> {
@@ -1119,6 +1277,13 @@ impl Engine {
         if operation["status"] == "restored" {
             return Ok(json!({"status":"restored"}));
         }
+        if operation["status"] == "pending" {
+            bail!("此操作的绑定仍待核对");
+        }
+        anyhow::ensure!(
+            matches!(operation["status"].as_str(), Some("applied" | "conflict")),
+            "此操作没有可恢复的配置写入"
+        );
         let reference = operation["credentialRef"]
             .as_str()
             .context("变更记录无效")?;
@@ -1129,16 +1294,14 @@ impl Engine {
                 .context("恢复所需的连接数据不可用")?,
         )?;
         let source = self.source(&original.source_id)?;
-        if operation["status"] == "pending" {
-            bail!("此操作的绑定仍待核对");
-        }
+        Self::change_path(&original, &source)?;
         let (text, document) = config::read(&source)?;
         let current = document["mcp_servers"].get(&original.name).cloned();
         let binding = self
             .store
             .bindings()?
             .into_iter()
-            .find(|b| b.source_id == source.id && b.name == original.name);
+            .find(|b| b.source_id == original.source_id && b.name == original.name);
         let owner = original
             .after
             .as_ref()
@@ -1154,7 +1317,7 @@ impl Engine {
                 .unwrap_or_else(|| "当前未绑定".into());
             bail!("该条目的绑定或操作有后续修改（{owner}），请从最新记录核对");
         }
-        if current != original.after {
+        if !config::matches_written_entry(&source, &original, current.as_ref()) {
             bail!("该条目有后续修改，请核对差异后处理，其他配置保持当前版本");
         }
         let effect = original.restore_effect();
@@ -1178,57 +1341,90 @@ impl Engine {
             restore_unmanaged: original.previous_binding.is_none(),
             action: "restore".into(),
             expected_hash: digest(text.as_bytes()),
+            target_path: Some(source.path.clone()),
             before: current,
             after: original.before,
         };
         if preview {
             return Ok(json!({"change":self.change_summary(&reversed)?,"effect":effect}));
         }
-        self.apply_change(&reversed, &format!("restore/{id}"))?;
+        let result = self.apply_change(&reversed, &format!("restore/{id}"));
+        self.clean_failed_changes()?;
+        result?;
         Ok(json!({"status":"restored","operationId":reversed.id}))
     }
 
     fn reconcile(&self) -> Result<()> {
         for operation in self.store.pending_operations()? {
             let id = operation["id"].as_str().context("变更记录缺少标识")?;
-            let reference = operation["credentialRef"]
-                .as_str()
-                .context("变更记录无效")?;
-            let Some(raw) = self.vault.get(reference)? else {
-                self.store.finish_operation(
-                    id,
-                    "conflict",
-                    Some("变更数据不可用，需要核对配置"),
-                )?;
-                continue;
-            };
-            let change: Change = serde_json::from_str(&raw)?;
-            let source = self.source(&change.source_id)?;
-            match config::entry(&source, &change.name) {
-                Ok(current) if current == change.after => {
-                    if let Err(error) = self.finish_change(
-                        &change,
-                        operation["planId"].as_str().context("缺少计划标识")?,
-                    ) {
-                        self.store.finish_operation(
-                            id,
-                            "pending",
-                            Some(&format!("绑定待核对：{error}")),
-                        )?;
-                    }
-                }
-                Ok(current) if current == change.before => {
-                    self.store
-                        .finish_operation(id, "failed", Some("中断前尚未写入该条目"))?
-                }
-                _ => self.store.finish_operation(
-                    id,
-                    "conflict",
-                    Some("中断后配置有变化，请核对当前条目"),
-                )?,
+            if let Err(error) = self.reconcile_operation(id, &operation)
+                && self
+                    .store
+                    .finish_operation(id, "pending", Some(&error.to_string()))
+                    .is_err()
+            {
+                eprintln!("mcplink: 配置变更 {id} 待核对");
             }
         }
         Ok(())
+    }
+
+    fn reconcile_operation(&self, id: &str, operation: &Value) -> Result<()> {
+        anyhow::ensure!(
+            canonical_uuid(id) && operation["credentialRef"] == format!("change/{id}"),
+            "变更快照引用无效，请核对历史"
+        );
+        let raw = self
+            .vault
+            .get(&format!("change/{id}"))
+            .context("暂时无法读取待恢复的凭据库快照")?
+            .context("待恢复的配置快照缺失，请核对凭据库")?;
+        let mut change: Change = serde_json::from_str(&raw).context("待恢复的配置快照损坏")?;
+        anyhow::ensure!(
+            change.id == id
+                && operation["name"] == change.name
+                && operation["sourceId"] == change.source_id
+                && operation["connectionId"] == change.connection_id,
+            "待恢复的配置快照与历史记录不匹配"
+        );
+        let source = self
+            .source(&change.source_id)
+            .context("待恢复的配置来源不可用")?;
+        let path = Self::change_path(&change, &source).context("待恢复的配置位置须核对")?;
+        let _lock = config_file::lock(&path)?;
+        let target = match config_file::Target::open(&path, false) {
+            Ok(target) => Some(target),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && change.before.is_none()
+                    && change.after.is_none() =>
+            {
+                None
+            }
+            Err(error) => return Err(error).context("待恢复的配置目录暂不可用"),
+        };
+        let current = target.as_ref().map(|file| file.read()).transpose()?;
+        let text = current.as_ref().map_or("", |current| current.text.as_str());
+        let document = config::parse(&source, text).context("待恢复的配置有效性须核对")?;
+        let entry = document["mcp_servers"].get(&change.name).cloned();
+        if config::matches_written_entry(&source, &change, entry.as_ref()) {
+            if let Some(target) = target {
+                target.sync()?;
+                anyhow::ensure!(
+                    target.read()?.text == text,
+                    "恢复期间目标配置有变化，请重试"
+                );
+            }
+            change.after = entry;
+            self.finish_change(&change, required(operation, "planId")?)
+                .context("配置已写入，绑定待核对")
+        } else if entry == change.before {
+            self.store
+                .finish_operation(id, "failed", Some("中断前尚未写入该条目"))
+        } else {
+            self.store
+                .finish_operation(id, "conflict", Some("中断后配置有变化，请核对当前条目"))
+        }
     }
 
     fn begin_connection_deletion(&self, id: &str, keep_native: bool) -> Result<ConnectionDeletion> {
@@ -1287,13 +1483,18 @@ impl Engine {
             Some(deletion) => deletion,
             None => self.begin_connection_deletion(id, keep_native)?,
         };
-        if let Some(definition_ref) = &deletion.definition_ref {
+        self.authorizations.cancel(id);
+        let result = if let Some(definition_ref) = &deletion.definition_ref {
             let edit = crate::lifecycle::CredentialEdit::begin(self, id).await;
             let result = self
                 .finish_credential_deletion(id, definition_ref)
                 .context("托管记录已删除，凭据清理待完成。恢复凭据库访问后可用原命令重试");
-            edit.finish(result).await?;
-        }
+            edit.finish(result)
+        } else {
+            Ok(())
+        };
+        self.pool.forget(id);
+        result?;
         Ok(if keep_native {
             json!({"deleted":true,"nativePreserved":true,"releasedBindings":deletion.released_bindings})
         } else {
@@ -1302,6 +1503,20 @@ impl Engine {
     }
 
     pub async fn rpc(self: &Arc<Self>, method: &str, p: Value) -> Result<Value> {
+        self.rpc_confirmed(method, p, None, None).await
+    }
+
+    pub(crate) async fn rpc_confirmed(
+        self: &Arc<Self>,
+        method: &str,
+        p: Value,
+        confirmed_transfer_origin: Option<&str>,
+        bridge_executable: Option<&Path>,
+    ) -> Result<Value> {
+        anyhow::ensure!(
+            p.get("_bridgeExecutable").is_none(),
+            "共享入口程序由后台确定"
+        );
         if *self.shutdown.borrow() && !matches!(method, "gateway.status" | "gateway.stop") {
             bail!("共享后台正在退出，请在退出完成后重新连接");
         }
@@ -1313,9 +1528,21 @@ impl Engine {
             bail!("统一入口不保存账号授权，请在上游服务的账号中维护认证");
         }
         match method {
-            "httpApi.import" => crate::http_api::import::preview(
-                serde_json::from_value(p).map_err(|_| anyhow::anyhow!("导入参数格式有误"))?,
-            ),
+            "httpApi.import" => {
+                let permit = self
+                    .imports
+                    .clone()
+                    .try_acquire_owned()
+                    .context("OpenAPI 导入正在处理，请稍后重试")?;
+                let request =
+                    serde_json::from_value(p).map_err(|_| anyhow::anyhow!("导入参数格式有误"))?;
+                tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    crate::http_api::import::preview(request)
+                })
+                .await
+                .context("OpenAPI 导入任务未完成")?
+            }
             "gateway.list" => Ok(json!(
                 self.store
                     .connections()?
@@ -1358,6 +1585,7 @@ impl Engine {
             "changes.reconcile" => {
                 let _guard = self.mutation.lock().await;
                 self.reconcile()?;
+                self.maintain_change_storage();
                 Ok(json!({"remaining":self.store.pending_operations()?.len()}))
             }
             "changes.history" => {
@@ -1370,8 +1598,13 @@ impl Engine {
                 for row in &mut page {
                     if row["kind"].is_null() {
                         let op = self.store.operation(required(row, "id")?)?;
-                        if let Some(raw) = self.vault.get(required(&op, "credentialRef")?)?
+                        if let Some(raw) = self
+                            .vault
+                            .get(required(&op, "credentialRef")?)
+                            .ok()
+                            .flatten()
                             && let Ok(change) = serde_json::from_str::<Change>(&raw)
+                            && change.id == row["id"]
                         {
                             row["kind"] = json!(change.kind());
                             row["restoreEffect"] = json!(change.restore_effect());
@@ -1425,7 +1658,8 @@ impl Engine {
             }
             "connections.adopt_source" => {
                 let _guard = self.mutation.lock().await;
-                let source_id = required(&p, "sourceId")?;
+                let source = self.source(required(&p, "sourceId")?)?;
+                let source_id = source.id.as_str();
                 let name = required(&p, "name")?;
                 let mut binding = self
                     .store
@@ -1436,7 +1670,6 @@ impl Engine {
                 if binding.mode != "direct" {
                     bail!("共享入口不能作为上游配置，请编辑服务连接");
                 }
-                let source = self.source(source_id)?;
                 let mut entry = config::scan(&source)?
                     .into_iter()
                     .find(|e| e.name == name)
@@ -1464,9 +1697,10 @@ impl Engine {
                 .await?;
                 Ok(connection.public_value())
             }
+            "connections.transfer_preview" => self.transfer_preview(&p),
             "connections.save" => {
                 let _guard = self.mutation.lock().await;
-                self.save(&p).await
+                self.save(&p, confirmed_transfer_origin).await
             }
             "connections.source_detail" => {
                 let (entry, version) = self.detected_draft(&p)?;
@@ -1495,11 +1729,11 @@ impl Engine {
             }
             "connections.export_config" => {
                 let _guard = self.mutation.lock().await;
-                self.export_config(&p)
+                self.export_config(&p, bridge_executable)
             }
             "changes.preview" => {
                 let _guard = self.mutation.lock().await;
-                self.preview(&p)
+                self.preview(&p, bridge_executable)
             }
             "changes.apply" => {
                 let _guard = self.mutation.lock().await;
@@ -1594,7 +1828,7 @@ impl Engine {
                 .await?;
                 Ok(connection.public_value())
             }
-            "oauth.start" => crate::mcp::start_oauth(self.clone(), required(&p, "id")?).await,
+            "oauth.start" => crate::oauth::start(self.clone(), required(&p, "id")?).await,
             "oauth.configure" => crate::mcp::configure_oauth(self.clone(), &p).await,
             "gateway.status" => Ok(
                 json!({"paused":self.paused.load(Ordering::SeqCst),"sessions":self.pool.count()}),
@@ -1603,7 +1837,7 @@ impl Engine {
                 let _guard = self.mutation.lock().await;
                 self.store.set_gateway_paused(true)?;
                 self.paused.store(true, Ordering::SeqCst);
-                self.pool.clear().await;
+                self.pool.clear();
                 Ok(json!({"paused":true}))
             }
             "gateway.resume" => {
@@ -1614,11 +1848,12 @@ impl Engine {
             }
             "gateway.stop" => {
                 self.shutdown.send_replace(true);
-                let _guard = self.mutation.lock().await;
-                // Stopping is temporary; preserve the user's persisted pause preference.
-                self.paused.store(true, Ordering::SeqCst);
-                self.pool.shutdown().await?;
-                Ok(json!({"stopped":true}))
+                let mut result = self.shutdown_result.subscribe();
+                let result = result.wait_for(Option::is_some).await?;
+                match result.as_ref().context("后台退出结果缺失")? {
+                    Ok(()) => Ok(json!({"stopped":true})),
+                    Err(error) => Ok(json!({"stopped":true,"cleanupError":error})),
+                }
             }
             "tools.describe" | "tools.call" => {
                 if self.paused.load(Ordering::SeqCst) {
@@ -1650,16 +1885,20 @@ impl Engine {
                     }
                     return Ok(crate::gateway::description());
                 }
-                if self.definition(&connection)?.http_api.is_some() {
+                let definition = self.definition(&connection)?;
+                if definition.http_api.is_some() {
                     if !connection.active {
                         bail!("连接已断开，请重新连接");
                     }
                     return Ok(crate::http_api::description());
                 }
-                let peer = self.pool.peer(self.clone(), required(&p, "id")?).await?;
+                let (peer, lifetime) = self
+                    .pool
+                    .peer(self.clone(), &connection.id, connection.revision)
+                    .await?;
+                anyhow::ensure!(!lifetime.is_cancelled(), "连接已更新，请重新连接");
                 let mut info =
                     serde_json::to_value(peer.peer_info().context("上游未返回服务信息")?)?;
-                let definition = self.definition(&self.store.connection(required(&p, "id")?)?)?;
                 if let Some(capabilities) =
                     info.get_mut("capabilities").and_then(Value::as_object_mut)
                 {
@@ -1711,8 +1950,14 @@ impl Engine {
             return crate::http_api::probe(self.clone(), id, execute_probe, expected_revision)
                 .await;
         }
-        let expected_revision = self.store.connection(id)?.revision;
-        let temporary = McpPool::default();
+        let expected_revision = connection.revision;
+        let recheck_oauth =
+            execute_probe && connection.auth_kind == "oauth" && connection.status == "needs_auth";
+        let temporary = if recheck_oauth {
+            McpPool::rechecking_oauth()
+        } else {
+            McpPool::default()
+        };
         let shared = self.store.connections()?.iter().any(|c| {
             c.members
                 .as_ref()
@@ -1722,7 +1967,7 @@ impl Engine {
             .bindings()?
             .iter()
             .any(|binding| binding.connection_id == id && binding.mode == "shared");
-        let pool = if shared && !self.paused.load(Ordering::SeqCst) {
+        let pool = if shared && !recheck_oauth && !self.paused.load(Ordering::SeqCst) {
             &self.pool
         } else {
             &temporary
@@ -1766,15 +2011,15 @@ impl Engine {
             Err(error) => {
                 connection.status = if !connection.active {
                     "disconnected"
+                } else if matches!(
+                    error.downcast_ref::<crate::mcp::ConnectionFailure>(),
+                    Some(crate::mcp::ConnectionFailure::Authentication)
+                ) {
+                    "needs_auth"
                 } else {
                     "error"
                 }
                 .into();
-                if connection.active
-                    && (error.to_string().contains("认证") || error.to_string().contains("授权"))
-                {
-                    connection.status = "needs_auth".into();
-                }
                 connection.tool_count = None;
                 connection.last_error = Some(error.to_string());
                 self.store.save_connection(&connection)?;

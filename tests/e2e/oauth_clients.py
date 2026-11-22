@@ -9,6 +9,7 @@ from pathlib import Path
 import platform
 import signal
 import socket
+import sqlite3
 import threading
 import time
 import traceback
@@ -30,6 +31,71 @@ class OAuthClients(ToolCalls):
 
     def settings(self,connection,value,exit_status=0):
         return self.cli("credentials","oauth-config",connection,"--stdin",value=value,exit_status=exit_status)
+
+    def upstream_state(self, **flags):
+        url = self.url.removesuffix("/mcp") + "/control"
+        request = urllib.request.Request(url, data=json.dumps({"action": "oauth-state", **flags}).encode(),
+                                         headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(request, timeout=5) as response:
+            assert json.load(response) == {"ok": True}
+
+    def cancellable_login(self):
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            port = listener.getsockname()[1]
+        connection = self.save("cancellable_login", url=self.url)
+        settings = {"clientId":CLIENT,"clientSecret":SECRET,"callbackPort":port}
+        self.settings(connection, settings)
+        with ThreadPoolExecutor(max_workers=3) as workers:
+            metadata = self.stats()["gates"].get("metadata", 0)
+            self.control("metadata", "arm")
+            preparing = workers.submit(self.cli, "credentials", "login", connection, exit_status=1)
+            try:
+                self.wait_gate("metadata", metadata)
+                unrelated = workers.submit(self.save, "unrelated_during_metadata", url=self.url).result(timeout=5)
+                workers.submit(self.settings, connection, {"scopes":["documents:read"]}).result(timeout=5)
+                assert "取消" in preparing.result(timeout=5)["error"]["message"]
+            finally:
+                self.control("metadata", "release")
+            self.passed("an edit cancels a held metadata request while unrelated connection writes complete")
+
+            first = self.cli("credentials", "login", connection)
+            second = self.cli("credentials", "login", connection)
+            assert first["url"] != second["url"]
+            assert urllib.parse.parse_qs(urllib.parse.urlsplit(second["url"]).query)["redirect_uri"] == [f"http://127.0.0.1:{port}/callback"]
+            exchange = self.stats()["gates"].get("authorization_code", 0)
+            self.control("authorization_code", "arm")
+
+            def browser_status(url):
+                try:
+                    with urllib.request.urlopen(url, timeout=12) as response:
+                        return response.status
+                except urllib.error.HTTPError as error:
+                    error.close()
+                    return error.code
+                except OSError:
+                    return None
+
+            pending = workers.submit(browser_status, second["url"])
+            try:
+                self.wait_gate("authorization_code", exchange)
+                workers.submit(self.settings, unrelated, {"callbackPort":port}).result(timeout=5)
+                workers.submit(self.cli, "credentials", "disconnect", connection).result(timeout=5)
+                assert pending.result(timeout=5) in {None, 400, 503}
+            finally:
+                self.control("authorization_code", "release")
+        grant = self.data / "fixture-vault" / hashlib.sha256(f"oauth/{connection}".encode()).hexdigest()
+        assert not grant.exists()
+        assert self.cli("connections", "show", connection)["connection"]["status"] == "disconnected"
+        self.passed("same-port retry replaces its callback; an interrupted exchange cannot commit after disconnect")
+
+        self.cli("credentials", "login", connection)
+        assert self.cli("gateway", "stop")["stopped"]
+        assert self.cli("connections", "show", connection)["connection"]["status"] == "needs_auth"
+        authorization = self.cli("credentials", "login", connection)
+        assert browser_status(authorization["url"]) == 200
+        assert not self.invoke(connection, "read_document", {"id":"weekly-fixture"})["output"]["isError"]
+        self.passed("daemon stop cancels a pending callback; the same configured port and connection authorize after restart")
 
     def run(self):
         offline=self.record/"offline"
@@ -113,6 +179,48 @@ class OAuthClients(ToolCalls):
         assert self.cli("cli","run","--manifest",generated["manifest"],"--","read_document","--stdin",value={"id":"weekly-fixture"})["output"]["isError"] is False
         self.passed("backend restart restores the confidential client secret for refresh and keeps existing Bridge/generated references usable")
 
+        grant = self.data / "fixture-vault" / hashlib.sha256(f"oauth/{connection}".encode()).hexdigest()
+        self.cli("gateway", "stop")
+        saved = grant.read_bytes()
+        self.upstream_state(metadataUnavailable=True)
+        try:
+            failure = self.cli("connections", "probe", connection, exit_status=1)
+            assert failure["result"]["connection"]["status"] == "error", failure
+            assert grant.read_bytes() == saved
+        finally:
+            self.upstream_state()
+        assert "result" in bridge_call(clients[0])
+        assert not self.cli("cli", "run", "--manifest", generated["manifest"], "--", "read_document", "--stdin", value={"id": "weekly-fixture"})["output"]["isError"]
+        self.passed("metadata 503 keeps the grant and existing Bridge and generated CLI recover without another login")
+
+        self.cli("gateway", "stop")
+        with sqlite3.connect(self.data / "mcplink.sqlite3") as database:
+            raw, = database.execute("SELECT document FROM connections WHERE id=?", (connection,)).fetchone()
+            previous = json.loads(raw)
+            database.execute("UPDATE connections SET document=? WHERE id=?",
+                             (json.dumps(previous | {"status": "needs_auth"}), connection))
+        self.cli("connections", "tools", connection, exit_status=1)
+        verified = self.cli("connections", "probe", connection)["connection"]
+        assert verified["status"] == "ready" and verified["revision"] == previous["revision"]
+        self.passed("explicit recheck recovers a legacy needs_auth row with a retained grant")
+
+        self.cli("gateway", "stop")
+        self.upstream_state(rejectBearer=True)
+        try:
+            failed = self.cli("connections", "probe", connection, exit_status=1)
+            assert failed["result"]["connection"]["status"] == "needs_auth"
+        finally:
+            self.upstream_state()
+        assert self.cli("connections", "probe", connection)["connection"]["status"] == "ready"
+        self.cli("gateway", "stop")
+        self.upstream_state(revokeGrant=True)
+        failed = self.cli("connections", "probe", connection, exit_status=1)
+        assert failed["result"]["connection"]["status"] == "needs_auth" and not grant.exists()
+        calls_before_recheck = self.stats()["calls"]
+        self.cli("connections", "probe", connection, exit_status=1)
+        assert self.stats()["calls"] == calls_before_recheck
+        self.passed("real upstream 401 and rejected refresh tokens require authentication; a revoked grant is discarded")
+
         calls=self.stats()["calls"]
         self.settings(connection,{"scopes":["offline_access"]})
         assert self.cli("connections","show",connection)["connection"]["status"]=="needs_auth"
@@ -135,6 +243,8 @@ class OAuthClients(ToolCalls):
             assert basic.stats()["refreshes"]>=1 and basic.stats()["registrations"]==0
         finally: basic.close(False)
         self.passed("client_secret_basic authorization and refresh also follow discovered server metadata")
+
+        self.cancellable_login()
 
         runtime_path=self.data/"runtime.json";runtime_bytes=runtime_path.read_bytes();runtime=json.loads(runtime_bytes);posts=[]
         class Legacy(BaseHTTPRequestHandler):
