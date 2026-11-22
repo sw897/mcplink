@@ -64,10 +64,11 @@ def verify_storage(h, previous_binary):
         acl = subprocess.check_output(["/bin/ls", "-le", native], text=True).splitlines()[1:]
         assert acl
     if os.name == "nt":
+        from windows_native_storage import powershell_storage
+
         def dacl(path):
-            command = "(Get-Acl -LiteralPath $env:MCPLINK_ACL_FIXTURE).Sddl"
-            return subprocess.check_output(["powershell.exe", "-NoProfile", "-Command", command],
-                env=h.environment | {"MCPLINK_ACL_FIXTURE":str(path)}, text=True).strip().split("D:", 1)[1]
+            command = "(Get-Acl -LiteralPath $env:MCPLINK_STORAGE_TEST_PATH).Sddl"
+            return powershell_storage(h.environment, command, path).split("D:", 1)[1]
         native_dacl = dacl(native)
     first = preview(connection)
     h.cli("gateway", "stop")

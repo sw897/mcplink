@@ -81,6 +81,16 @@ def namespace(path):
     return hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:20] + "/"
 
 
+def powershell_storage(environment, script, path):
+    # A PowerShell 7 parent can supply module paths incompatible with Windows PowerShell.
+    env = {key: value for key, value in environment.items() if key.casefold() != "psmodulepath"}
+    env["MCPLINK_STORAGE_TEST_PATH"] = str(path)
+    return subprocess.check_output(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference = 'Stop'; " + script],
+        env=env, text=True, timeout=30,
+    ).strip()
+
+
 class NativeStorage:
     def __init__(self, harness):
         assert platform.machine().lower() in {"amd64", "x86_64"}, "Windows x64 is required"
@@ -98,11 +108,7 @@ class NativeStorage:
                 if target.endswith("." + SERVICE)}
 
     def powershell(self, script, path):
-        return subprocess.check_output(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference = 'Stop'; " + script],
-            env=self.harness.environment | {"MCPLINK_STORAGE_TEST_PATH": str(path)},
-            text=True, timeout=30,
-        ).strip()
+        return powershell_storage(self.harness.environment, script, path)
 
     def acl_and_stream(self):
         return self.powershell(

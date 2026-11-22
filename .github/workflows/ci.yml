@@ -84,6 +84,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python -u scripts/prepare_windows_bundler.py
       - name: Build isolated installer for native acceptance
+        id: fixture_bundle
         run: npm run bundle -- --test-fixtures
       - name: Find a previous successful installer for upgrade acceptance
         env:
@@ -285,17 +286,31 @@ jobs:
         timeout-minutes: 8
         run: python -u tests/e2e/updater.py --record artifacts/e2e/ci-updater
       - name: Windows preview release entry point
+        id: windows_release_preview
         if: runner.os == 'Windows'
         timeout-minutes: 12
         run: npm run release:windows
+      - name: Build Windows installer when an earlier gate failed
+        id: windows_native_candidate
+        if: >-
+          failure() && !cancelled() && runner.os == 'Windows' && github.repository == 'sw897/mcplink'
+          && startsWith(github.ref, 'refs/heads/codex/release-acceptance-')
+          && steps.fixture_bundle.outcome == 'success' && steps.windows_release_preview.outcome != 'success'
+        timeout-minutes: 25
+        run: npm run bundle
       - name: Download pinned Windows migration baseline
-        if: runner.os == 'Windows' && github.repository == 'sw897/mcplink' && startsWith(github.ref, 'refs/heads/codex/release-acceptance-')
+        id: windows_native_baseline
+        if: >-
+          !cancelled() && runner.os == 'Windows' && github.repository == 'sw897/mcplink'
+          && startsWith(github.ref, 'refs/heads/codex/release-acceptance-')
+          && (steps.windows_release_preview.outcome == 'success' || steps.windows_native_candidate.outcome == 'success')
         timeout-minutes: 4
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh run download 44477457010 --repo "$env:GITHUB_REPOSITORY" --name packages-windows-2025 --dir artifacts/e2e/ci-windows-native-baseline
       - name: Windows native ACL, Credential Manager and NSIS coverage
-        if: runner.os == 'Windows' && github.repository == 'sw897/mcplink' && startsWith(github.ref, 'refs/heads/codex/release-acceptance-')
+        if: >-
+          !cancelled() && runner.os == 'Windows' && steps.windows_native_baseline.outcome == 'success'
         timeout-minutes: 8
         shell: python {0}
         run: |
