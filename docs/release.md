@@ -67,6 +67,8 @@ SignPath 接入须使用其[可信 GitHub 构建流程](https://docs.signpath.io
 
 `ci.yml` 为 macOS Apple Silicon 和 Windows x64 分别构建合成验收包与发布包，验收 DMG 或 NSIS 安装，并检查实际发布 CLI 对测试凭据库的拒绝路径。打包前清理该目标目录的历史 bundle。升级验收按近期 main 的成功报告筛选支持合成凭据库的旧包，核对版本，按哈希合并相同副本，优先挑选不同版本并记录来源、提交、版本和哈希。缺少合适旧包时记录当前安装生命周期的覆盖范围。Windows 结果以实际 workflow 和原生桌面验收为准。CI 的 `packages-*` 工件只上传发布包、CLI、校验值与公开构建来源清单。验收包、home、Vault、日志、截图和报告留在运行环境中。
 
+常规 Windows CI 在完整端到端验收前分别报告 NTFS ACL、Credential Manager 迁移和 NSIS 覆盖安装。原生迁移使用 [v0.3.2 的公开 Windows 包](https://github.com/sw897/mcplink/releases/tag/v0.3.2)，按固定修订和 SHA-256 验证 CLI ZIP、NSIS 及构建清单。三项通过后，后续验收复用已核对的候选 NSIS。故障注入只允许在本仓库的 `codex/release-acceptance-*` 分支手动触发，并使用独立的检查名。
+
 `release-macos.yml` 仅手动运行，输入必须是与源码版本匹配的已有 tag。仓库需要以下 secrets：
 
 | Secret | 用途 |

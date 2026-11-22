@@ -15,9 +15,23 @@ from windows_installer import management_api, stop_daemon
 from windows_native_storage import NativeStorage, seed_accounts, verify_ntfs
 
 
-BASELINE_REVISION = "71fcdaad393108c42e70d7edc6b3c22c0926fb2e"
-BASELINE_INSTALLER = ("mcplink_0.3.2_x64-setup.exe", "98bd86ee491181f9becf8efbe4daf94c8a24c13471dcadea32f006aff058eaea")
-BASELINE_CLI = ("mcplink_cli_0.3.2_x86_64-pc-windows-msvc.zip", "a962f277abb3290a36b9b340e24241f86042d08a9a81dc77f722ca799ec794d9")
+# Published v0.3.2 Windows release assets and the revision that built them.
+BASELINE_VERSION = "0.3.2"
+BASELINE_REVISION = "61e92213701848d565b9efa6990f7588eb17579a"
+BASELINE_MANAGEMENT_API = 22
+MANAGEMENT_API = 24
+BASELINE_MANIFEST = (
+    "windows-release-manifest.json",
+    "a09ae1f797ef21971cfbe89412cebc8d0e498f558b672c95f35d200744f9e695",
+)
+BASELINE_INSTALLER = (
+    f"mcplink_{BASELINE_VERSION}_x64-setup.exe",
+    "e516eaa369731f324ffd3bb4904651335b31e982b0669054ef23e68d460617c3",
+)
+BASELINE_CLI = (
+    f"mcplink_cli_{BASELINE_VERSION}_x86_64-pc-windows-msvc.zip",
+    "6dbe2ed0d2744df422b09398497d6c95d67bd92c64dc873d900f936662d6a9f0",
+)
 GATES = {"acl": "NTFS ACL", "credentials": "Credential Manager migration", "nsis": "NSIS overlay"}
 VERSION = json.loads((e2e.ROOT / "package.json").read_text(encoding="utf-8"))["version"]
 INSTALLER = f"mcplink_{VERSION}_x64-setup.exe"
@@ -43,16 +57,36 @@ def require_file(path, reason):
     return path
 
 
+def download_baseline(record):
+    destination = record / "baseline"
+    destination.mkdir()
+    command = ["gh", "release", "download", f"v{BASELINE_VERSION}", "--repo", "sw897/mcplink",
+               "--dir", str(destination)]
+    for name, _ in (BASELINE_MANIFEST, BASELINE_CLI, BASELINE_INSTALLER):
+        command.extend(["--pattern", name])
+    subprocess.run(command, check=True, timeout=180)
+
+
+def baseline_file(record, asset):
+    name, expected = asset
+    path = require_file(record / "baseline" / name, f"Baseline {name} is missing")
+    if sha256(path) != expected:
+        raise Blocked(f"Baseline {name} SHA-256 differs from the pinned release")
+    return path
+
+
 def baseline_asset(record, asset):
     name, expected = asset
-    root = record / "baseline/artifacts/build"
-    artifact = require_file(root / "windows-release" / name, f"Baseline {name} is missing")
-    manifest = read_json(require_file(root / "source/release-manifest.json", "Baseline manifest is missing"))
-    if manifest["revision"] != BASELINE_REVISION or manifest["conclusion"] != "PASS":
-        raise Blocked("Baseline source revision or verification is invalid")
-    if sha256(artifact) != expected:
-        raise Blocked(f"Baseline {name} SHA-256 differs from the pinned artifact")
-    return artifact
+    path = baseline_file(record, asset)
+    manifest = read_json(baseline_file(record, BASELINE_MANIFEST))
+    if (manifest.get("version") != BASELINE_VERSION or manifest.get("revision") != BASELINE_REVISION
+            or manifest.get("platform") != "windows" or manifest.get("source_dirty") is not False):
+        raise Blocked("Baseline release manifest does not match the pinned Windows source")
+    published = manifest["artifacts"].get(name, {})
+    if published.get("sha256") != expected or published.get("bytes") != path.stat().st_size:
+        raise Blocked(f"Baseline {name} differs from its published manifest")
+    print(f"PASS public baseline v{BASELINE_VERSION} {name} SHA-256 {expected}", flush=True)
+    return path
 
 
 def record_candidate(record):
@@ -110,14 +144,14 @@ def check_credentials(record):
         native = NativeStorage(h)
         e2e.BINARY = previous
         token, oauth = seed_accounts(h)
-        assert management_api(h) == 23
+        assert management_api(h) == BASELINE_MANAGEMENT_API
         native.prepare(oauth)
         stop_daemon(h, previous)
 
         e2e.BINARY = current
         for connection in (token, oauth):
             assert h.rpc("connections.probe", {"id": connection})["connection"]["status"] == "ready"
-        assert management_api(h) == 24
+        assert management_api(h) == MANAGEMENT_API
         native.verify_migration()
         stop_daemon(h, current)
     finally:
@@ -126,7 +160,8 @@ def check_credentials(record):
         finally:
             if native:
                 native.close()
-    print("PASS native credentials retained and synthetic test entries removed", flush=True)
+    print(f"PASS native credentials migrated from management API {BASELINE_MANAGEMENT_API} to {MANAGEMENT_API}"
+          " and synthetic test entries were removed", flush=True)
 
 
 def check_installer(record, integrated=False):
@@ -140,8 +175,8 @@ def check_installer(record, integrated=False):
     )
     report = read_json(destination / "report.json")
     assert report["conclusion"] == "PASS"
-    assert (report["previous_management_api"], report["management_api"]) == (23, 24)
-    print(f"PASS NSIS {report['installer_sha256']} upgraded management API 23 to 24", flush=True)
+    assert (report["previous_management_api"], report["management_api"]) == (BASELINE_MANAGEMENT_API, MANAGEMENT_API)
+    print(f"PASS NSIS {report['installer_sha256']} upgraded management API {BASELINE_MANAGEMENT_API} to {MANAGEMENT_API}", flush=True)
     if integrated:
         assert report["synthetic_credentials_removed"]
 
@@ -190,13 +225,15 @@ def summary(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("step", choices=[*GATES, "candidate", "installed-mcp", "summary"])
+    parser.add_argument("step", choices=[*GATES, "download-baseline", "candidate", "installed-mcp", "summary"])
     parser.add_argument("--record", type=Path, required=True)
     parser.add_argument("--fault", choices=["none", "acl-failure", "missing-nsis"], default="none")
     args = parser.parse_args()
     args.record = args.record.resolve()
     args.record.mkdir(parents=True, exist_ok=True)
-    if args.step == "candidate":
+    if args.step == "download-baseline":
+        download_baseline(args.record)
+    elif args.step == "candidate":
         record_candidate(args.record)
     elif args.step == "installed-mcp":
         check_installer(args.record, integrated=True)

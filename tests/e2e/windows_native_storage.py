@@ -219,15 +219,14 @@ class NativeStorage:
         self.assert_oauth()
         self.original_config = tomllib.loads(self.config.read_text(encoding="utf-8"))
         connection = h.rpc("connections.save", {"name": "native_storage_fixture", "definition": {
-            "url": h.url, "headers": {"Authorization": "synthetic-fixture-authorization", "X-Synthetic": "x" * 3100},
+            "url": h.url, "headers": {"Authorization": "synthetic-fixture-authorization"},
         }})["id"]
         _, result = h.changes(connection, ["codex:user"], mode="direct")
         self.previous_operation = result["results"][0]["operationId"]
         payload = {"connectionId": connection, "targetSourceIds": ["codex:user"], "mode": "direct", "action": "disable"}
         self.stale_preview = h.rpc("changes.preview", payload)["planId"]
         self.valid_preview = h.rpc("changes.preview", payload)["planId"]
-        self.stale_targets = self.native_targets(f"plan/{self.stale_preview}")
-        assert len(self.stale_targets) > 1, "Baseline did not persist a chunked preview in Credential Manager"
+        assert self.native_targets(f"plan/{self.stale_preview}"), "Baseline did not persist its preview in Credential Manager"
         assert self.native_targets(f"change/{self.previous_operation}")
 
         self.orphan = f"change/{uuid.uuid4()}"
@@ -249,12 +248,26 @@ class NativeStorage:
         assert operation["status"] == "applied", operation.get("message")
         assert h.rpc("changes.restore", {"operationId": operation["operationId"]})["status"] == "restored"
 
-        # Advance the grace marker only in this isolated database.
+        # The published baseline predates chunking. Use the candidate's native
+        # Vault to write a chunked plan, then remove its index to model old storage.
+        chunked = h.rpc("connections.save", {"name": "native_chunked_preview_fixture", "definition": {
+            "url": h.url, "headers": {"X-Synthetic": "x" * 3100},
+        }})["id"]
+        chunked_preview = h.rpc("changes.preview", {
+            "connectionId": chunked, "targetSourceIds": ["codex:user"], "mode": "direct",
+        })["planId"]
+        chunked_key = f"plan/{chunked_preview}"
+        assert any("/chunks-v1/" in target for target in self.native_targets(chunked_key)), (
+            "Expected a native chunked preview"
+        )
         with sqlite3.connect(self.database) as db:
+            cursor = db.execute("DELETE FROM change_previews WHERE id=?", (chunked_preview,))
+            assert cursor.rowcount == 1
             cursor = db.execute("UPDATE settings SET value='0' WHERE name='changes.legacy-sweep'")
             assert cursor.rowcount == 1
         h.rpc("changes.reconcile")
-        assert not self.native_targets(f"plan/{self.stale_preview}"), "Expired native plan or its chunks remain"
+        assert not self.native_targets(f"plan/{self.stale_preview}"), "Expired baseline plan remains"
+        assert not self.native_targets(chunked_key), "Legacy-shaped native plan or its chunks remain"
         assert not self.native_targets(self.orphan), "Unreferenced native snapshot remains"
         for target in self.sentinels:
             assert target in self.manager.targets(target), "Sweep crossed a namespace or service boundary"

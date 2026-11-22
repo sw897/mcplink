@@ -23,6 +23,10 @@ concurrency:
 
 jobs:
   build:
+    name: >-
+      ${{ inputs.windows_native_fault && inputs.windows_native_fault != 'none'
+        && format('Windows native diagnostics ({0})', inputs.windows_native_fault)
+        || format('build ({0})', matrix.os) }}
     strategy:
       fail-fast: false
       matrix:
@@ -31,10 +35,20 @@ jobs:
     timeout-minutes: ${{ matrix.os == 'windows-2025' && 75 || 60 }}
     env:
       PYTHONUTF8: "1"
-      WINDOWS_NATIVE_GATES: ${{ matrix.os == 'windows-2025' && github.repository == 'sw897/mcplink' && startsWith(github.ref, 'refs/heads/codex/release-acceptance-') }}
+      WINDOWS_NATIVE_GATES: >-
+        ${{ matrix.os == 'windows-2025'
+          && (!inputs.windows_native_fault || inputs.windows_native_fault == 'none'
+            || (github.event_name == 'workflow_dispatch' && github.repository == 'sw897/mcplink'
+              && startsWith(github.ref, 'refs/heads/codex/release-acceptance-'))) }}
       WINDOWS_NATIVE_RECORD: artifacts/e2e/ci-windows-native
       WINDOWS_NATIVE_FAULT: ${{ inputs.windows_native_fault || 'none' }}
     steps:
+      - name: Validate Windows diagnostic scope
+        if: env.WINDOWS_NATIVE_FAULT != 'none' && env.WINDOWS_NATIVE_GATES != 'true'
+        shell: pwsh
+        run: |
+          Write-Error "Windows fixture faults require a manual run on a release-acceptance branch in sw897/mcplink"
+          exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -45,12 +59,6 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.13"
-      - name: Validate Windows diagnostic scope
-        if: env.WINDOWS_NATIVE_FAULT != 'none' && env.WINDOWS_NATIVE_GATES != 'true'
-        shell: pwsh
-        run: |
-          Write-Error "Windows fixture faults require the release-acceptance branch in sw897/mcplink"
-          exit 1
       - name: Windows signing refusal boundaries
         if: runner.os == 'Windows'
         shell: python {0}
@@ -96,12 +104,12 @@ jobs:
         if: ${{ !cancelled() && env.WINDOWS_NATIVE_GATES == 'true' }}
         timeout-minutes: 5
         run: python -u tests/e2e/windows_native_gates.py acl --record "$env:WINDOWS_NATIVE_RECORD" --fault "$env:WINDOWS_NATIVE_FAULT"
-      - name: Download pinned Windows migration baseline
+      - name: Download pinned public Windows release baseline
         if: ${{ !cancelled() && env.WINDOWS_NATIVE_GATES == 'true' }}
         timeout-minutes: 4
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh run download 44477457010 --repo "$env:GITHUB_REPOSITORY" --name packages-windows-2025 --dir "$env:WINDOWS_NATIVE_RECORD/baseline"
+        run: python -u tests/e2e/windows_native_gates.py download-baseline --record "$env:WINDOWS_NATIVE_RECORD"
       - name: Windows Credential Manager migration
         if: ${{ !cancelled() && env.WINDOWS_NATIVE_GATES == 'true' }}
         timeout-minutes: 5
@@ -367,15 +375,9 @@ jobs:
         timeout-minutes: 8
         run: python -u tests/e2e/updater.py --record artifacts/e2e/ci-updater
       - name: Windows preview release entry point
-        if: runner.os == 'Windows'
+        if: env.WINDOWS_NATIVE_GATES == 'true'
         timeout-minutes: 25
-        shell: pwsh
-        run: |
-          if ($env:WINDOWS_NATIVE_GATES -eq "true") {
-            npm run release:windows -- --ci-prebuilt
-          } else {
-            npm run release:windows
-          }
+        run: npm run release:windows -- --ci-prebuilt
       - name: Installed Windows authentication and MCP smoke
         if: env.WINDOWS_NATIVE_GATES == 'true'
         timeout-minutes: 8
@@ -416,6 +418,10 @@ jobs:
 
 
   public-source:
+    name: >-
+      ${{ inputs.windows_native_fault && inputs.windows_native_fault != 'none'
+        && format('Windows native diagnostics ({0}, source audit skipped)', inputs.windows_native_fault)
+        || 'public-source' }}
     if: ${{ !inputs.windows_native_fault || inputs.windows_native_fault == 'none' }}
     runs-on: macos-15-intel
     timeout-minutes: 15
