@@ -868,6 +868,9 @@ if (location.origin === ORIGIN) {
         for name, title in [("gateway_alpha", "聚合服务甲"), ("gateway_beta", "聚合服务乙")]:
             harness.rpc("connections.save", {"name":name,"title":title,"accountLabel":"隔离账号甲" if name == "gateway_alpha" else "隔离账号乙","definition":{"url":harness.url,"headers":{"Authorization":"synthetic-fixture-authorization"}}})
         button("刷新本机配置")
+        wait_for("""["聚合服务甲", "聚合服务乙"].every(title =>
+            [...document.querySelectorAll('.account-card .account-heading h2')]
+                .some(heading => heading.textContent.trim() === title))""")
         button("统一入口")
         browser("click", ".header-actions button.primary")
         browser("find", "label", "入口名称", "fill", "桌面聚合入口")
