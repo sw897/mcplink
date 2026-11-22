@@ -104,6 +104,18 @@ pub(crate) fn endpoint(definition: &Definition) -> Result<Url> {
     )?;
     let url = Url::parse(&raw).map_err(|_| anyhow::anyhow!("HTTP 服务地址无效"))?;
     check_url(&url)?;
+    #[cfg(windows)]
+    if url.scheme() == "http"
+        && let Some(Host::Ipv6(address)) = url.host()
+        && let Some(loopback) = address.to_ipv4_mapped()
+        && loopback.is_loopback()
+    {
+        // Winsock opens IPv6 sockets in IPv6-only mode by default.
+        let mut url = url;
+        url.set_ip_host(loopback.into())
+            .map_err(|_| anyhow::anyhow!("本机 HTTP 地址无效"))?;
+        return Ok(url);
+    }
     Ok(url)
 }
 

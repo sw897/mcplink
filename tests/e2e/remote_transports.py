@@ -4,11 +4,13 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime,timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import hashlib
+from ipaddress import IPv6Address
 import json
 from pathlib import Path
 import platform
 import threading
 import traceback
+from urllib.parse import urlsplit
 
 from tool_calls import ToolCalls
 from run import BINARY
@@ -38,12 +40,18 @@ class RemoteTransports(ToolCalls):
                 self.environment.pop(key, None)
             try:
                 for name, host in [("local_dns", "localhost"), ("mapped_loopback", "[::ffff:127.0.0.1]")]:
-                    connection = self.save(name, url=f"http://{host}:{self.port}/mcp")
+                    endpoint = f"http://{host}:{self.port}/mcp"
+                    connection = self.save(name, url=endpoint)
+                    stored = self.cli("connections","show",connection)["definition"]["url"]
+                    if name == "mapped_loopback":
+                        assert str(IPv6Address(urlsplit(stored).hostname).ipv4_mapped) == "127.0.0.1"
                     assert self.cli("connections","probe",connection)["connection"]["status"] == "ready"
+                    assert self.cli("connections","show",connection)["definition"]["url"] == stored
                 management = json.loads((self.data/"runtime.json").read_text())["port"]
-                connection = self.save("management_target", url=f"http://127.0.0.1:{management}/mcp")
-                result = self.cli("connections","probe",connection,exit_status=1)
-                assert "本机管理端口" in result["result"]["error"]
+                for name, host in [("management_target", "127.0.0.1"), ("management_mapped", "[::ffff:127.0.0.1]")]:
+                    connection = self.save(name, url=f"http://{host}:{management}/mcp")
+                    result = self.cli("connections","probe",connection,exit_status=1)
+                    assert "本机管理端口" in result["result"]["error"]
                 assert not proxy_requests
             finally:
                 proxy.shutdown()
