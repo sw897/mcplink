@@ -124,10 +124,12 @@ def run(record, live=False):
         result = subprocess.run([str(driver)], input=json.dumps({**args, **(options or {})}), capture_output=True, text=True, encoding="utf-8", timeout=25)
         assert result.returncode in (0, 2), f"{name}: driver crashed"
         value = json.loads(result.stdout)
-        if phase:
-            assert result.returncode == 0 and value.get("phase") == phase, f"{name}: {value}"
         if error:
             assert result.returncode == 2 and error in value.get("error", ""), f"{name}: {value}"
+        else:
+            assert result.returncode == 0, f"{name}: {value.get('error', 'missing driver error')}"
+        if phase:
+            assert value.get("phase") == phase, f"{name}: {value}"
         scenarios.append(name)
         return value
 

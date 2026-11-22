@@ -96,6 +96,10 @@ jobs:
         env:
           MCPLINK_E2E_BINARY: target/debug/mcplink.exe
         run: python -u tests/e2e/remote_transports.py --record artifacts/e2e/ci-windows-remote-preflight
+      - name: Windows updater recovery before packaging
+        if: runner.os == 'Windows' && github.repository == 'sw897/mcplink' && startsWith(github.ref, 'refs/heads/codex/release-acceptance-')
+        timeout-minutes: 8
+        run: python -u tests/e2e/updater.py --record artifacts/e2e/ci-windows-updater-preflight
       - name: Build isolated installer for native acceptance
         run: npm run bundle -- --test-fixtures
       - name: Find a previous successful installer for upgrade acceptance
