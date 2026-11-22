@@ -86,9 +86,15 @@ def verify_storage(h, previous_binary):
         assert subprocess.check_output(["/bin/ls", "-le", native], text=True).splitlines()[1:] == acl
     if os.name == "nt":
         result_dacl = dacl(native)
-        assert result_dacl == native_dacl, (
-            "NTFS DACL changed after apply "
-            f"(flags {native_dacl.partition('(')[0]!r} to {result_dacl.partition('(')[0]!r})"
+        before_flags, before_separator, before_rules = native_dacl.partition("(")
+        after_flags, after_separator, after_rules = result_dacl.partition("(")
+        # Win32 can mark an ordinary file's DACL as auto-inherited after setting it.
+        # Protection and the complete ordered ACEs, including inheritance bits, must match.
+        inherited_marker_added = before_flags == "" and after_flags == "AI"
+        same_rules = (before_separator, before_rules) == (after_separator, after_rules)
+        assert same_rules and (before_flags == after_flags or inherited_marker_added), (
+            f"NTFS DACL changed after apply (flags {before_flags!r} to {after_flags!r}; "
+            f"access rules unchanged: {same_rules})"
         )
         assert dacl(backup).startswith("P") and ";;;WD)" not in dacl(backup)
     h.passed("a preview survives restart, successful apply clears the plan secret, and the outcome and original file permissions remain")
