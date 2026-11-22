@@ -28666,7 +28666,7 @@ SOFTWARE.
 
 
 ========================================================================
-form_urlencoded 1.2.2
+form_urlencoded 1.2.3
 SPDX: MIT OR Apache-2.0
 
 --- LICENSE-APACHE ---
@@ -85669,7 +85669,7 @@ SPDX: ISC
 
 
 ========================================================================
-url 2.5.8
+url 2.5.9
 SPDX: MIT OR Apache-2.0
 
 --- LICENSE-APACHE ---
