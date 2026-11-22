@@ -321,12 +321,23 @@ impl Vault {
         );
         #[cfg(windows)]
         let spec = [("pattern", pattern.as_str())];
+        #[cfg(windows)]
+        let suffix = format!(".{SERVICE}");
         #[cfg(not(windows))]
         let spec = [("service", SERVICE)];
         for entry in keyring_core::Entry::search(&spec.into_iter().collect())? {
             let Some((service, account)) = entry.get_specifiers() else {
                 continue;
             };
+            // Windows splits the native target at its last dot. Reconstruct it
+            // before matching the full service name, which itself contains dots.
+            #[cfg(windows)]
+            let target = format!("{account}.{service}");
+            #[cfg(windows)]
+            let Some(account) = target.strip_suffix(&suffix) else {
+                continue;
+            };
+            #[cfg(not(windows))]
             if service != SERVICE {
                 continue;
             }
