@@ -274,9 +274,9 @@ pub fn apply_receipt(
                 let _ = directory.remove(stage);
                 return Err("独立 CLI 复制或校验失败，原文件已保留".into());
             }
-            directory
-                .rename(name, backup, false)
-                .map_err(|_| "独立 CLI 正被使用或没有写入权限，请停止相关 Agent 后重试")?;
+            directory.rename(name, backup, false).map_err(|error| {
+                format!("独立 CLI 正被使用或没有写入权限，请停止相关 Agent 后重试（{error}）")
+            })?;
             let backed_up =
                 hash_at(&directory, backup).is_ok_and(|hash| hash.as_ref() == Some(&target.sha256));
             if !backed_up || directory.rename(stage, name, false).is_err() {

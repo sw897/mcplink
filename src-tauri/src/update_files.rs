@@ -26,7 +26,8 @@ use std::{
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_SHARE_READ, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    MoveFileExW,
 };
 
 pub(crate) struct Directory {
@@ -120,11 +121,11 @@ impl Directory {
                 .rev()
                 .filter(|directory| directory.is_absolute())
             {
-                // Refuse changes to the ancestry while using name-based Windows operations.
+                // Keep the ancestry pinned against deletion while allowing writes to its entries.
                 let open = || {
                     OpenOptions::new()
                         .read(true)
-                        .share_mode(FILE_SHARE_READ)
+                        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
                         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
                         .open(directory)
                 };
