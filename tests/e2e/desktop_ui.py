@@ -42,6 +42,9 @@ def main():
     stale_editor = {}
     stale_held = threading.Event()
     stale_release = threading.Event()
+    delay_inspection = threading.Event()
+    inspection_held = threading.Event()
+    inspection_release = threading.Event()
     oauth_release = threading.Event()
     form_requests = []
 
@@ -78,6 +81,11 @@ def main():
                 delayed = json.loads(response)
                 delayed["ok"]["connection"]["title"] = "过期定义"
                 response = json.dumps(delayed)
+            if method == "connections.tools" and delay_inspection.is_set():
+                delay_inspection.clear()
+                inspection_held.set()
+                if not inspection_release.wait(30):
+                    return self.send_error(504)
             self.send_response(200)
             self.send_header("Content-Type","application/json")
             self.end_headers()
@@ -1147,13 +1155,23 @@ if (location.origin === ORIGIN) {
         assert failed_detail["status"] != "ready" and "HTTP 401" in failed_detail["lastError"]
         assert len(api.requests) == 3
         checks.append("a failed real probe remains failed, cannot replay from its confirmation, and local inspection still shows tools plus the last upstream failure")
+
+        delay_inspection.set()
+        button("查看工具")
+        assert inspection_held.wait(10), "The local tool inspection response was not held"
         browser("press", "Escape")
-        wait_for("!document.querySelector('dialog[open]')")
+        wait_for("!document.querySelector('dialog[open], .toast')")
+        inspection_release.set()
+        wait_for("document.querySelector('.toast')?.innerText.includes('上次上游调用未通过')")
+        assert json.loads(browser("eval", "!document.querySelector('dialog[open]')"))
+        assert len(api.requests) == 3
+        checks.append("a delayed local tool inspection keeps a dismissed service dialog closed and sends no upstream request")
         browser("click", "nav button:first-child")
         recovery_forms_acceptance()
         result["conclusion"]="PASS"
     finally:
         stale_release.set()
+        inspection_release.set()
         oauth_release.set()
         try:
             if result["conclusion"] != "PASS":

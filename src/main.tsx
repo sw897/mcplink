@@ -267,7 +267,12 @@ function App() {
             : result.connection.status !== "ready" ||
               !!result.connection.lastError,
       });
-      setDialog({ kind: "detail", connection: result.connection });
+      // Keep a dismissal or another dialog opened while the request was pending.
+      setDialog((current) =>
+        current === dialog
+          ? { kind: "detail", connection: result.connection }
+          : current,
+      );
     }
   };
   const visibleTools =
