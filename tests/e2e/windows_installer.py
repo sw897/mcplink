@@ -135,7 +135,12 @@ def main():
         else:
             primary, oauth = seed_accounts(harness)
             connections = [primary, oauth]
-            harness.changes(primary, ["codex:user", "hermes:user"], mode="shared")
+            if native:
+                # Published builds before Vault chunking store each plan in one credential.
+                for source in ("codex:user", "hermes:user"):
+                    harness.changes(primary, [source], mode="shared")
+            else:
+                harness.changes(primary, ["codex:user", "hermes:user"], mode="shared")
         configs = [harness.home / ".codex/config.toml", harness.home / ".hermes/config.yaml"]
         if native_upgrade:
             report["previous_management_api"] = management_api(harness)
