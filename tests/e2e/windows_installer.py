@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import time
 import traceback
 import urllib.request
@@ -12,6 +13,23 @@ import urllib.request
 import run as e2e
 from daemon_lifecycle import exited, wait_until
 from release_vault import verify as verify_release_vault
+from windows_native_storage import NativeStorage, seed_accounts
+
+
+def stop_daemon(harness, binary):
+    pid = json.loads((harness.data / "runtime.json").read_text())["pid"]
+    result = subprocess.run([str(binary), "gateway", "stop"], env=harness.environment,
+                            capture_output=True, text=True, timeout=90)
+    assert result.returncode == 0, "The daemon did not release its runtime lock"
+    if not exited(pid):
+        print("WAIT for the daemon process to exit", flush=True)
+        wait_until(lambda: exited(pid))
+
+
+def management_api(harness):
+    runtime = json.loads((harness.data / "runtime.json").read_text())
+    with urllib.request.urlopen(f'http://127.0.0.1:{runtime["port"]}/health', timeout=10) as response:
+        return json.load(response)["managementApi"]
 
 
 def main():
@@ -22,16 +40,19 @@ def main():
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--production", action="store_true", help="Install the distributable and verify the system Vault boundary")
     modes.add_argument("--native-migration", action="store_true", help="Upgrade distinct distributables using synthetic grants in Windows Credential Manager")
+    modes.add_argument("--native-overlay", action="store_true", help="Upgrade distinct distributables with an isolated credential-free connection")
     parser.add_argument("--record", type=Path, required=True)
     args = parser.parse_args()
     if args.production and args.previous_installer:
         parser.error("The production package smoke test uses a clean install")
-    if args.native_migration and not args.previous_installer:
-        parser.error("--native-migration requires a previous distributable installer")
+    native_upgrade = args.native_migration or args.native_overlay
+    if native_upgrade and not args.previous_installer:
+        parser.error("Native upgrade requires a previous distributable installer")
     record = args.record.resolve()
     record.mkdir(parents=True, exist_ok=False)
     report = {"conclusion": "FAIL", "scenarios": [], "scope": "isolated NSIS installation and synthetic credential store"}
     original_binary, harness, native = e2e.BINARY, None, None
+    directory = record / "Test Applications/mcplink"
 
     def passed(name):
         report["scenarios"].append({"scenario": name, "result": "PASS"})
@@ -48,25 +69,11 @@ def main():
             assert time.monotonic() < deadline, "Installed CLI is missing"
             time.sleep(0.1)
 
-    def stop():
-        pid = json.loads((harness.data / "runtime.json").read_text())["pid"]
-        result = subprocess.run([str(e2e.BINARY), "gateway", "stop"], env=harness.environment, capture_output=True, text=True, timeout=90)
-        assert result.returncode == 0, "Installed daemon did not release its runtime lock"
-        # NSIS must be able to replace the CLI executable after the runtime lock is released.
-        if not exited(pid):
-            print("WAIT for the installed daemon process to exit before running NSIS", flush=True)
-            wait_until(lambda: exited(pid))
-
     def verify_signature(directory):
         if args.require_signature:
             for path in [args.installer.resolve(), directory / "mcplink.exe", directory / "mcplink-desktop.exe"]:
                 subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(e2e.ROOT / "scripts/sign-windows.ps1"), "-VerifyOnly", "-FilePath", str(path)], check=True)
             passed("installer and installed desktop/CLI signatures match the selected publisher and include timestamps")
-
-    def management_api():
-        runtime = json.loads((harness.data / "runtime.json").read_text())
-        with urllib.request.urlopen(f'http://127.0.0.1:{runtime["port"]}/health', timeout=10) as response:
-            return json.load(response)["managementApi"]
 
     def try_generated_cli(launcher):
         process = subprocess.run(
@@ -94,10 +101,11 @@ def main():
         fixture.mkdir()
         harness = e2e.Harness(fixture)
         if args.native_migration:
-            from windows_native_storage import NativeStorage
             native = NativeStorage(harness)
-            report["scope"] = "isolated NSIS upgrade, native NTFS ACL and Windows Credential Manager with synthetic data"
-        directory = record / "Test Applications/mcplink"
+            report["scope"] = "isolated NSIS upgrade with native Windows Credential Manager and synthetic data"
+        if args.native_overlay:
+            harness.environment.pop("MCPLINK_VAULT", None)
+            report["scope"] = "isolated NSIS upgrade with a credential-free synthetic MCP connection"
         first = args.previous_installer or args.installer
         install(first, directory, "baseline install")
         if args.production:
@@ -115,69 +123,78 @@ def main():
         e2e.BINARY = directory / "mcplink.exe"
         report["previous_installer_sha256"] = hashlib.sha256(first.read_bytes()).hexdigest()
         report["distinct_previous_installer"] = args.previous_installer is not None and first.read_bytes() != args.installer.read_bytes()
-        if native:
+        if native_upgrade:
             assert report["distinct_previous_installer"], "The native migration must use distinct installers"
             report["previous_binary_sha256"] = hashlib.sha256(e2e.BINARY.read_bytes()).hexdigest()
-        token = harness.rpc("connections.import", {"sourceId": "hermes:user", "name": "office_docs"})["id"]
-        assert harness.rpc("connections.probe", {"id": token})["connection"]["status"] == "ready"
-        oauth = harness.rpc("connections.save", {"name": "upgrade_oauth", "definition": {"url": harness.url, "oauth": True}})["id"]
-        login = harness.rpc("oauth.start", {"id": oauth})
-        assert urllib.request.urlopen(login["url"], timeout=15).status == 200
-        assert harness.rpc("connections.probe", {"id": oauth})["connection"]["status"] == "ready"
-        harness.changes(token, ["codex:user", "hermes:user"], mode="shared")
+        if args.native_overlay:
+            primary = harness.rpc("connections.save", {"name": "upgrade_documents", "definition": {
+                "command": sys.executable, "args": [str(e2e.FIXTURE), "--stdio"],
+            }})["id"]
+            assert harness.rpc("connections.probe", {"id": primary})["connection"]["status"] == "ready"
+            connections = [primary]
+        else:
+            primary, oauth = seed_accounts(harness)
+            connections = [primary, oauth]
+            harness.changes(primary, ["codex:user", "hermes:user"], mode="shared")
         configs = [harness.home / ".codex/config.toml", harness.home / ".hermes/config.yaml"]
+        if native_upgrade:
+            report["previous_management_api"] = management_api(harness)
         if native:
-            report["previous_management_api"] = management_api()
             output = record / "Existing generated CLI"
-            subprocess.run([str(e2e.BINARY), "cli", "generate", token, "--name", "upgrade-tools",
+            subprocess.run([str(e2e.BINARY), "cli", "generate", primary, "--name", "upgrade-tools",
                             "--output", str(output), "--tool", "read_document"],
                            env=harness.environment, check=True, capture_output=True, timeout=45)
             launcher = output / "upgrade-tools.ps1"
             existing_launcher = launcher.read_bytes()
             try_generated_cli(launcher)
-            native.prepare(oauth)
+            native.oauth_id = oauth
+            native.assert_oauth()
         before = [p.read_bytes() for p in configs]
-        stop()
-        passed("the baseline installer initializes token and OAuth accounts and two native shared bindings")
+        stop_daemon(harness, e2e.BINARY)
+        passed("the baseline installer initializes a connection and native configuration" if args.native_overlay
+               else "the baseline installer initializes token and OAuth accounts and two native shared bindings")
 
         install(args.installer, directory, "upgrade")
-        if native:
+        if native_upgrade:
             report["installed_binary_sha256"] = hashlib.sha256(e2e.BINARY.read_bytes()).hexdigest()
             assert report["installed_binary_sha256"] != report["previous_binary_sha256"], "Installer did not replace the CLI"
             assert report["installed_binary_sha256"] == hashlib.sha256(original_binary.read_bytes()).hexdigest(), "Installed CLI differs from the acceptance build"
-        for connection in [token, oauth]:
+            assert (directory / "mcplink-desktop.exe").is_file(), "Installed desktop is missing"
+        for connection in connections:
             assert harness.rpc("connections.probe", {"id": connection})["connection"]["status"] == "ready"
         assert [p.read_bytes() for p in configs] == before
-        client = harness.bridge(token, "installed-upgrade")
-        assert "result" in client.call("tools/call", {"name": "read_document", "arguments": {"id": "weekly-fixture"}})
+        client = harness.bridge(primary, "installed-upgrade")
+        response = client.call("tools/call", {"name": "read_document", "arguments": {"id": "weekly-fixture"}})
+        assert not response["result"].get("isError"), "Installed Bridge could not call the fixture tool"
         client.close(); harness.clients.clear()
+        if native_upgrade:
+            report["management_api"] = management_api(harness)
         if native:
-            report["management_api"] = management_api()
             native.assert_oauth()
             assert launcher.read_bytes() == existing_launcher
             try_generated_cli(launcher)
-        passed("installing the candidate preserves managed identities, authentication and native bytes and supports an actual MCP call")
-        if native:
-            native.verify_migration(passed)
-            before = [p.read_bytes() for p in configs]
-        stop()
+        passed("installing the candidate preserves configuration and supports an actual MCP call" if args.native_overlay
+               else "installing the candidate preserves managed identities, authentication and native bytes and supports an actual MCP call")
+        stop_daemon(harness, e2e.BINARY)
         verify_signature(directory)
         install(args.installer, directory, "reinstall")
         assert [p.read_bytes() for p in configs] == before
-        assert harness.rpc("connections.probe", {"id": oauth})["connection"]["status"] == "ready"
-        stop()
-        passed("reinstalling the candidate retains OAuth authorization and native configuration")
-        if native:
+        assert harness.rpc("connections.probe", {"id": connections[-1]})["connection"]["status"] == "ready"
+        stop_daemon(harness, e2e.BINARY)
+        passed("reinstalling the candidate retains its connection and native configuration" if args.native_overlay
+               else "reinstalling the candidate retains OAuth authorization and native configuration")
+        if native_upgrade:
             assert hashlib.sha256(e2e.BINARY.read_bytes()).hexdigest() == report["installed_binary_sha256"]
         uninstall(directory)
         e2e.BINARY = original_binary
         assert [p.read_bytes() for p in configs] == before
-        assert {c["id"] for c in harness.rpc("snapshot")["connections"]} >= {token, oauth}
-        if native:
-            for connection in [token, oauth]:
+        assert {c["id"] for c in harness.rpc("snapshot")["connections"]} >= set(connections)
+        if native_upgrade:
+            for connection in connections:
                 assert harness.rpc("connections.probe", {"id": connection})["connection"]["status"] == "ready"
-            native.assert_oauth()
-            stop()
+            if native:
+                native.assert_oauth()
+            stop_daemon(harness, e2e.BINARY)
         passed("uninstall removes binaries while preserving managed data and native configuration for recovery")
 
     try:
@@ -191,11 +208,13 @@ def main():
     finally:
         e2e.BINARY = original_binary
         try:
-            if harness:
-                harness.close(False)
-            if native:
-                native.close()
-                report["synthetic_credentials_removed"] = True
+            try:
+                if harness:
+                    harness.close(False)
+            finally:
+                if native:
+                    native.close()
+                    report["synthetic_credentials_removed"] = True
         except Exception:
             report["conclusion"] = "FAIL"
             report["cleanup_failed"] = True

@@ -7,6 +7,7 @@ import platform
 import sqlite3
 import subprocess
 import tomllib
+import urllib.request
 import uuid
 
 
@@ -91,6 +92,110 @@ def powershell_storage(environment, script, path):
     ).strip()
 
 
+def dacl(environment, path):
+    command = "(Get-Acl -LiteralPath $env:MCPLINK_STORAGE_TEST_PATH).Sddl"
+    return powershell_storage(environment, command, path).split("D:", 1)[1]
+
+
+def assert_preserved_dacl(before, after):
+    before_flags, before_separator, before_rules = before.partition("(")
+    after_flags, after_separator, after_rules = after.partition("(")
+    # Win32 can mark an ordinary file's DACL as auto-inherited after setting it.
+    added_inheritance_marker = before_flags == "" and after_flags == "AI"
+    same_rules = (before_separator, before_rules) == (after_separator, after_rules)
+    assert same_rules and (before_flags == after_flags or added_inheritance_marker), (
+        f"NTFS DACL changed (flags {before_flags!r} to {after_flags!r}, "
+        f"access rules unchanged: {same_rules})"
+    )
+
+
+def assert_private(environment, path, current_sid):
+    details = powershell_storage(
+        environment,
+        "$acl=Get-Acl -LiteralPath $env:MCPLINK_STORAGE_TEST_PATH; "
+        "@{protected=$acl.AreAccessRulesProtected; rules=@("
+        "$acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]) | "
+        "ForEach-Object { @{sid=$_.IdentityReference.Value; inherited=$_.IsInherited; "
+        "access=$_.AccessControlType.ToString(); rights=[int]$_.FileSystemRights} })} "
+        "| ConvertTo-Json -Depth 4 -Compress",
+        path,
+    )
+    acl = json.loads(details)
+    assert acl["protected"], f"Expected protected DACL on {path.name}"
+    rules = acl["rules"]
+    assert len(rules) == 2 and {rule["sid"] for rule in rules} == {current_sid, "S-1-5-18"}, path.name
+    assert all(not rule["inherited"] and rule["access"] == "Allow" and rule["rights"] == 0x1F01FF
+               for rule in rules), path.name
+
+
+def verify_ntfs(h, inject_failure=False):
+    config = h.home / ".codex/config.toml"
+    connection = h.rpc("connections.save", {"name": "native_acl_fixture", "definition": {
+        "url": h.url, "headers": {"Authorization": "synthetic-fixture-authorization"},
+    }})["id"]
+
+    def apply():
+        _, result = h.changes(connection, ["codex:user"], mode="direct")
+        operation, = result["results"]
+        return operation["operationId"]
+
+    def restore(operation):
+        assert h.rpc("changes.restore", {"operationId": operation})["status"] == "restored"
+
+    inherited = dacl(h.environment, config)
+    assert not inherited.startswith("P"), "Expected a config with inherited access rules"
+    operation = apply()
+    assert_preserved_dacl(inherited, dacl(h.environment, config))
+    restore(operation)
+    assert_preserved_dacl(inherited, dacl(h.environment, config))
+    h.passed("NTFS inherited access rules survive apply and restore")
+
+    powershell_storage(
+        h.environment,
+        "$p=$env:MCPLINK_STORAGE_TEST_PATH; $acl=Get-Acl -LiteralPath $p; "
+        "$acl.SetAccessRuleProtection($true,$true); "
+        "$sid=[Security.Principal.SecurityIdentifier]::new('S-1-5-32-545'); "
+        "$rule=[Security.AccessControl.FileSystemAccessRule]::new($sid,'Read','Allow'); "
+        "$acl.SetAccessRule($rule); Set-Acl -LiteralPath $p -AclObject $acl; "
+        "Set-Content -LiteralPath $p -Stream McplinkSyntheticTest -NoNewline -Value 'synthetic-stream'",
+        config,
+    )
+
+    def acl_and_stream():
+        return powershell_storage(
+            h.environment, "$p=$env:MCPLINK_STORAGE_TEST_PATH; (Get-Acl -LiteralPath $p).Sddl; "
+            "Get-Content -Raw -LiteralPath $p -Stream McplinkSyntheticTest", config,
+        )
+
+    before = acl_and_stream()
+    assert before.split("D:", 1)[1].startswith("P") and before.endswith("synthetic-stream")
+    expected = "intentional ACL mismatch\n" + before if inject_failure else before
+    operation = apply()
+    assert acl_and_stream() == expected, (
+        "Injected NTFS ACL mismatch" if inject_failure else "Native ACL or alternate stream changed on apply"
+    )
+    user_sid = powershell_storage(
+        h.environment, "[Security.Principal.WindowsIdentity]::GetCurrent().User.Value", config,
+    )
+    backup = h.data / "backups" / (operation + ".config")
+    for path in [h.data, h.data / "mcplink.sqlite3", backup.parent, backup]:
+        assert_private(h.environment, path, user_sid)
+    restore(operation)
+    assert acl_and_stream() == before, "Native ACL or alternate stream changed on restore"
+    h.passed("NTFS protected DACL and named stream survive apply and restore; backup and database ACLs are private")
+
+
+def seed_accounts(h):
+    token = h.rpc("connections.import", {"sourceId": "hermes:user", "name": "office_docs"})["id"]
+    oauth = h.rpc("connections.save", {"name": "upgrade_oauth", "definition": {"url": h.url, "oauth": True}})["id"]
+    login = h.rpc("oauth.start", {"id": oauth})
+    with urllib.request.urlopen(login["url"], timeout=15) as response:
+        assert response.status == 200
+    for connection in (token, oauth):
+        assert h.rpc("connections.probe", {"id": connection})["connection"]["status"] == "ready"
+    return token, oauth
+
+
 class NativeStorage:
     def __init__(self, harness):
         assert platform.machine().lower() in {"amd64", "x86_64"}, "Windows x64 is required"
@@ -106,34 +211,6 @@ class NativeStorage:
     def native_targets(self, key):
         return {target for target in self.manager.targets(self.primary + key)
                 if target.endswith("." + SERVICE)}
-
-    def powershell(self, script, path):
-        return powershell_storage(self.harness.environment, script, path)
-
-    def acl_and_stream(self):
-        return self.powershell(
-            "$p=$env:MCPLINK_STORAGE_TEST_PATH; "
-            "(Get-Acl -LiteralPath $p).Sddl; "
-            "Get-Content -Raw -LiteralPath $p -Stream McplinkSyntheticTest",
-            self.config,
-        )
-
-    def assert_private(self, path, current_sid):
-        details = self.powershell(
-            "$acl=Get-Acl -LiteralPath $env:MCPLINK_STORAGE_TEST_PATH; "
-            "@{protected=$acl.AreAccessRulesProtected; rules=@("
-            "$acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]) | "
-            "ForEach-Object { @{sid=$_.IdentityReference.Value; inherited=$_.IsInherited; "
-            "access=$_.AccessControlType.ToString(); rights=[int]$_.FileSystemRights} })} "
-            "| ConvertTo-Json -Depth 4 -Compress",
-            path,
-        )
-        acl = json.loads(details)
-        assert acl["protected"], f"Expected protected DACL on {path.name}"
-        rules = acl["rules"]
-        assert len(rules) == 2 and {rule["sid"] for rule in rules} == {current_sid, "S-1-5-18"}, path.name
-        assert all(not rule["inherited"] and rule["access"] == "Allow" and rule["rights"] == 0x1F01FF
-                   for rule in rules), path.name
 
     def prepare(self, oauth_id):
         h = self.harness
@@ -161,35 +238,16 @@ class NativeStorage:
         for target in [f"{self.primary}{self.orphan}.{SERVICE}", *self.sentinels]:
             self.manager.seed(target)
 
-        self.powershell(
-            "$p=$env:MCPLINK_STORAGE_TEST_PATH; $acl=Get-Acl -LiteralPath $p; "
-            "$acl.SetAccessRuleProtection($true,$true); "
-            "$sid=[Security.Principal.SecurityIdentifier]::new('S-1-5-32-545'); "
-            "$rule=[Security.AccessControl.FileSystemAccessRule]::new($sid,'Read','Allow'); "
-            "$acl.SetAccessRule($rule); Set-Acl -LiteralPath $p -AclObject $acl; "
-            "Set-Content -LiteralPath $p -Stream McplinkSyntheticTest -NoNewline -Value 'synthetic-stream'",
-            self.config,
-        )
-        self.original_ntfs = self.acl_and_stream()
-        assert self.original_ntfs.endswith("synthetic-stream")
-
     def assert_oauth(self):
         assert self.native_targets(f"oauth/{self.oauth_id}"), "Synthetic OAuth record missing from Credential Manager"
         assert not (self.harness.data / "fixture-vault").exists()
 
-    def verify_migration(self, passed):
+    def verify_migration(self):
         h = self.harness
         result = h.rpc("changes.apply", {"planId": self.valid_preview})
         operation, = result["results"]
         assert operation["status"] == "applied", operation.get("message")
-        assert self.acl_and_stream() == self.original_ntfs, "Native ACL or alternate stream changed on apply"
-        user_sid = self.powershell("[Security.Principal.WindowsIdentity]::GetCurrent().User.Value", self.config)
-        backup = h.data / "backups" / (operation["operationId"] + ".config")
-        for target in [h.data, self.database, backup.parent, backup]:
-            self.assert_private(target, user_sid)
         assert h.rpc("changes.restore", {"operationId": operation["operationId"]})["status"] == "restored"
-        assert self.acl_and_stream() == self.original_ntfs, "Native ACL or alternate stream changed on restore"
-        passed("NTFS protected DACL and named stream survive apply and restore; backup and database ACLs are private")
 
         # Advance the grace marker only in this isolated database.
         with sqlite3.connect(self.database) as db:
@@ -202,13 +260,12 @@ class NativeStorage:
             assert target in self.manager.targets(target), "Sweep crossed a namespace or service boundary"
         assert self.native_targets(f"change/{self.previous_operation}"), "Sweep removed a live undo snapshot"
         assert h.rpc("changes.restore", {"operationId": self.previous_operation})["status"] == "restored"
-        assert self.acl_and_stream() == self.original_ntfs, "Native ACL or alternate stream changed on historical restore"
         assert tomllib.loads(self.config.read_text(encoding="utf-8")) == self.original_config
         with sqlite3.connect(self.database) as db:
             assert db.execute("PRAGMA user_version").fetchone() == (5,)
             assert db.execute("SELECT value FROM settings WHERE name='changes.legacy-sweep'").fetchone() == ("complete",)
         self.assert_oauth()
-        passed("Credential Manager migrated a live plan, reclaimed expired chunks and orphan, and retained history and other scopes")
+        h.passed("Credential Manager migrated a live plan, reclaimed expired chunks and orphan, and retained history and other scopes")
 
     def close(self):
         for prefix in (self.primary, self.separate):

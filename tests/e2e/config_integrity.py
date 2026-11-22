@@ -64,12 +64,9 @@ def verify_storage(h, previous_binary):
         acl = subprocess.check_output(["/bin/ls", "-le", native], text=True).splitlines()[1:]
         assert acl
     if os.name == "nt":
-        from windows_native_storage import powershell_storage
+        from windows_native_storage import assert_preserved_dacl, dacl
 
-        def dacl(path):
-            command = "(Get-Acl -LiteralPath $env:MCPLINK_STORAGE_TEST_PATH).Sddl"
-            return powershell_storage(h.environment, command, path).split("D:", 1)[1]
-        native_dacl = dacl(native)
+        native_dacl = dacl(h.environment, native)
     first = preview(connection)
     h.cli("gateway", "stop")
     row = apply(first)
@@ -85,18 +82,9 @@ def verify_storage(h, previous_binary):
     if sys.platform == "darwin":
         assert subprocess.check_output(["/bin/ls", "-le", native], text=True).splitlines()[1:] == acl
     if os.name == "nt":
-        result_dacl = dacl(native)
-        before_flags, before_separator, before_rules = native_dacl.partition("(")
-        after_flags, after_separator, after_rules = result_dacl.partition("(")
-        # Win32 can mark an ordinary file's DACL as auto-inherited after setting it.
-        # Protection and the complete ordered ACEs, including inheritance bits, must match.
-        inherited_marker_added = before_flags == "" and after_flags == "AI"
-        same_rules = (before_separator, before_rules) == (after_separator, after_rules)
-        assert same_rules and (before_flags == after_flags or inherited_marker_added), (
-            f"NTFS DACL changed after apply (flags {before_flags!r} to {after_flags!r}; "
-            f"access rules unchanged: {same_rules})"
-        )
-        assert dacl(backup).startswith("P") and ";;;WD)" not in dacl(backup)
+        assert_preserved_dacl(native_dacl, dacl(h.environment, native))
+        backup_dacl = dacl(h.environment, backup)
+        assert backup_dacl.startswith("P") and ";;;WD)" not in backup_dacl
     h.passed("a preview survives restart, successful apply clears the plan secret, and the outcome and original file permissions remain")
 
     pending = [preview(connection, "disable") for _ in range(32)]

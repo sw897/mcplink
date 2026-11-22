@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   copyFileSync,
   mkdirSync,
@@ -10,8 +11,11 @@ import { join, resolve } from "node:path";
 
 const signed = process.argv.includes("--signed");
 const withUpdates = process.argv.includes("--with-updates");
-if (process.argv.slice(2).some((arg) => !["--signed", "--with-updates"].includes(arg)))
-  throw new Error("Usage: npm run release:windows -- [--signed] [--with-updates]");
+const ciPrebuilt = process.argv.includes("--ci-prebuilt");
+if (process.argv.slice(2).some((arg) => !["--signed", "--with-updates", "--ci-prebuilt"].includes(arg)))
+  throw new Error("Usage: npm run release:windows -- [--signed] [--with-updates] [--ci-prebuilt]");
+if (ciPrebuilt && (signed || withUpdates || process.env.GITHUB_ACTIONS !== "true" || !process.env.WINDOWS_NATIVE_RECORD))
+  throw new Error("--ci-prebuilt requires an unsigned preview build from this CI run");
 if (withUpdates && !process.env.TAURI_SIGNING_PRIVATE_KEY && !process.env.TAURI_SIGNING_PRIVATE_KEY_PATH)
   throw new Error("--with-updates requires an updater signing key in the environment");
 if (process.platform !== "win32" || process.arch !== "x64")
@@ -42,48 +46,70 @@ run("python", [
   "--record",
   join(record, "source"),
 ]);
-npm(["run", "check"]);
-const fixtureEnv = { ...env, MCPLINK_WINDOWS_SIGNING: "0" };
-execFileSync(process.execPath, [env.npm_execpath, "run", "bundle", "--", "--test-fixtures"], {
-  stdio: "inherit",
-  env: fixtureEnv,
-});
+if (!ciPrebuilt) {
+  npm(["run", "check"]);
+  execFileSync(process.execPath, [env.npm_execpath, "run", "bundle", "--", "--test-fixtures"], {
+    stdio: "inherit",
+    env: { ...env, MCPLINK_WINDOWS_SIGNING: "0" },
+  });
+}
 const fixtureRoot = resolve("target/fixture-bundle/release");
 const fixtureInstaller = readdirSync(join(fixtureRoot, "bundle/nsis")).find(
   (name) => name.endsWith("-setup.exe") && name.includes(`_${version}_`),
 );
 if (!fixtureInstaller) throw new Error("Missing fixture NSIS installer");
-const config = join(record, "signing-config.json");
-writeFileSync(
-  config,
-  JSON.stringify({
-    bundle: {
-      windows: signed
-        ? {
-            signCommand: {
-              cmd: "powershell.exe",
-              args: [
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                signScript,
-                "-FilePath",
-                "%1",
-              ],
-            },
-          }
-        : { signCommand: null, certificateThumbprint: null },
-    },
-  }),
-);
-npm(["run", "bundle", "--", "--config", config]);
+if (!ciPrebuilt) {
+  const config = join(record, "signing-config.json");
+  writeFileSync(
+    config,
+    JSON.stringify({
+      bundle: {
+        windows: signed
+          ? {
+              signCommand: {
+                cmd: "powershell.exe",
+                args: [
+                  "-NoProfile",
+                  "-ExecutionPolicy",
+                  "Bypass",
+                  "-File",
+                  signScript,
+                  "-FilePath",
+                  "%1",
+                ],
+              },
+            }
+          : { signCommand: null, certificateThumbprint: null },
+      },
+    }),
+  );
+  npm(["run", "bundle", "--", "--config", config]);
+}
 const installers = readdirSync("target/release/bundle/nsis").filter(
   (n) => n.endsWith("-setup.exe") && n.includes(`_${version}_`),
 );
 if (installers.length !== 1)
   throw new Error("Expected exactly one version-matching NSIS installer");
 const installer = resolve("target/release/bundle/nsis", installers[0]);
+const before = JSON.parse(
+  readFileSync(join(record, "source/release-manifest.json"), "utf8"),
+);
+if (ciPrebuilt) {
+  const candidate = JSON.parse(
+    readFileSync(resolve(env.WINDOWS_NATIVE_RECORD, "candidate/release-manifest.json"), "utf8"),
+  );
+  const sha256 = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
+  if (candidate.conclusion !== "PASS"
+      || candidate.revision !== env.GITHUB_SHA || candidate.revision !== before.revision
+      || candidate.fixture_vault_supported !== false
+      || JSON.stringify(candidate.source_files) !== JSON.stringify(before.source_files)
+      || sha256(installer) !== candidate.artifacts[installers[0]]?.sha256
+      || ["mcplink.exe", "mcplink-desktop.exe"].some((name) =>
+        sha256(join("target/release", name)) !== candidate.binaries[name]?.sha256)) {
+    throw new Error("The native Windows installer and binaries must match this CI build");
+  }
+  console.log(`Reusing the verified Windows CI bundle from ${candidate.revision}`);
+}
 if (signed)
   for (const file of [
     installer,
@@ -133,9 +159,6 @@ run("python", [
   "--binary",
   "target/release/mcplink-desktop.exe",
 ]);
-const before = JSON.parse(
-  readFileSync(join(record, "source/release-manifest.json"), "utf8"),
-);
 const after = JSON.parse(
   readFileSync(join(record, "source-after/release-manifest.json"), "utf8"),
 );
