@@ -8,19 +8,26 @@ license.workspace = true
 name = "mcplink"
 path = "src/main.rs"
 
+[features]
+test-fixtures = []
+
 [dependencies]
 anyhow = "1"
 aho-corasick = "1.1"
 async-trait = "0.1"
+aws-lc-rs = { version = "1.19", default-features = false, features = ["alloc", "non-fips"] }
 axum = "0.8"
 base64 = "0.22"
 clap = { version = "4", features = ["derive", "string"] }
 directories = "6"
 fs2 = "0.4"
 glob = "0.3"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["service", "tokio"] }
 jsonc-parser = { version = "=0.34.0", features = ["cst", "serde"] }
 jsonschema = { version = "=0.60.2", default-features = false }
 keyring = "4.2"
+keyring-core = "1.0.1"
 opener = "0.8"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 rmcp = { version = "3.9", features = ["client", "server", "transport-child-process", "transport-io", "transport-streamable-http-client-reqwest", "reqwest", "auth"] }
@@ -35,12 +42,18 @@ toml_edit = { version = "0.23", features = ["serde"] }
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 yaml-edit = { version = "0.3.6", default-features = false }
+saphyr-parser = { version = "=0.4.0", default-features = false }
+tokio-util = { version = "0.7.20", features = ["rt"] }
 
 [target.'cfg(windows)'.dependencies]
 process-wrap = { version = "10.0.1", default-features = false, features = ["tokio1", "job-object", "creation-flags", "kill-on-drop"] }
 windows = { version = "0.62", features = ["Win32_System_Threading"] }
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading", "Win32_Storage_Packaging_Appx", "Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_Storage_Packaging_Appx", "Win32_Storage_FileSystem"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+process-wrap = { version = "10.0.1", default-features = false, features = ["tokio1", "process-group", "kill-on-drop"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 plist = "1"
-process-wrap = { version = "10.0.1", default-features = false, features = ["tokio1", "process-group", "kill-on-drop"] }
+tempfile = "3"

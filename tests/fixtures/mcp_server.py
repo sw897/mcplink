@@ -65,7 +65,10 @@ def handle(request, endpoint="", origin=""):
             if page < (100 if mode == "pages" else 99): result["nextCursor"] = str(page+1)
             return result
     if method == "initialize":
-        return {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}, "resources": {}, "prompts": {}}, "serverInfo": {"name": "mcplink-fixture", "version": "1.0.0"}}
+        capabilities = {"tools": {}} if endpoint == "/mcp-tools-only" else {"tools": {}, "resources": {}, "prompts": {}}
+        return {"protocolVersion": "2025-06-18", "capabilities": capabilities, "serverInfo": {"name": "mcplink-fixture", "version": "1.0.0"}}
+    if endpoint == "/mcp-tools-only" and method in ("resources/list", "resources/templates/list", "prompts/list"):
+        raise ValueError("Method not found")
     if method == "server/discover":
         # This fixture implements legacy initialize, not the newer discovery
         # result. Let clients negotiate the legacy protocol instead of replying
@@ -175,8 +178,12 @@ class Handler(BaseHTTPRequestHandler):
         origin = f"http://127.0.0.1:{self.server.server_port}"
         if path.path.startswith("/.well-known/oauth-protected-resource"):
             self.gate("metadata")
+            if self.server.metadata_unavailable:
+                return self.send(503, {"error": "temporarily_unavailable", "trace": "fixture-401"})
             return self.send(200, {"resource": origin + "/mcp", "authorization_servers": [origin], "scopes_supported": ["documents:read","documents:write"] if self.server.registered else ["documents:read"]})
         if path.path.startswith("/.well-known/oauth-authorization-server") or path.path.startswith("/.well-known/openid-configuration"):
+            if self.server.metadata_unavailable:
+                return self.send(503, {"error": "temporarily_unavailable"})
             metadata={"issuer": origin, "authorization_endpoint": origin + "/authorize", "token_endpoint": origin + "/token", "response_types_supported": ["code"], "grant_types_supported": ["authorization_code", "refresh_token"], "token_endpoint_auth_methods_supported": ["client_secret_"+self.server.token_auth] if self.server.registered else ["none"], "code_challenge_methods_supported": ["S256"], "scopes_supported": ["documents:read", "offline_access"], "authorization_response_iss_parameter_supported": True}
             if not self.server.registered: metadata["registration_endpoint"]=origin+"/register"
             return self.send(200,metadata)
@@ -198,7 +205,7 @@ class Handler(BaseHTTPRequestHandler):
         if path.path == "/stats":
             with self.server.gate_lock:
                 gates = {name:state["arrivals"] for name,state in self.server.gates.items()}
-            return self.send(200, {"refreshes": self.server.refreshes, "calls": self.server.calls,"lists":self.server.lists,"schemaReads":self.server.schema_reads,"sessionVersions":list(self.server.sessions.values()),"registrations":self.server.registrations,"tokenAuthChecks":self.server.token_auth_checks,"requestedScopes":self.server.requested_scopes,"gates":gates,"forwardedMcplinkMeta":self.server.forwarded_mcplink_meta})
+            return self.send(200, {"refreshes": self.server.refreshes, "calls": self.server.calls,"lists":self.server.lists,"schemaReads":self.server.schema_reads,"sessionVersions":list(self.server.sessions.values()),"registrations":self.server.registrations,"tokenAuthChecks":self.server.token_auth_checks,"requestedScopes":self.server.requested_scopes,"gates":gates,"forwardedMcplinkMeta":self.server.forwarded_mcplink_meta,"resourceReads":self.server.resource_reads,"unsupportedLists":self.server.unsupported_lists})
         if path.path == "/schema-external":
             self.server.schema_reads += 1
             return self.send(200,{"type":"string"})
@@ -211,6 +218,13 @@ class Handler(BaseHTTPRequestHandler):
         origin = f"http://127.0.0.1:{self.server.server_port}"
         if path == "/control":
             body = json.loads(raw)
+            if body["action"] == "oauth-state":
+                self.server.metadata_unavailable = body.get("metadataUnavailable", False)
+                self.server.reject_bearer = body.get("rejectBearer", False)
+                if body.get("revokeGrant"):
+                    self.server.refresh_token = "synthetic-revoked"
+                    self.server.access_token = "synthetic-revoked"
+                return self.send(200, {"ok": True})
             name = body["gate"]
             with self.server.gate_lock:
                 state = self.server.gates.setdefault(name, {"armed":False,"arrivals":0,"event":threading.Event()})
@@ -256,6 +270,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.server.registered and authorization.startswith("Bearer "):
             time.sleep(0.05)
         accepted = not self.server.auth or authorization == "synthetic-fixture-authorization" or authorization == "Bearer " + self.server.access_token
+        if self.server.reject_bearer and authorization.startswith("Bearer "):
+            accepted = False
         if not accepted:
             challenge = None if path == "/mcp-no-challenge" else {"WWW-Authenticate": f'Bearer resource_metadata="{origin}/.well-known/oauth-protected-resource"'}
             return self.send(401, {"jsonrpc": "2.0", "id": None, "error": {"code": -32001, "message": "Synthetic authentication required"}}, challenge)
@@ -288,6 +304,11 @@ class Handler(BaseHTTPRequestHandler):
             if request.get("method") == "tools/list":
                 self.server.lists += 1
                 if path == "/mcp-slow": time.sleep(0.8)
+                if path == "/mcp-gated-catalog": self.gate("unrelated-catalog")
+            if request.get("method") == "resources/read":
+                self.server.resource_reads += 1
+            if path == "/mcp-tools-only" and request.get("method") in ("resources/list", "resources/templates/list", "prompts/list"):
+                self.server.unsupported_lists += 1
             result = handle(request, path, origin)
             return self.send(200, {"jsonrpc": "2.0", "id": request["id"], "result": result})
         except ValueError:
@@ -319,11 +340,13 @@ def main():
     finally:
         faulthandler.cancel_dump_traceback_later()
     server.auth, server.codes, server.refreshes, server.calls = args.auth, {}, 0, 0
+    server.resource_reads, server.unsupported_lists = 0, 0
     server.lists, server.schema_reads = 0, 0
     server.forwarded_mcplink_meta = 0
     server.sessions = {}
     server.gates, server.gate_lock = {}, threading.Lock()
     server.registered, server.token_auth = args.registered_client, args.token_auth
+    server.metadata_unavailable = server.reject_bearer = False
     server.registrations, server.token_auth_checks, server.requested_scopes = 0, 0, []
     server.access_token, server.refresh_token = "unissued-synthetic-access", "unissued-synthetic-refresh"
     print(json.dumps({"port": server.server_port}), flush=True)

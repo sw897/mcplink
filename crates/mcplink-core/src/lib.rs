@@ -1,7 +1,10 @@
+mod adapter_policy;
 mod agent_config;
 mod catalog;
+mod change_storage;
 mod client_import;
 pub mod config;
+mod config_file;
 mod credential_transfer;
 mod discovery;
 mod dsh_config;
@@ -18,11 +21,14 @@ mod keychain_signature;
 mod lifecycle;
 pub mod mcp;
 pub mod model;
+mod oauth;
 mod opencode;
+mod outbound;
 mod pi_config;
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(unix, windows))]
 mod process_group;
 pub mod runtime;
+mod runtime_auth;
 pub mod store;
 pub mod vault;
 

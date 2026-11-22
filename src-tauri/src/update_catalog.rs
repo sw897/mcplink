@@ -1,15 +1,17 @@
 use crate::update_signature;
+use memmap2::{Mmap, MmapOptions};
 use reqwest::{Client, Response, redirect};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 #[cfg(debug_assertions)]
 use std::path::Path;
-use std::time::Duration;
-use tokio::sync::watch;
+use std::{fs::File, ops::Deref, time::Duration};
+use tokio::{io::AsyncWriteExt, sync::watch};
 use url::Url;
 
 pub const MAX_PACKAGE_BYTES: u64 = 256 * 1024 * 1024;
+pub const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 pub const RELEASES_URL: &str = "https://github.com/sw897/mcplink/releases";
 
 #[derive(Clone)]
@@ -66,6 +68,20 @@ pub struct Package {
     pub bytes: u64,
 }
 
+/// An immutable, process-private staging file shared by verification and installation.
+pub struct StagedPackage {
+    bytes: Mmap,
+    _file: File,
+}
+
+impl Deref for StagedPackage {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
 impl Catalog {
     pub fn github(current: Version, target: String, public_key: String) -> Self {
         Self {
@@ -115,6 +131,7 @@ impl Catalog {
             .user_agent(format!("mcplink/{}", self.current))
             .timeout(Duration::from_secs(120))
             .connect_timeout(Duration::from_secs(15))
+            .read_timeout(Duration::from_secs(30))
             .redirect(redirect::Policy::custom(move |attempt| {
                 if attempt.previous().len() >= 5 {
                     return attempt.error("too many updater redirects");
@@ -326,7 +343,7 @@ impl Catalog {
         package: &Package,
         mut cancel: watch::Receiver<bool>,
         mut progress: F,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<StagedPackage, String> {
         if package.bytes == 0
             || package.bytes > MAX_PACKAGE_BYTES
             || !package.url.as_str().starts_with(self.downloads.as_str())
@@ -340,6 +357,7 @@ impl Catalog {
             .client()?
             .get(package.url.clone())
             .header("Accept", "application/octet-stream")
+            .timeout(DOWNLOAD_TIMEOUT)
             .send();
         let response = tokio::select! {
             _ = cancel.changed() => return Err("下载已取消".into()),
@@ -352,7 +370,9 @@ impl Catalog {
         {
             return Err("更新包下载大小不一致".into());
         }
-        let mut bytes = Vec::with_capacity(package.bytes as usize);
+        let mut file =
+            tokio::fs::File::from_std(tempfile::tempfile().map_err(|_| "无法创建更新暂存文件")?);
+        let mut written = 0_u64;
         loop {
             let next = tokio::select! {
                 _ = cancel.changed() => return Err("下载已取消".into()),
@@ -361,23 +381,39 @@ impl Catalog {
             let Some(chunk) = next else {
                 break;
             };
-            if bytes.len() as u64 + chunk.len() as u64 > package.bytes {
+            if written + chunk.len() as u64 > package.bytes {
                 return Err("更新包超过声明大小".into());
             }
-            bytes.extend_from_slice(&chunk);
-            progress(bytes.len() as u64, package.bytes);
+            file.write_all(&chunk)
+                .await
+                .map_err(|_| "无法写入更新暂存文件")?;
+            written += chunk.len() as u64;
+            progress(written, package.bytes);
         }
-        if bytes.len() as u64 != package.bytes || update_signature::sha256(&bytes) != package.sha256
-        {
+        if written != package.bytes {
             return Err("更新包 SHA-256 或大小校验失败，未安装任何文件".into());
         }
-        update_signature::verify(
-            &bytes,
-            &package.signature,
-            &self.public_key,
-            &package.version,
-        )?;
-        Ok(bytes)
+        file.flush().await.map_err(|_| "更新暂存文件未写完")?;
+        let file = file.into_std().await;
+        let package = package.clone();
+        let public_key = self.public_key.clone();
+        let verification = tokio::task::spawn_blocking(move || {
+            // SAFETY: tempfile is unlinked on Unix and opened with exclusive sharing
+            // on Windows. This is the only handle and no writes follow this point.
+            let bytes =
+                unsafe { MmapOptions::new().map(&file) }.map_err(|_| "无法读取更新暂存文件")?;
+            if bytes.len() as u64 != package.bytes
+                || update_signature::sha256(&bytes) != package.sha256
+            {
+                return Err("更新包 SHA-256 或大小校验失败，未安装任何文件".into());
+            }
+            update_signature::verify(&bytes, &package.signature, &public_key, &package.version)?;
+            Ok(StagedPackage { bytes, _file: file })
+        });
+        tokio::select! {
+            _ = cancel.changed() => Err("下载已取消".into()),
+            result = verification => result.map_err(|_| "更新校验中断".to_owned())?,
+        }
     }
 }
 

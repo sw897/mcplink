@@ -118,6 +118,14 @@ class AggregateGateway(ToolCalls):
             assert self.stats()["registrations"] == registrations and self.stats()["refreshes"] > 0
             self.passed("two aggregate clients, a single-service client and generated CLI share the original rotating OAuth grant without another login")
             aggregate_cli = self.cli("cli", "generate", entry_id, "--name", "aggregate-cli", "--output", str(self.record / "generated-aggregate"), "--tool", name(first_id, "read_document"))
+            rename = {"id": entry_id, "editVersion": entry["editVersion"], "title": "Renamed entry",
+                      "connectionIds": [first_id, second_id]}
+            renamed = self.cli("gateway", "save", "--stdin", value=rename)
+            assert renamed["revision"] == entry["revision"] and renamed["editVersion"] != entry["editVersion"]
+            self.cli("gateway", "save", "--stdin", value=rename, exit_status=1)
+            assert not self.cli("cli", "run", "--manifest", aggregate_cli["manifest"], "--", name(first_id, "read_document"), "--stdin", value={"id":"weekly-fixture"})["output"]["isError"]
+            entry = renamed
+            self.passed("renaming an aggregate advances its edit version while preserving the generated CLI contract")
             self.cli("gateway", "stop")
             assert "result" in aggregate_call(clients[0])
             assert "result" in single.call("tools/call", {"name":"read_document","arguments":{"id":"weekly-fixture"}})

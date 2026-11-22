@@ -1,7 +1,7 @@
 use mcplink_desktop::{
     UPDATE_PUBLIC_KEY,
     cli_sync::{self, CliTarget},
-    update_catalog::{Catalog, Package, RELEASES_URL, Release},
+    update_catalog::{Catalog, DOWNLOAD_TIMEOUT, Package, RELEASES_URL, Release, StagedPackage},
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -41,6 +41,7 @@ pub struct View {
     cli_targets: Vec<String>,
     can_download: bool,
     can_install: bool,
+    can_archive_stale_receipt: bool,
     error: Option<String>,
     startup_issue: Option<String>,
     message: Option<String>,
@@ -55,7 +56,7 @@ struct Candidate {
 struct Inner {
     view: View,
     candidate: Option<Candidate>,
-    bytes: Option<Arc<Vec<u8>>>,
+    bytes: Option<Arc<StagedPackage>>,
     targets: Vec<CliTarget>,
     cancel: Option<watch::Sender<bool>>,
     reset_backend: bool,
@@ -132,6 +133,8 @@ pub fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|r| r.as_ref())
         .is_some_and(|r| r.version == version);
+    let can_archive_stale_receipt =
+        matches!(receipt, Ok(Some(ref receipt)) if receipt.version != version);
     let synced = cli_sync::apply_receipt(
         &settings.receipt,
         &settings.home,
@@ -156,6 +159,7 @@ pub fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 cli_targets: vec![],
                 can_download: false,
                 can_install: false,
+                can_archive_stale_receipt,
                 error: None,
                 startup_issue,
                 message: None,
@@ -328,7 +332,7 @@ async fn download(app: &AppHandle) -> View {
     };
     let mut last_emit = Instant::now();
     let result = tokio::time::timeout(
-        Duration::from_secs(600),
+        DOWNLOAD_TIMEOUT,
         settings
             .catalog
             .download(&candidate.package, receiver, |done, total| {
@@ -357,11 +361,20 @@ async fn download(app: &AppHandle) -> View {
         Ok(Err(error)) => return fail(app, error),
         Err(_) => return fail(app, "下载更新超时，请重新下载".into()),
     };
-    if let Err(error) = candidate.update.verify(&bytes) {
-        return fail(app, format!("系统升级器拒绝了更新包：{error}"));
-    }
-    let targets =
-        cli_sync::discover(&settings.home, &settings.sidecar, &settings.catalog.current).await;
+    let (bytes, targets) = match tauri::async_runtime::spawn_blocking(move || {
+        candidate
+            .update
+            .verify(&bytes)
+            .map_err(|error| format!("系统升级器拒绝了更新包：{error}"))?;
+        let targets = cli_sync::discover(&settings.home, &settings.sidecar);
+        Ok::<_, String>((bytes, targets))
+    })
+    .await
+    {
+        Ok(Ok(verified)) => verified,
+        Ok(Err(error)) => return fail(app, error),
+        Err(_) => return fail(app, "下载后的验证中断".into()),
+    };
     {
         let mut inner = state.inner.lock().unwrap();
         if inner.cancel.as_ref().is_some_and(|c| *c.borrow()) {
@@ -426,7 +439,7 @@ async fn install(app: &AppHandle) -> View {
         return fail(app, error);
     }
     let result =
-        tauri::async_runtime::spawn_blocking(move || candidate.update.install(&*bytes)).await;
+        tauri::async_runtime::spawn_blocking(move || candidate.update.install(&bytes[..])).await;
     match result {
         Ok(Ok(())) => app.restart(),
         error => {
@@ -500,6 +513,21 @@ pub async fn command(
                     inner.reset_backend = true;
                 }
             }
+            return Ok(json!(publish(&app)));
+        }
+        "archive_stale_receipt" => {
+            let mut inner = state.inner.lock().unwrap();
+            if inner.busy() || crate::background::is_quitting(&app) {
+                return Err("升级正在进行，请稍候".into());
+            }
+            cli_sync::archive_stale_receipt(
+                &state.settings.receipt,
+                &state.settings.catalog.current,
+            )?;
+            inner.view.can_archive_stale_receipt = false;
+            inner.view.startup_issue = None;
+            inner.view.message = Some("旧版升级记录已归档，可以重新检查更新。".into());
+            drop(inner);
             return Ok(json!(publish(&app)));
         }
         "check" | "download" | "install" => {}

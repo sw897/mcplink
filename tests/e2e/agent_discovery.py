@@ -27,6 +27,10 @@ def main():
     record = parser.parse_args().record.resolve()
     record.mkdir(parents=True, exist_ok=False)
     harness = Harness(record, installed_agents=False)
+    harness.environment["MCPLINK_FIXTURE_BEARER"] = "unissued-synthetic-access"
+    harness.environment["ZCODE_HOME"] = "relative-profile-ignored"
+    harness.environment["OPENCLAW_CONFIG_PATH"] = ""
+    harness.environment["MCPLINK_FIXTURE_VARIABLE"] = "literal ${env:MCPLINK_FIXTURE_UNUSED}"
     results = []
 
     def passed(name, evidence=None):
@@ -67,6 +71,10 @@ def main():
         assert {s["agent"] for s in initial["sources"] if not s["readOnly"]} == NATIVE
         assert not any(a["installed"] or a["configurable"] for a in initial["agents"] if a["id"] in NATIVE)
         assert all(a["configurable"] and a["profilePath"] is None for a in initial["agents"] if a["id"] in MANUAL)
+        for agent, default in [("zcode", ".zcode/cli/config.json"), ("openclaw", ".openclaw/openclaw.json")]:
+            location = next(s["path"] for s in initial["sources"] if s["agent"] == agent)
+            assert Path(location) == harness.home / default
+        passed("empty and relative environment roots fall back to the client's isolated default path")
         for agent in NATIVE:
             assert "未安装" in harness.rpc("sources.add", {"agent":agent}, error=True)
         local = harness.rpc("connections.import", {"sourceId":"codex:user", "name":"local_notes"})["id"]
@@ -77,6 +85,15 @@ def main():
         harness.install_clients()
         assert all(a["installed"] and a["configurable"] for a in snapshot()["agents"] if a["id"] in NATIVE)
         passed("refreshing after installation enables configuration without creating native config files")
+
+        literal_check = ("import os,sys; "
+            "assert os.environ['MCPLINK_LITERAL_RESULT'] == 'literal '+chr(36)+'{env:MCPLINK_FIXTURE_UNUSED}'; "
+            "os.execv(sys.executable,[sys.executable,sys.argv[1],'--stdio'])")
+        literal_id = harness.rpc("connections.save", {"name":"literal_environment","definition":{
+            "command":sys.executable,"args":["-c",literal_check,str(FIXTURE)],
+            "env":{"MCPLINK_LITERAL_RESULT":"${env:MCPLINK_FIXTURE_VARIABLE}"}}})["id"]
+        assert harness.rpc("connections.probe", {"id":literal_id})["connection"]["status"] == "ready"
+        passed("a real STDIO launch expands the original reference once and receives the replacement literally")
 
         # Retired clients and old Kimi CLI directories must not become active integrations.
         retired = harness.home / "AppData/Roaming/Code/User/mcp.json"
@@ -100,7 +117,7 @@ def main():
         openclaw = next(s for s in sources if s["agent"] == "openclaw")
         openclaw_path = Path(openclaw["path"])
         openclaw_path.parent.mkdir(parents=True)
-        openclaw_path.write_text("// retain OpenClaw comment\n{ models: { mode: 'merge', keep: 0x20 }, mcp: { servers: {} } }\n", encoding="utf-8")
+        openclaw_path.write_text("\ufeff// retain OpenClaw comment\n{ models: { mode: 'merge', keep: 0x20 }, mcp: { servers: {} } }\n", encoding="utf-8")
         dsh = next(s for s in sources if s["agent"] == "deepseek")
         dsh_path = Path(dsh["path"])
         dsh_path.parent.mkdir(parents=True)
@@ -124,6 +141,7 @@ def main():
             passed("exported " + source["agent"] + " entry starts its Bridge and calls the authenticated upstream fixture", {"sourceId":source["id"]})
         assert "retain OpenClaw comment" in openclaw_path.read_text(encoding="utf-8")
         assert "mode: 'merge'" in openclaw_path.read_text(encoding="utf-8")
+        assert openclaw_path.read_bytes().startswith(b"\xef\xbb\xbf") and "keep: 0x20" in openclaw_path.read_text(encoding="utf-8")
         assert dsh_unrelated in dsh_path.read_text(encoding="utf-8")
         passed("JSON5 comments, provider fields and unrelated dynamic Cordis YAML survive shared writes without credential literals")
 
@@ -154,6 +172,66 @@ def main():
         assert json.loads(kimi_path.read_text(encoding="utf-8"))["unrelatedAfterRemoval"]
         assert native_entry(kimi, "office_docs")["command"] == str(BINARY)
         passed("Kimi Code removal and restore preserve later unrelated edits and restore the original proxy entry")
+
+        codex = next(s for s in sources if s["agent"] == "codex")
+        codex_path = Path(codex["path"])
+        codex_path.write_text(codex_path.read_text() + f'\n[mcp_servers.native_bearer]\nurl = {json.dumps(harness.url)}\n'
+                              'bearer_token_env_var = "MCPLINK_FIXTURE_BEARER"\n'
+                              'env_http_headers = {"X-Fixture" = "MCPLINK_DATA_DIR"}\n'
+                              f'\n[mcp_servers.native_inherit]\ncommand = {json.dumps(sys.executable)}\n'
+                              f'args = {json.dumps([str(FIXTURE), "--stdio"])}\n'
+                              'env_vars = ["MCPLINK_DATA_DIR"]\nenv = {FIXTURE = "literal"}\n')
+        kimi_document = json.loads(kimi_path.read_text())
+        kimi_document["mcpServers"]["native_kimi_bearer"] = {"url": harness.url, "bearerTokenEnvVar": "MCPLINK_FIXTURE_BEARER"}
+        kimi_path.write_text(json.dumps(kimi_document))
+        for source, name in [(codex, "native_bearer"), (codex, "native_inherit"), (kimi, "native_kimi_bearer")]:
+            connection = harness.rpc("connections.import", {"sourceId": source["id"], "name": name})["id"]
+            assert harness.rpc("connections.probe", {"id": connection})["connection"]["status"] == "ready"
+            for _ in range(2):
+                harness.changes(connection, [source["id"]], mode="direct")
+            assert harness.rpc("connections.import", {"sourceId": source["id"], "name": name})["id"] == connection
+        codex_bearer = native_entry(codex, "native_bearer")
+        assert codex_bearer["bearer_token_env_var"] == "MCPLINK_FIXTURE_BEARER" and "Authorization" not in codex_bearer.get("http_headers", {})
+        assert codex_bearer["env_http_headers"] == {"X-Fixture": "MCPLINK_DATA_DIR"}
+        codex_inherit = native_entry(codex, "native_inherit")
+        assert codex_inherit["env_vars"] == ["MCPLINK_DATA_DIR"] and codex_inherit["env"] == {"FIXTURE": "literal"}
+        kimi_bearer = json.loads(kimi_path.read_text())["mcpServers"]["native_kimi_bearer"]
+        assert kimi_bearer["bearerTokenEnvVar"] == "MCPLINK_FIXTURE_BEARER"
+        assert not any(name.lower() == "authorization" for name in kimi_bearer.get("headers", {}))
+        malformed = harness.rpc("connections.save", {"name": "combined_reference", "definition": {
+            "url": harness.url, "headers": {"X-Fixture": "${env:MCPLINK_DATA_DIR}${env:MCPLINK_HOME}"}}})
+        error = harness.rpc("changes.preview", {"connectionId": malformed["id"], "targetSourceIds": [codex["id"]]}, error=True)
+        assert "完整单变量" in error
+        passed("Codex and Kimi bearer references and Codex inherited environment round-trip without emitting placeholder credentials")
+        if executable := os.environ.get("MCPLINK_E2E_CODEX"):
+            for name, field in [("native_bearer", "bearer_token_env_var"), ("native_inherit", "env_vars")]:
+                result = subprocess.run([executable, "mcp", "get", name, "--json"], env=harness.environment,
+                                        capture_output=True, text=True, timeout=20)
+                assert result.returncode == 0 and field in result.stdout, result.stderr
+            passed("the specified native Codex CLI loads both generated environment settings")
+
+        hermes = next(s for s in sources if s["agent"] == "hermes")
+        hermes_path = Path(hermes["path"])
+        with hermes_path.open("a", encoding="utf-8") as config:
+            config.write("\n  reset_capabilities:\n    command: fixture\n    tools: {resources: false, prompts: false}\n")
+        scoped = harness.rpc("connections.import", {"sourceId":hermes["id"],"name":"reset_capabilities"})["id"]
+        definition = harness.rpc("connections.detail", {"id":scoped})["definition"]
+        harness.rpc("connections.save", {"id":scoped,"name":"reset_capabilities",
+            "definition":definition | {"resourcesDisabled":False,"promptsDisabled":False}})
+        harness.changes(scoped, [hermes["id"]], mode="direct")
+        data = subprocess.check_output(["node", "--input-type=module", "-e",
+            "import {parse} from 'yaml'; import {readFileSync} from 'node:fs'; console.log(JSON.stringify(parse(readFileSync(process.argv[1],'utf8')).mcp_servers.reset_capabilities.tools));",
+            str(hermes_path)], cwd=ROOT, text=True, timeout=10)
+        assert json.loads(data) == {"resources":True,"prompts":True}
+        passed("Hermes writes explicit resource and prompt re-enablement back to the native entry")
+
+        managed_dir = Path(harness.environment["CLAUDE_CONFIG_DIR"])
+        managed = managed_dir / ("Plugins" if sys.platform == "darwin" or os.name == "nt" else "plugins") / "fixture.toml"
+        managed.parent.mkdir(parents=True, exist_ok=True)
+        managed.write_text("# fixture only\n")
+        guarded = harness.rpc("sources.add", {"agent":"codex","path":str(managed)})
+        assert guarded["readOnly"] and "只读" in harness.rpc("changes.preview", {"connectionId":local,"targetSourceIds":[guarded["id"]]}, error=True)
+        passed("a managed plugin location remains read-only when registered through another adapter")
 
         fresh = harness.rpc("connections.save", {"name":"later_notes","definition":{"command":sys.executable,"args":[str(FIXTURE),"--stdio"],"enabled":True}})["id"]
         conflict = harness.rpc("changes.preview", {"connectionId":fresh,"targetSourceIds":[openclaw["id"]]})
@@ -187,6 +265,25 @@ def main():
             malformed_dsh.write_text(definition, encoding="utf-8")
             assert "布尔值" in harness.rpc("sources.add", {"agent":"deepseek","path":str(malformed_dsh)}, error=True)
         passed("DeepSeek plugin and manager reject malformed enabled states instead of silently enabling a service")
+
+        scoped_dsh = record / "scoped-cordis.patch.yml"
+        scoped_dsh.write_text("""# retained profile comment
+- insert:
+  - id: quoted-fixture
+    name: '@deepseek-ai/dsh-mcp-client' # retain node comment
+    config:
+      serverName: quoted_fixture
+      command: fixture
+      args: ["literal * argument", '&still-a-string'] # retain argument comment
+""", encoding="utf-8")
+        scoped = harness.rpc("sources.add", {"agent":"deepseek","path":str(scoped_dsh)})
+        quoted = harness.rpc("connections.import", {"sourceId":scoped["id"],"name":"quoted_fixture"})["id"]
+        harness.changes(quoted, [scoped["id"]], action="disable")
+        after = scoped_dsh.read_text(encoding="utf-8")
+        assert all(text in after for text in ("literal * argument", "retain node comment", "retain argument comment"))
+        harness.changes(quoted, [scoped["id"]], action="remove")
+        assert "insert:" not in scoped_dsh.read_text(encoding="utf-8")
+        passed("DeepSeek edits retain quoted star arguments and comments, then remove the empty insert wrapper")
 
         remote = harness.rpc("connections.save", {"name":"remote_native","definition":{"url":harness.url,"headers":{"Authorization":"synthetic-fixture-authorization"},"enabled":True}})["id"]
         custom_sources = [s for s in sources if s["agent"] in {"zcode","deepseek","openclaw","kimicode"}]
@@ -272,9 +369,8 @@ def main():
             OldBackend.management_api = 13
             assert "旧后台" in harness.rpc("connections.delete", {"id":office,"keepNative":True}, error=True)
             assert requests == [], "keep-native was sent to a daemon that does not recognize it"
-            harness.rpc("connections.delete", {"id":office,"keepNative":False}, error=True)
-            assert requests == ["/rpc"], "ordinary deletion should still reach an API 13 daemon"
-            requests.clear()
+            assert "旧后台" in harness.rpc("connections.delete", {"id":office,"keepNative":False}, error=True)
+            assert requests == [], "legacy protocol must not receive ordinary deletion either"
             OldBackend.management_api = 14
             assert "旧后台" in harness.rpc("snapshot", error=True)
             assert "旧后台" in harness.rpc("sources.add", {"agent":"workbuddy"}, error=True)

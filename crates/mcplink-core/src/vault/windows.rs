@@ -400,6 +400,7 @@ mod tests {
             std::env::temp_dir().join(format!("mcplink-vault-check-{}", uuid::Uuid::new_v4()));
         let cleanup = Cleanup(super::super::Vault::new(&data)?);
         let vault = &cleanup.0;
+        #[cfg(feature = "test-fixtures")]
         assert!(vault.fixture.is_none());
         vault
             .entry("synthetic-value")?

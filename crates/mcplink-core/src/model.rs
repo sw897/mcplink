@@ -111,6 +111,14 @@ pub struct Source {
     pub discovery_error: Option<String>,
     #[serde(default)]
     pub scope: Option<String>,
+    #[serde(skip)]
+    pub(crate) legacy_ids: Vec<String>,
+}
+
+impl Source {
+    pub(crate) fn has_id(&self, id: &str) -> bool {
+        self.id == id || self.legacy_ids.iter().any(|legacy| legacy == id)
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -121,6 +129,8 @@ pub struct Definition {
     pub env: BTreeMap<String, String>,
     pub cwd: Option<String>,
     pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub private_network_origin: Option<String>,
     pub http_api: Option<crate::http_api::HttpApi>,
     pub headers: BTreeMap<String, String>,
     pub enabled: bool,
@@ -163,16 +173,33 @@ impl Definition {
     }
 
     pub fn changed_origin(&self, previous: &Self) -> bool {
-        let (Some(old), Some(new)) = (&previous.url, &self.url) else {
-            return false;
-        };
-        if old == new {
-            return false;
-        }
-        match (url::Url::parse(old), url::Url::parse(new)) {
-            (Ok(a), Ok(b)) if a.host().is_some() && b.host().is_some() => a.origin() != b.origin(),
+        match (previous.url.is_some(), self.url.is_some()) {
+            (true, true) => match (previous.http_origin(), self.http_origin()) {
+                (Ok(old), Ok(new)) => old != new,
+                _ => true,
+            },
+            (false, false) => {
+                self.command != previous.command
+                    || self.args != previous.args
+                    || self.cwd != previous.cwd
+                    || self.origin_project != previous.origin_project
+            }
             _ => true,
         }
+    }
+
+    pub(crate) fn http_origin(&self) -> anyhow::Result<String> {
+        use anyhow::{Context, ensure};
+        let address = crate::config::resolve(
+            self.url.as_deref().context("缺少服务地址")?,
+            self.origin_project.as_deref(),
+        )?;
+        let address = url::Url::parse(&address).context("无效的服务来源")?;
+        ensure!(
+            matches!(address.scheme(), "http" | "https") && address.host().is_some(),
+            "无效的服务来源"
+        );
+        Ok(address.origin().ascii_serialization())
     }
 
     pub fn discard_inherited_auth(&mut self, previous: &Self) {
@@ -182,6 +209,13 @@ impl Definition {
                     .headers
                     .iter()
                     .any(|(old_key, old)| old_key.eq_ignore_ascii_case(key) && old == value)
+        });
+        self.env.retain(|key, value| {
+            value != "••••••••"
+                && !previous.env.iter().any(|(old_key, old)| {
+                    (old_key == key || (cfg!(windows) && old_key.eq_ignore_ascii_case(key)))
+                        && old == value
+                })
         });
         if self.client_secret.as_deref() == Some("••••••••")
             || self.client_secret == previous.client_secret
@@ -219,19 +253,7 @@ impl Definition {
             .env
             .iter()
             .map(|(key, value)| {
-                let reference = value
-                    .strip_prefix("${")
-                    .and_then(|value| value.strip_suffix('}'));
-                let plain_reference = reference.is_some_and(|name| {
-                    let name = name.strip_prefix("env:").unwrap_or(name);
-                    !name.is_empty()
-                        && name.bytes().enumerate().all(|(index, c)| {
-                            c == b'_'
-                                || c.is_ascii_alphabetic()
-                                || (index > 0 && c.is_ascii_digit())
-                        })
-                });
-                let display = if plain_reference {
+                let display = if crate::config::env_reference(value).is_some() {
                     value.clone()
                 } else {
                     "••••••••".into()
@@ -256,9 +278,13 @@ impl Definition {
             Ok(url) => format!("{}/••••••••", url.origin().ascii_serialization()),
             Err(_) => "••••••••".into(),
         });
-        json!({"command":self.command,"args":args,"env":env,"cwd":self.cwd,"url":url,"httpApi":self.http_api,"headers":headers,"enabled":self.enabled,"oauth":self.oauth,"clientId":self.client_id,
+        let mut value = json!({"command":self.command,"args":args,"env":env,"cwd":self.cwd,"url":url,"httpApi":self.http_api,"headers":headers,"enabled":self.enabled,"oauth":self.oauth,"clientId":self.client_id,
             "clientSecret":self.client_secret.as_ref().map(|_|"••••••••"),"oauthScopes":self.oauth_scopes,"oauthCallbackPort":self.oauth_callback_port,
-            "includeTools":self.include_tools,"excludeTools":self.exclude_tools,"timeout":self.timeout,"startupTimeout":self.startup_timeout,"includeSpecified":self.include_specified,"resourcesDisabled":self.resources_disabled,"promptsDisabled":self.prompts_disabled,"transport":self.transport()})
+            "includeTools":self.include_tools,"excludeTools":self.exclude_tools,"timeout":self.timeout,"startupTimeout":self.startup_timeout,"includeSpecified":self.include_specified,"resourcesDisabled":self.resources_disabled,"promptsDisabled":self.prompts_disabled,"transport":self.transport()});
+        if let Some(origin) = &self.private_network_origin {
+            value["privateNetworkOrigin"] = json!(origin);
+        }
+        value
     }
 }
 
@@ -291,6 +317,8 @@ pub struct Connection {
     pub auth_kind: String,
     pub definition_ref: String,
     pub revision: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(crate) edit_revision: u64,
     pub active: bool,
     pub status: String,
     pub checked_at: Option<u64>,
@@ -300,9 +328,13 @@ pub struct Connection {
     pub members: Option<Vec<GatewayMember>>,
 }
 
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
 impl Connection {
     pub fn edit_version(&self) -> String {
-        format!("{}:{}", self.id, self.revision)
+        format!("{}:{}:{}", self.id, self.revision, self.edit_revision)
     }
 
     pub fn editable_definition(&self, definition: &Definition) -> Value {
@@ -315,6 +347,7 @@ impl Connection {
         let mut value = serde_json::to_value(self).unwrap_or_default();
         if let Some(map) = value.as_object_mut() {
             map.remove("definitionRef");
+            map.remove("editRevision");
             if self.members.is_some() {
                 map.insert("editVersion".into(), json!(self.edit_version()));
             }
@@ -355,6 +388,8 @@ pub struct Change {
     pub mode: String,
     pub action: String,
     pub expected_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_path: Option<PathBuf>,
     #[serde(default)]
     pub revision: u64,
     #[serde(default)]

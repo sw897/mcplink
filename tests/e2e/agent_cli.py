@@ -58,6 +58,11 @@ class AgentCli(Harness):
         response = self.cli("rpc", "changes.preview", "--params", "[]", exit_status=1)
         assert "panic" not in json.dumps(response)
         self.passed("invalid/missing/oversized stdin and arguments fail without secret echo or panic")
+        for args in [("bridge",), ("--data-dir", str(offline), "bridge", "--connection"), ("bridge", "--help")]:
+            result = subprocess.run([str(BINARY), *args], env=self.environment, capture_output=True, text=True, timeout=5)
+            assert result.returncode in (0, 2) and not result.stdout and result.stderr
+        assert not offline.exists()
+        self.passed("Bridge argument validation leaves stdout reserved for the MCP protocol")
 
         status = self.cli("status")
         assert {s["agent"] for s in status["sources"]} == {"codex","hermes","claude","opencode","zcode","deepseek","openclaw","kimicode","workbuddy","qwenwork","pi"} and len(status["connections"]) == 3
@@ -86,6 +91,19 @@ class AgentCli(Harness):
         assert len(tools["tools"]) == 2 and tools["connection"]["status"] == "ready"
         assert any(c["id"] == connection for c in self.cli("connections", "list"))
         self.passed("add project source, save/edit with masked credentials, reject invalid auth and recover via stdin")
+
+        fresh = self.cli("connections", "show", connection)
+        metadata = {"id": connection, "name": "cli_http", "title": "CLI metadata edit",
+                    "accountLabel": fresh["connection"]["accountLabel"], "definition": fresh["definition"]}
+        updated = self.cli("connections", "save", "--stdin", value=metadata)
+        assert updated["revision"] == fresh["connection"]["revision"]
+        assert "编辑版本" in self.cli("connections", "save", "--stdin",
+                                      value=metadata | {"title": "stale title"}, exit_status=1)["error"]["message"]
+        unversioned = {key: value for key, value in fresh["definition"].items() if key != "editVersion"}
+        assert "editVersion" in self.cli("connections", "save", "--stdin",
+                                         value=metadata | {"definition": unversioned}, exit_status=1)["error"]["message"]
+        assert self.cli("connections", "show", connection)["connection"]["title"] == "CLI metadata edit"
+        self.passed("existing edits require a fresh token and metadata conflicts preserve the call revision")
 
         paths = [self.home / ".codex/config.toml", self.home / ".hermes/config.yaml"]
         before = [p.read_bytes() for p in paths]

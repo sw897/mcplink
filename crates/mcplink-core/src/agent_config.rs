@@ -5,7 +5,10 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 pub fn directory(agent: &Agent) -> Result<PathBuf> {
     let home = config::user_home()?;
@@ -42,10 +45,7 @@ pub fn directory(agent: &Agent) -> Result<PathBuf> {
         Agent::Kimicode => ("KIMI_CODE_HOME", ".kimi-code"),
         _ => bail!("客户端未适配"),
     };
-    Ok(std::env::var_os(variable)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(folder)))
+    Ok(config::absolute_env(variable).unwrap_or_else(|| home.join(folder)))
 }
 
 fn source(
@@ -57,14 +57,26 @@ fn source(
 ) -> Source {
     #[cfg(windows)]
     let path = PathBuf::from(path.to_string_lossy().replace('/', "\\"));
-    let path = config::canonical_path(&path).unwrap_or(path);
+    let identity = |path: &Path| {
+        format!(
+            "native:{}:{}",
+            serde_json::to_value(&agent).unwrap().as_str().unwrap(),
+            digest(path.to_string_lossy().as_bytes())
+        )
+    };
+    let legacy = identity(&path);
+    let path = config::source_path(&path).unwrap_or(path);
     let read_only = read_only
-        || (agent == Agent::Deepseek && path.file_name().is_some_and(|name| name == "cordis.yml"));
-    let id = format!(
-        "native:{}:{}",
-        serde_json::to_value(&agent).unwrap().as_str().unwrap(),
-        digest(path.to_string_lossy().as_bytes())
-    );
+        || (agent == Agent::Deepseek
+            && path
+                .file_name()
+                .is_some_and(|name| config::same_path(Path::new(name), Path::new("cordis.yml"))));
+    let id = identity(&path);
+    let legacy_ids = if id == legacy {
+        Vec::new()
+    } else {
+        vec![legacy]
+    };
     Source {
         id,
         agent,
@@ -75,6 +87,7 @@ fn source(
         read_only,
         plugin_root: None,
         discovery_error: None,
+        legacy_ids,
     }
 }
 
@@ -83,8 +96,7 @@ pub fn default_path(agent: &Agent) -> Result<PathBuf> {
     Ok(match agent {
         Agent::Zcode => root.join("cli").join("config.json"),
         Agent::Deepseek => root.join("profiles/desktop/cordis.patch.yml"),
-        Agent::Openclaw => std::env::var_os("OPENCLAW_CONFIG_PATH")
-            .map(PathBuf::from)
+        Agent::Openclaw => config::absolute_env("OPENCLAW_CONFIG_PATH")
             .unwrap_or_else(|| root.join("openclaw.json")),
         Agent::Kimicode | Agent::Workbuddy | Agent::Qwenwork | Agent::Pi => root.join("mcp.json"),
         _ => unreachable!(),
@@ -93,20 +105,17 @@ pub fn default_path(agent: &Agent) -> Result<PathBuf> {
 
 pub fn qwen_user_data_directory() -> Result<PathBuf> {
     let home = config::user_home()?;
-    let isolated = std::env::var_os("MCPLINK_HOME").is_some();
+    let isolated = config::absolute_env("MCPLINK_HOME").is_some();
     let root = if cfg!(target_os = "macos") {
         home.join("Library/Application Support")
     } else if cfg!(windows) {
         if isolated {
             home.join("AppData/Roaming")
         } else {
-            std::env::var_os("APPDATA")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home.join("AppData/Roaming"))
+            config::absolute_env("APPDATA").unwrap_or_else(|| home.join("AppData/Roaming"))
         }
     } else {
-        std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
+        config::absolute_env("XDG_CONFIG_HOME")
             .filter(|path| !isolated || path.starts_with(&home))
             .unwrap_or_else(|| home.join(".config"))
     };
@@ -192,8 +201,10 @@ pub fn assert_qwen_source(source: &Source) -> Result<()> {
     assert_qwen_storage()?;
     let expected = default_path(&Agent::Qwenwork)?;
     if source.project.is_some()
-        || config::canonical_path(&source.path).unwrap_or(source.path.clone())
-            != config::canonical_path(&expected).unwrap_or(expected)
+        || !config::same_path(
+            &config::source_path(&source.path)?,
+            &config::source_path(&expected)?,
+        )
     {
         bail!("千问办公仅适配当前用户 .qwenworkcn/mcp.json，请勿选择 SDK、身份存储或其他配置路径")
     }
@@ -314,18 +325,14 @@ pub fn source_from_params(agent: Agent, params: &Value, sources: &[Source]) -> R
     if !path.is_absolute() {
         bail!("请选择完整的原生配置文件路径")
     }
-    let path = config::canonical_path(&path).unwrap_or(path);
-    if agent == Agent::Qwenwork
-        && path != config::canonical_path(&expected).unwrap_or(expected.clone())
-    {
+    let path = config::source_path(&path)?;
+    if agent == Agent::Qwenwork && path != config::source_path(&expected)? {
         bail!("千问办公仅适配当前用户 .qwenworkcn/mcp.json，请勿选择 SDK、身份存储或其他配置路径")
     }
-    if project.is_some() && path != config::canonical_path(&expected).unwrap_or(expected) {
+    if project.is_some() && path != config::source_path(&expected)? {
         bail!("项目配置路径与所选项目不符")
     }
-    if let Some(existing) = sources
-        .iter()
-        .find(|s| config::canonical_path(&s.path).unwrap_or(s.path.clone()) == path)
+    if let Some(existing) = sources.iter().find(|s| s.path == path)
         && (existing.agent != agent || existing.read_only || existing.project == project)
     {
         return Ok(existing.clone());
@@ -527,10 +534,7 @@ pub fn normalize(raw: &Value, agent: &Agent, project: Option<&Path>) -> Result<D
         }
     }
     if let Some(variable) = raw["bearerTokenEnvVar"].as_str()
-        && (variable.is_empty()
-            || !variable.bytes().enumerate().all(|(index, c)| {
-                c == b'_' || c.is_ascii_alphabetic() || (index > 0 && c.is_ascii_digit())
-            }))
+        && !config::valid_env_name(variable)
     {
         bail!("凭据环境变量名称无效")
     }
@@ -651,7 +655,6 @@ pub fn normalize(raw: &Value, agent: &Agent, project: Option<&Path>) -> Result<D
 }
 
 pub fn native(def: &Definition, source: &Source) -> Result<Value> {
-    config::validate(def)?;
     if source.agent == Agent::Pi {
         return crate::pi_config::native(def, source);
     }
@@ -663,17 +666,6 @@ pub fn native(def: &Definition, source: &Source) -> Result<Value> {
         value["enabled"] = json!(def.enabled);
         return Ok(value);
     }
-    if source.agent == Agent::Workbuddy {
-        crate::client_import::check_portable(def)?;
-        if def.original_agent == Some(Agent::Hermes)
-            && def
-                .exclude_tools
-                .iter()
-                .any(|v| v.contains(['*', '?', '[']))
-        {
-            bail!("WorkBuddy 无等价的工具通配符过滤，请使用共享代理")
-        }
-    }
     if def.command.is_some()
         && def
             .origin_project
@@ -681,33 +673,6 @@ pub fn native(def: &Definition, source: &Source) -> Result<Value> {
             .is_some_and(|project| source.project.as_ref() != Some(project))
     {
         bail!("项目命令不能直接迁移到其他运行目录，请使用共享代理")
-    }
-    if def.oauth
-        || def.client_id.is_some()
-        || def.client_secret.is_some()
-        || !def.oauth_scopes.is_empty()
-        || def.oauth_callback_port.is_some()
-    {
-        bail!("此客户端 OAuth 请使用共享代理，由 mcplink 维护认证")
-    }
-    if def.resources_disabled || def.prompts_disabled {
-        bail!("原生资源或提示词过滤请使用共享代理")
-    }
-    if source.agent == Agent::Workbuddy
-        && (!def.enabled
-            || def.timeout != def.startup_timeout
-            || def.include_specified
-            || !def.include_tools.is_empty()
-            || !def.exclude_tools.is_empty())
-    {
-        bail!(
-            "WorkBuddy 启停与工具策略在原客户端维护，启动和请求超时需一致；请使用共享代理保留不能等价直连的限制"
-        )
-    }
-    if matches!(source.agent, Agent::Zcode | Agent::Deepseek)
-        && (def.include_specified || !def.exclude_tools.is_empty())
-    {
-        bail!("此客户端原生工具过滤请使用共享代理")
     }
     let mut value = json!({});
     if let Some(command) = &def.command {
@@ -721,8 +686,18 @@ pub fn native(def: &Definition, source: &Source) -> Result<Value> {
         }
     } else {
         value["url"] = json!(def.url);
-        if !def.headers.is_empty() {
-            value["headers"] = json!(def.headers);
+        let mut headers = BTreeMap::new();
+        for (name, header) in &def.headers {
+            if source.agent == Agent::Kimicode
+                && let Some(variable) = config::bearer_reference(name, header)
+            {
+                value["bearerTokenEnvVar"] = json!(variable);
+            } else {
+                headers.insert(name, header);
+            }
+        }
+        if !headers.is_empty() {
+            value["headers"] = json!(headers);
         }
     }
     if value.to_string().contains("${") {
@@ -777,9 +752,6 @@ pub fn native(def: &Definition, source: &Source) -> Result<Value> {
         ),
     ] {
         if let Some(seconds) = timeout {
-            if source.agent == Agent::Zcode {
-                bail!("ZCode 原生超时请使用共享代理")
-            }
             let millis = seconds.checked_mul(1000).context("超时过大")?;
             if millis == 0 || (source.agent == Agent::Kimicode && millis > 2_147_483_647) {
                 bail!("超时超出客户端范围")
@@ -788,14 +760,14 @@ pub fn native(def: &Definition, source: &Source) -> Result<Value> {
         }
     }
     if source.agent == Agent::Kimicode {
-        if def.include_specified {
+        if def.include_specified || !def.include_tools.is_empty() {
             value["enabledTools"] = json!(def.include_tools);
         }
         if !def.exclude_tools.is_empty() {
             value["disabledTools"] = json!(def.exclude_tools);
         }
     } else if source.agent == Agent::Openclaw {
-        if def.include_specified {
+        if def.include_specified || !def.include_tools.is_empty() {
             value["toolFilter"]["include"] = json!(def.include_tools);
         }
         if !def.exclude_tools.is_empty() {

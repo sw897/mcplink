@@ -11,7 +11,7 @@ npm ci
 npm run release:macos
 ```
 
-入口按序检查版本、运行 Rust 静态检查、重建 sidecar/桌面/DMG、核对包内 CLI/Skill 和真实架构、从 DMG 安装到隔离目录并验证凭据更新、后台恢复和路径迁移，再运行 CLI 与后台生命周期场景。成功后才生成 `artifacts/releases/<版本>/<时间>/`：
+入口先检查版本并运行 Rust 静态检查，再用独立的 `test-fixtures` DMG 验证隔离安装、凭据更新、后台恢复、路径迁移和 CLI 生命周期。随后默认构建发布 DMG，核对包内 CLI、Skill、架构和系统凭据库边界。全部通过后才生成 `artifacts/releases/<版本>/<时间>/`。
 
 - DMG、保留可执行权限的 app ZIP、含许可声明的 CLI tar.gz。
 - `SHA256SUMS`、包含版本/源码哈希/产物哈希的 `release-manifest.json`。
@@ -28,10 +28,10 @@ ZIP/tar 使用规范化的归档元数据，不保留构建者的用户名、UID
 覆盖安装兼容验收可另行指定旧的 app：
 
 ```sh
-python3 tests/e2e/installed_app.py --record artifacts/e2e/install-upgrade --previous-app /absolute/path/to/previous/mcplink.app
+python3 tests/e2e/installed_app.py --record artifacts/e2e/install-upgrade --dmg /absolute/path/to/fixture.dmg --previous-app /absolute/path/to/previous/mcplink.app
 ```
 
-测试先在旧版初始化账号与原生共享配置，再替换同一临时安装目录中的程序，核对新版保留连接 ID、凭据和配置。也可用 `--previous-dmg`，或设置 `MCPLINK_PREVIOUS_DMG`。不尝试用旧程序打开新版本数据库。相同版本的前后构建兼容不代表已验收未来版本的数据迁移。
+测试先在支持合成凭据库的旧版初始化账号与原生共享配置，再替换同一临时安装目录中的程序，核对新版保留连接 ID、凭据和配置。也可用 `--previous-dmg`，或设置 `MCPLINK_PREVIOUS_DMG`。同版本的前后构建用于验证覆盖兼容。
 
 ## Developer ID 与公证
 
@@ -49,7 +49,7 @@ Windows x64 使用 `npm run release:windows` 生成未签名预览候选；`npm 
 
 签名入口拒绝缺失、过期、自签名或不可用身份。独立 CLI 与打包 sidecar 先签名；Tauri 的自定义签名命令签署桌面程序和 NSIS 安装包。所有文件必须通过指定发布者、Authenticode 信任与时间戳检查，安装后再次核对 CLI 和桌面签名；失败不降级为未签名候选。依据：[Tauri Windows 签名](https://v2.tauri.app/distribute/sign/windows/)、[Microsoft SignTool](https://learn.microsoft.com/en-us/windows/win32/seccrypto/signtool)。CI 的自签名拒绝测试仅验证错误边界，不等于正式签名成功。
 
-`tests/e2e/windows_installer.py --installer PATH --previous-installer OLD_PATH --record artifacts/e2e/windows-upgrade` 在隔离安装目录先装旧版、创建 Token/OAuth 账号及原生绑定，再覆盖安装新版、实际调用 MCP、重装并卸载。保留的账号与配置用当前独立 CLI 核对。增加 `--require-signature` 才要求真实发布者签名。未提供旧包时报告仅证明当前安装/重装/卸载，不宣称跨版本升级。发布脚本可从 `MCPLINK_PREVIOUS_INSTALLER` 获取旧包。
+`tests/e2e/windows_installer.py --installer FIXTURE_PATH --previous-installer OLD_PATH --record artifacts/e2e/windows-upgrade` 用支持合成凭据库的安装包创建 Token/OAuth 账号及原生绑定，再覆盖安装、实际调用 MCP、重装并卸载。保留的账号与配置用验收 CLI 核对。发布包以 `--production` 单独验证隔离安装和系统凭据库边界，签名候选用 `--require-signature` 核对安装程序、桌面和 CLI 的发布者签名。发布脚本可从 `MCPLINK_PREVIOUS_INSTALLER` 获取支持合成凭据库的旧包。没有旧包时报告当前安装生命周期的结果。
 
 Windows 候选包含 NSIS 安装包、含许可文件的规范化 CLI ZIP、源码及产物哈希、签名和验收摘要。正式签名不保证 SmartScreen 对新发布者或新文件已建立信誉。
 
@@ -65,7 +65,7 @@ SignPath 接入须使用其[可信 GitHub 构建流程](https://docs.signpath.io
 
 ## GitHub Actions
 
-`ci.yml` 为 macOS Apple Silicon 和 Windows x64 分别运行检查、构建和合成 CLI 场景。macOS 另验收 DMG，Windows 另验收 NSIS 安装生命周期。打包前清理生成的 bundle 目录，避免 Cargo 缓存中的旧包混入当前工件。CI 按近期 main 成功运行的源码清单核对安装包版本、按哈希合并相同副本，并优先选不同版本作为升级基线，报告来源 run、提交、版本和哈希，再做旧版到当前构建的升级；若旧工件不可用，明确记录缺少跨版本基线，不将重装当作跨版本升级。Windows 结果须以实际 workflow 报告和桌面实机验收为准；配置工作流本身不表示通过。CI 不运行需要原生 Agent 登录的真实模型测试。`packages-*` 工件仅保留安装包、CLI、校验值与公开构建来源清单，不上传测试报告、失败截图、home、Vault、原始配置或原始日志。新升级基线读取该清单，同时兼容旧 `acceptance-*` 工件及其清单路径。
+`ci.yml` 为 macOS Apple Silicon 和 Windows x64 分别构建合成验收包与发布包，验收 DMG 或 NSIS 安装，并检查实际发布 CLI 对测试凭据库的拒绝路径。打包前清理该目标目录的历史 bundle。升级验收按近期 main 的成功报告筛选支持合成凭据库的旧包，核对版本，按哈希合并相同副本，优先挑选不同版本并记录来源、提交、版本和哈希。缺少合适旧包时记录当前安装生命周期的覆盖范围。Windows 结果以实际 workflow 和原生桌面验收为准。CI 的 `packages-*` 工件只上传发布包、CLI、校验值与公开构建来源清单。验收包、home、Vault、日志、截图和报告留在运行环境中。
 
 `release-macos.yml` 仅手动运行，输入必须是与源码版本匹配的已有 tag。仓库需要以下 secrets：
 

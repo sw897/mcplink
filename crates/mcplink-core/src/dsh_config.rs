@@ -109,15 +109,56 @@ pub fn parse(text: &str) -> Result<Value> {
     Ok(json!({"mcp_servers":servers}))
 }
 
-fn dynamic(value: &Yaml) -> bool {
-    match value {
-        Yaml::Tagged(_) => true,
-        Yaml::Sequence(values) => values.iter().any(dynamic),
-        Yaml::Mapping(values) => values
-            .iter()
-            .any(|(key, value)| dynamic(key) || dynamic(value)),
-        _ => false,
+fn require_static(node: &yaml_edit::YamlNode) -> Result<()> {
+    use yaml_edit::{AsYaml, SyntaxKind};
+    let syntax = node.as_node().context("无法检查原生 YAML 条目")?;
+    let dynamic = |kind| {
+        matches!(
+            kind,
+            SyntaxKind::ANCHOR | SyntaxKind::TAG | SyntaxKind::ALIAS
+        )
+    };
+    anyhow::ensure!(
+        !syntax
+            .descendants_with_tokens()
+            .any(|part| dynamic(part.kind()))
+            && !syntax.ancestors().any(|ancestor| ancestor
+                .children_with_tokens()
+                .any(|part| part.as_token().is_some_and(|token| dynamic(token.kind())))),
+        "此 DeepSeek Harness 条目含动态 YAML、锚点或别名，请在原客户端维护"
+    );
+    Ok(())
+}
+
+fn update_mapping(mapping: &yaml_edit::Mapping, previous: &Yaml, desired: &Value) -> Result<()> {
+    let desired = desired.as_object().context("MCP 配置需要映射")?;
+    for key in previous
+        .as_mapping()
+        .into_iter()
+        .flatten()
+        .filter_map(|(key, _)| key.as_str())
+    {
+        if !desired.contains_key(key) {
+            mapping.remove(key);
+        }
     }
+    for (key, value) in desired {
+        let old = &previous[key];
+        if serde_yaml::to_value(value)? == *old {
+            continue;
+        }
+        if value.is_object()
+            && let Some(child) = mapping.get_mapping(key.as_str())
+        {
+            update_mapping(&child, old, value)?;
+        } else {
+            mapping.set(
+                key.as_str(),
+                yaml_edit::Document::from_str(&serde_yaml::to_string(value)?)?,
+            );
+        }
+    }
+    Ok(())
 }
 
 pub fn render(text: &str, name: &str, value: Option<&Value>) -> Result<String> {
@@ -151,14 +192,14 @@ pub fn render(text: &str, name: &str, value: Option<&Value>) -> Result<String> {
             .get_mapping("config")
             .and_then(|map| map.get_mapping("servers"))
             .context("MCP manager servers 需要映射")?;
+        let existing = servers.get(name).context("MCP 定义已变化")?;
+        require_static(&existing)?;
         if let Some(value) = value {
-            if dynamic(&row["config"]["servers"][name]) {
-                bail!("此 MCP 定义包含动态 YAML，请在原客户端维护")
-            }
-            servers.set(
-                name,
-                yaml_edit::Document::from_str(&serde_yaml::to_string(value)?)?,
-            );
+            update_mapping(
+                existing.as_mapping().context("MCP 服务需要映射")?,
+                &row["config"]["servers"][name],
+                value,
+            )?;
         } else {
             servers.remove(name).context("MCP 定义已变化")?;
         }
@@ -200,18 +241,11 @@ pub fn render(text: &str, name: &str, value: Option<&Value>) -> Result<String> {
     } else {
         sequence.values().count()
     };
-    if let Some((_, _, row)) = existing {
-        let original = destination
-            .get(index)
-            .context("原生条目已变化")?
-            .to_string();
-        if dynamic(row)
-            || original
-                .split_whitespace()
-                .any(|token| token.starts_with('&') || token.starts_with('*'))
-        {
-            bail!("此 DeepSeek Harness 条目含动态 YAML、锚点或别名，请在原客户端维护")
-        }
+    let original = existing
+        .map(|_| destination.get(index).context("原生条目已变化"))
+        .transpose()?;
+    if let Some(original) = &original {
+        require_static(original)?;
     }
     if let Some(value) = value {
         let id = existing
@@ -223,9 +257,6 @@ pub fn render(text: &str, name: &str, value: Option<&Value>) -> Result<String> {
         {
             bail!("DeepSeek Harness 原生插件 ID 已被占用")
         }
-        let mut row = existing
-            .map(|(_, _, row)| row.clone())
-            .unwrap_or_else(|| serde_yaml::to_value(json!({"id":id,"name":CLIENT})).unwrap());
         let mut config = value.clone();
         let config_map = config.as_object_mut().context("MCP 服务需要映射")?;
         let enabled = config_map
@@ -233,28 +264,38 @@ pub fn render(text: &str, name: &str, value: Option<&Value>) -> Result<String> {
             .and_then(|value| value.as_bool())
             .unwrap_or(true);
         config_map.insert("serverName".into(), json!(name));
-        let row_map = row.as_mapping_mut().context("MCP 插件条目需要映射")?;
-        row_map.insert(Yaml::from("config"), serde_yaml::to_value(config)?);
-        if enabled {
-            row_map.remove(Yaml::from("disabled"));
-        } else {
-            row_map.insert(Yaml::from("disabled"), Yaml::Bool(true));
-        }
-        let replacement = if existing.is_some() {
-            row
-        } else {
-            serde_yaml::to_value(json!({"insert":[row]}))?
-        };
-        let replacement = yaml_edit::Document::from_str(&serde_yaml::to_string(&replacement)?)?;
-        if existing.is_some() {
-            if !destination.set(index, replacement) {
-                bail!("原生条目已变化")
+        if let (Some(original), Some((_, _, row))) = (&original, existing) {
+            let mapping = original.as_mapping().context("MCP 插件条目需要映射")?;
+            let live_config = mapping.get_mapping("config").context("MCP 配置需要映射")?;
+            update_mapping(&live_config, &row["config"], &config)?;
+            if enabled && disabled(row)? {
+                mapping.set("disabled", false);
+            } else if !enabled && !disabled(row)? {
+                mapping.set("disabled", true);
             }
         } else {
-            sequence.push(replacement);
+            let mut row = json!({"id":id,"name":CLIENT,"config":config});
+            if !enabled {
+                row["disabled"] = json!(true);
+            }
+            let replacement = json!({"insert":[row]});
+            sequence.push(yaml_edit::Document::from_str(&serde_yaml::to_string(
+                &replacement,
+            )?)?);
         }
     } else {
         destination.remove(index).context("原生条目已变化")?;
+        if let Some((parent, Some(_), _)) = existing
+            && destination.is_empty()
+        {
+            let wrapper = sequence.get(parent).context("原生 insert 已变化")?;
+            let mapping = wrapper.as_mapping().context("原生 insert 需要映射")?;
+            if mapping.len() == 1 {
+                sequence.remove(parent).context("原生 insert 已变化")?;
+            } else {
+                mapping.remove("insert");
+            }
+        }
     }
     let mut output = document.to_string();
     if !output.ends_with('\n') {

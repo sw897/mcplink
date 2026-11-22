@@ -12,6 +12,10 @@ async fn main() {
             .map_err(|_| "Invalid stdin")?;
         let args: Value = serde_json::from_str(&input).map_err(|_| "Invalid JSON")?;
         let get = |key: &str| args[key].as_str().ok_or_else(|| format!("Missing {key}"));
+        if args["action"] == "desktop-rpc-contract" {
+            mcplink_desktop::desktop_rpc::validate(get("method")?, &args["params"])?;
+            return Ok(json!({"accepted": true}));
+        }
         #[cfg(target_os = "macos")]
         if args["action"] == "keychain-update-preflight" {
             let home = PathBuf::from(get("home")?)
@@ -44,7 +48,10 @@ async fn main() {
         let current = get("version")?
             .parse()
             .map_err(|_| "Invalid current version")?;
-        if matches!(args["action"].as_str(), Some("sync" | "discover")) {
+        if matches!(
+            args["action"].as_str(),
+            Some("sync" | "discover" | "archive")
+        ) {
             let home = PathBuf::from(get("home")?);
             if !home.join(".mcplink-test-fixture").is_file() {
                 return Err("Missing fixture marker".into());
@@ -57,12 +64,16 @@ async fn main() {
             {
                 return Err("Sidecar outside fixture".into());
             }
-            return if args["action"] == "discover" {
-                Ok(json!({"targets": cli_sync::discover(&home, &sidecar, &current).await}))
-            } else {
-                Ok(json!({"synced": cli_sync::apply_receipt(
-                    &home.join("desktop-updates/pending.json"), &home, &sidecar, &current
-                )?}))
+            let receipt = home.join("desktop-updates/pending.json");
+            return match args["action"].as_str() {
+                Some("discover") => Ok(json!({"targets": cli_sync::discover(&home, &sidecar)})),
+                Some("archive") => {
+                    cli_sync::archive_stale_receipt(&receipt, &current)?;
+                    Ok(json!({"archived": true}))
+                }
+                _ => Ok(json!({"synced": cli_sync::apply_receipt(
+                    &receipt, &home, &sidecar, &current
+                )?})),
             };
         }
         let target = get("target")?.to_owned();

@@ -205,6 +205,13 @@ pub fn schema_hash(tool: &Value) -> Result<String> {
 }
 
 async fn find_contract(engine: Arc<Engine>, id: &str, name: &str) -> Result<ToolContract> {
+    let entry = engine.store.connection(id)?;
+    if entry.members.is_some() {
+        let (tool, route) = crate::gateway::find_tool(&engine, &entry, name)
+            .await?
+            .context(ToolFailure::new(ToolErrorCode::ToolNotFound))?;
+        return ToolContract::new(id, entry.revision, tool, Some(route));
+    }
     contracts(engine, id)
         .await?
         .into_iter()

@@ -56,10 +56,14 @@ jobs:
         timeout-minutes: 3
         run: python -u tests/e2e/frontend.py --record artifacts/e2e/ci-frontend
       - run: npm run check
+      - name: Rust workspace tests
+        run: cargo test --workspace --locked
+      - name: Build isolated fixture CLI
+        run: node scripts/prepare-sidecar.mjs --debug --test-fixtures
       - name: Process-local authentication and Bridge recovery
         timeout-minutes: 3
         run: |
-          cargo build --locked -p mcplink-core --example runtime_session
+          cargo build --locked -p mcplink-core --features test-fixtures --example runtime_session
           python -u tests/e2e/runtime_session.py --record artifacts/e2e/ci-runtime-session
       - name: Fixed macOS credential helper and caller identity boundaries
         if: runner.os == 'macOS'
@@ -79,7 +83,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python -u scripts/prepare_windows_bundler.py
-      - run: npm run bundle
+      - name: Build isolated installer for native acceptance
+        run: npm run bundle -- --test-fixtures
       - name: Find a previous successful installer for upgrade acceptance
         env:
           GH_TOKEN: ${{ github.token }}
@@ -94,10 +99,11 @@ jobs:
         run: |
           import os
           from pathlib import Path
-          binary = Path.cwd() / ("target/release/mcplink.exe" if os.name == "nt" else "target/release/bundle/macos/mcplink.app/Contents/MacOS/mcplink")
+          root = Path.cwd() / "target/fixture-bundle/release"
+          binary = root / ("mcplink.exe" if os.name == "nt" else "bundle/macos/mcplink.app/Contents/MacOS/mcplink")
           assert binary.is_file(), binary
           version = __import__('json').loads(Path('package.json').read_text())['version']
-          installers = list(Path('target/release/bundle').rglob('*setup.exe' if os.name == 'nt' else '*.dmg'))
+          installers = list((root / 'bundle').rglob('*setup.exe' if os.name == 'nt' else '*.dmg'))
           assert len(installers) == 1 and f'_{version}_' in installers[0].name, 'Stale or ambiguous installer output'
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
               output.write(f"MCPLINK_E2E_BINARY={binary}\n")
@@ -109,7 +115,7 @@ jobs:
           import json, subprocess, sys
           from pathlib import Path
           version = json.loads(Path('package.json').read_text())['version']
-          installer = next(Path('target/release/bundle/nsis').glob(f'*_{version}_*setup.exe'))
+          installer = next(Path('target/fixture-bundle/release/bundle/nsis').glob(f'*_{version}_*setup.exe'))
           subprocess.run([sys.executable, '-u', 'tests/e2e/windows_desktop.py', '--installer', str(installer), '--record', 'artifacts/e2e/ci-windows-native-desktop'], check=True)
       - name: Configuration integrity and recovery
         timeout-minutes: 5
@@ -137,7 +143,9 @@ jobs:
               driver.chmod(driver.stat().st_mode | 0o111)
           subprocess.run([str(driver.resolve()), '--version'], check=True)
           subprocess.run(['node', '--version'], check=True)
-          subprocess.run([sys.executable, '-u', 'tests/e2e/desktop_ui.py', '--record', 'artifacts/e2e/ci-renderer', '--session', 'mcplink-ci-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}', '--chrome', str(chrome), '--browser-driver', str(driver.resolve())], check=True)
+          renderer = [sys.executable, '-u', 'tests/e2e/desktop_ui.py', '--session', 'mcplink-ci-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}', '--chrome', str(chrome), '--browser-driver', str(driver.resolve())]
+          subprocess.run([*renderer, '--record', 'artifacts/e2e/ci-renderer'], check=True)
+          subprocess.run([*renderer, '--record', 'artifacts/e2e/ci-renderer-import', '--import-only'], check=True)
       - name: Restore project Node runtime
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
@@ -267,7 +275,7 @@ jobs:
           import os, subprocess, sys
           from pathlib import Path
           version = __import__('json').loads(Path('package.json').read_text())['version']
-          installer = next(Path('target/release/bundle/nsis').glob(f'*_{version}_*setup.exe'))
+          installer = next(Path('target/fixture-bundle/release/bundle/nsis').glob(f'*_{version}_*setup.exe'))
           previous = os.environ.get('MCPLINK_PREVIOUS_INSTALLER')
           subprocess.run([sys.executable, '-u', 'tests/e2e/windows_installer.py', '--installer', str(installer), '--record', 'artifacts/e2e/ci-windows-installed', *(['--previous-installer', previous] if previous else [])], check=True)
       - name: Daemon exit and process cleanup acceptance
@@ -280,6 +288,35 @@ jobs:
         if: runner.os == 'Windows'
         timeout-minutes: 12
         run: npm run release:windows
+      - name: Download pinned Windows migration baseline
+        if: runner.os == 'Windows' && github.repository == 'sw897/mcplink' && startsWith(github.ref, 'refs/heads/codex/release-acceptance-')
+        timeout-minutes: 4
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download 44477457010 --repo "$env:GITHUB_REPOSITORY" --name packages-windows-2025 --dir artifacts/e2e/ci-windows-native-baseline
+      - name: Windows native ACL, Credential Manager and NSIS coverage
+        if: runner.os == 'Windows' && github.repository == 'sw897/mcplink' && startsWith(github.ref, 'refs/heads/codex/release-acceptance-')
+        timeout-minutes: 8
+        shell: python {0}
+        run: |
+          import hashlib, json, os, subprocess, sys
+          from pathlib import Path
+          baseline = Path('artifacts/e2e/ci-windows-native-baseline')
+          manifest = json.loads((baseline / 'artifacts/build/source/release-manifest.json').read_text(encoding='utf-8'))
+          assert manifest['revision'] == '71fcdaad393108c42e70d7edc6b3c22c0926fb2e'
+          assert manifest['conclusion'] == 'PASS'
+          previous = baseline / 'artifacts/build/windows-release/mcplink_0.3.2_x64-setup.exe'
+          assert hashlib.sha256(previous.read_bytes()).hexdigest() == '98bd86ee491181f9becf8efbe4daf94c8a24c13471dcadea32f006aff058eaea'
+          installer, = Path('target/release/bundle/nsis').glob('*_x64-setup.exe')
+          record = Path('artifacts/e2e/ci-windows-native-migration')
+          env = os.environ | {'MCPLINK_E2E_BINARY': str(Path('target/release/mcplink.exe').resolve())}
+          subprocess.run([sys.executable, '-u', 'tests/e2e/windows_installer.py', '--native-migration',
+                          '--installer', str(installer), '--previous-installer', str(previous),
+                          '--record', str(record)], env=env, check=True)
+          report = json.loads((record / 'report.json').read_text(encoding='utf-8'))
+          assert report['conclusion'] == 'PASS' and report['synthetic_credentials_removed']
+          assert (report['previous_management_api'], report['management_api']) == (23, 24)
+          print(f"PASS Windows x64 native migration across management API 23 to 24 ({len(report['scenarios'])} scenarios)")
       - name: Curate public Windows distribution files
         if: runner.os == 'Windows'
         shell: python {0}
@@ -293,14 +330,17 @@ jobs:
       - name: macOS DMG acceptance
         if: runner.os == 'macOS'
         run: |
+          python3 tests/e2e/installed_app.py --dmg "target/fixture-bundle/release/bundle/dmg/mcplink_$(node -p 'require("./package.json").version')_aarch64.dmg" --record artifacts/e2e/ci-installed
+          npm run bundle
           python3 tests/e2e/verify_package.py --record artifacts/e2e/ci-package
-          python3 tests/e2e/installed_app.py --record artifacts/e2e/ci-installed
+          python3 tests/e2e/release_vault.py --binary target/release/bundle/macos/mcplink.app/Contents/MacOS/mcplink --record artifacts/e2e/ci-release-vault
+          python3 tests/e2e/release_vault.py --binary target/release/mcplink --record artifacts/e2e/ci-standalone-vault
       - name: Record source baseline
         shell: bash
         run: |
           suffix=""
           if [[ "$RUNNER_OS" == "Windows" ]]; then suffix=".exe"; fi
-          python scripts/release_manifest.py --require-clean --record artifacts/build/source --binary "target/release/mcplink${suffix}" --binary "target/release/mcplink-desktop${suffix}"
+          python scripts/release_manifest.py --require-clean --without-fixture-vault --record artifacts/build/source --binary "target/release/mcplink${suffix}" --binary "target/release/mcplink-desktop${suffix}"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: packages-${{ matrix.os }}

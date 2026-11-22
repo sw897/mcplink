@@ -10,6 +10,7 @@ import platform
 import shutil
 import signal
 import subprocess
+import sys
 import time
 import traceback
 import threading
@@ -91,6 +92,20 @@ class GeneratedCli(ToolCalls):
         assert "--enabled <BOOLEAN>" in help_result and "--items <JSON>" in help_result
         assert not offline.exists()
         self.passed("generated help and inspect are offline, with explicit types and only selected tool names")
+
+        if sys.platform == "darwin":
+            from tempfile import TemporaryDirectory
+            with TemporaryDirectory(prefix="mcplink-system-alias-", dir="/private/tmp") as temp:
+                through_alias = Path("/tmp") / Path(temp).name / "generated"
+                alias_manifest = Path(self.cli("cli","generate",connection,"--name","alias-tools","--output",str(through_alias),"--tool","read_document")["manifest"])
+                from_alias = through_alias / alias_manifest.name
+                assert from_alias.samefile(alias_manifest)
+                assert self.cli("cli", "inspect", str(from_alias))["connectionId"] == connection
+                self.cli("cli", "check", str(from_alias))
+                arbitrary = Path(temp) / "alias.json"
+                arbitrary.symlink_to(alias_manifest)
+                self.cli("cli", "inspect", str(arbitrary), exit_status=1)
+            self.passed("generated CLI works through the macOS /tmp alias while a linked manifest is refused")
 
         payload={"items":[{"label":"空格 Unicode & echo synthetic-shell-argument ! % ^ 测试","weight":1.5}],"enabled":False,"count":2,"choice":"a","optional":None}
         flags=["--items",json.dumps(payload["items"],ensure_ascii=False),"--enabled","false","--count","2","--choice",'"a"',"--optional","null"]
@@ -260,7 +275,7 @@ class GeneratedCli(ToolCalls):
             self.launch(manifest,"--help",help_text=True)
             legacy_api = 21
             failed = self.cli("cli", "check", str(manifest), exit_status=1)
-            assert "旧后台不支持 CLI 契约诊断" in failed["error"]["message"] and not posts, failed
+            assert "旧后台使用不兼容的管理协议" in failed["error"]["message"] and not posts, failed
         finally:
             runtime_path.write_bytes(runtime_bytes);legacy.shutdown();legacy.server_close();thread.join()
         self.passed("old backends are rejected before execution or unsupported contract checks; generated help still works")

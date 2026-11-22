@@ -44,6 +44,7 @@ def main():
     parser.add_argument("--record", type=Path, required=True)
     parser.add_argument("--app", type=Path)
     parser.add_argument("--dmg", type=Path)
+    parser.add_argument("--standalone", type=Path, default=ROOT / "target/release/mcplink")
     parser.add_argument("--require-notarization", action="store_true")
     args = parser.parse_args()
     args.record.mkdir(parents=True, exist_ok=True)
@@ -90,7 +91,7 @@ def main():
         report["skill_sha256"] = hashlib.sha256(skill.encode()).hexdigest()
         payload = normalized_payload_sha(cli)
         report["cli_payload_sha256"] = payload
-        assert payload == normalized_payload_sha(ROOT / "target/release/mcplink"), "Packaged CLI differs from the latest release build"
+        assert payload == normalized_payload_sha(args.standalone.resolve()), "Packaged CLI differs from the standalone release build"
         for name in ("LICENSE", "THIRD_PARTY_NOTICES.txt"):
             matches = list((installed / "Contents").rglob(name))
             assert len(matches) == 1 and sha(matches[0]) == sha(ROOT / name), f"Missing/stale {name}"

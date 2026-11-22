@@ -43,6 +43,16 @@ run("python", [
   join(record, "source"),
 ]);
 npm(["run", "check"]);
+const fixtureEnv = { ...env, MCPLINK_WINDOWS_SIGNING: "0" };
+execFileSync(process.execPath, [env.npm_execpath, "run", "bundle", "--", "--test-fixtures"], {
+  stdio: "inherit",
+  env: fixtureEnv,
+});
+const fixtureRoot = resolve("target/fixture-bundle/release");
+const fixtureInstaller = readdirSync(join(fixtureRoot, "bundle/nsis")).find(
+  (name) => name.endsWith("-setup.exe") && name.includes(`_${version}_`),
+);
+if (!fixtureInstaller) throw new Error("Missing fixture NSIS installer");
 const config = join(record, "signing-config.json");
 writeFileSync(
   config,
@@ -83,17 +93,27 @@ if (signed)
     sign(["-VerifyOnly", "-FilePath", resolve(file)]);
 env.MCPLINK_E2E_BINARY = resolve("target/release/mcplink.exe");
 run("python", [
+  "tests/e2e/release_vault.py",
+  "--binary", env.MCPLINK_E2E_BINARY,
+  "--record", join(record, "release-vault"),
+]);
+run("python", [
+  "tests/e2e/windows_installer.py",
+  "--installer", installer, "--production",
+  "--record", join(record, "distributable-installed"),
+  ...(signed ? ["--require-signature"] : []),
+]);
+env.MCPLINK_E2E_BINARY = join(fixtureRoot, "mcplink.exe");
+run("python", [
   "tests/e2e/windows_installer.py",
   "--installer",
-  installer,
+  join(fixtureRoot, "bundle/nsis", fixtureInstaller),
   "--record",
   join(record, "installed"),
   ...(env.MCPLINK_PREVIOUS_INSTALLER
     ? ["--previous-installer", env.MCPLINK_PREVIOUS_INSTALLER]
     : []),
-  ...(signed ? ["--require-signature"] : []),
 ]);
-env.MCPLINK_E2E_BINARY = resolve("target/release/mcplink.exe");
 for (const test of [
   "agent_cli",
   "aggregate_gateway",
@@ -137,6 +157,7 @@ copyFileSync("docs/release-notes.md", join(output, "RELEASE_NOTES.md"));
 run("python", [
   "scripts/release_manifest.py",
   "--require-clean",
+  "--without-fixture-vault",
   "--record",
   output,
   "--artifact",
@@ -151,6 +172,7 @@ writeFileSync(
       version,
       signed,
       publisherSignatureVerified: signed,
+      installedDistributable: JSON.parse(readFileSync(join(record, "distributable-installed/report.json"), "utf8")),
       installed: JSON.parse(
         readFileSync(join(record, "installed/report.json"), "utf8"),
       ),

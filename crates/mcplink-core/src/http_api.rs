@@ -301,11 +301,7 @@ pub fn validate(definition: &Definition) -> Result<()> {
 }
 
 fn endpoint(definition: &Definition) -> Result<url::Url> {
-    let raw = crate::mcp::http_endpoint(
-        definition.url.as_deref().context("HTTP API 缺少 URL")?,
-        definition.origin_project.as_deref(),
-    )?;
-    url::Url::parse(&raw).context("HTTP API 地址无效")
+    crate::outbound::endpoint(definition)
 }
 
 fn render(template: &Value, input: &Value) -> Result<Option<Value>> {
@@ -360,7 +356,8 @@ fn checked_header_name(key: &str) -> Result<reqwest::header::HeaderName> {
     ensure!(
         key != reqwest::header::HOST
             && key != reqwest::header::CONTENT_LENGTH
-            && key != reqwest::header::TRANSFER_ENCODING,
+            && key != reqwest::header::TRANSFER_ENCODING
+            && key != reqwest::header::PROXY_AUTHORIZATION,
         "此 HTTP 请求头由运行时维护"
     );
     Ok(key)
@@ -476,16 +473,11 @@ fn image_result(bytes: &[u8], mime: &str) -> Result<Value> {
 }
 
 async fn execute(
+    client: &reqwest::Client,
     tool: &HttpTool,
     request: reqwest::Request,
     secrets: &security::CredentialFilter,
 ) -> Result<Value> {
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .retry(reqwest::retry::never())
-        .connect_timeout(Duration::from_secs(15))
-        .build()
-        .context("无法建立 HTTP API 客户端")?;
     let mut response = client
         .execute(request)
         .await
@@ -640,6 +632,8 @@ pub(crate) async fn request(
         .cloned()
         .unwrap_or_else(|| json!({}));
     let prepared = prepare(definition, tool, &input)?;
+    let (_, target) = engine.outbound.target(definition)?;
+    let client = target.client(prepared.url())?;
     let secrets =
         security::CredentialFilter::from_headers(prepared.headers(), &api.sensitive_headers)?;
     let current = engine.store.connection(&connection.id)?;
@@ -650,8 +644,9 @@ pub(crate) async fn request(
     let limit = Duration::from_secs(definition.timeout.unwrap_or(120).clamp(5, 600));
     let mut shutdown = engine.shutdown.subscribe();
     let outcome = tokio::select! {
+        biased;
         _ = shutdown.wait_for(|stopping| *stopping) => Err(anyhow::anyhow!("后台正在退出；执行结果待核对，不要自动重试")),
-        outcome = tokio::time::timeout(limit, execute(tool, prepared, &secrets)) => outcome.unwrap_or_else(|_| Err(anyhow::anyhow!("HTTP API 请求超时；执行结果待核对，不要自动重试"))),
+        outcome = tokio::time::timeout(limit, execute(client, tool, prepared, &secrets)) => outcome.unwrap_or_else(|_| Err(anyhow::anyhow!("HTTP API 请求超时；执行结果待核对，不要自动重试"))),
     };
     let _guard = engine.mutation.lock().await;
     let mut current = engine.store.connection(&connection.id)?;

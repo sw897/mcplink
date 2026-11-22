@@ -49,7 +49,7 @@ def exercise(record, data, keychain, password, audit, helper, core, env, sign, c
     source = record / "helper-next.swift"
     source.write_text((ROOT / "scripts/macos_keychain.swift").read_text().replace('"invalid_request"', '"invalid_request_lifecycle_fixture"'))
     candidate = record / "helper-next"
-    run(["swiftc", "-O", str(source), "-o", str(candidate)])
+    run(["swiftc", "-O", "-D", "MCPLINK_TEST_FIXTURES", str(source), "-o", str(candidate)])
     sign(candidate, "io.mcplink.keychain")
     next_hash = hashlib.sha256(candidate.read_bytes()).hexdigest()
     assert next_hash != original_hash
@@ -57,7 +57,7 @@ def exercise(record, data, keychain, password, audit, helper, core, env, sign, c
     assert not plan["credentialValuesRead"] and not plan["credentialsMoved"]
     migration = ("keychain", "migrate", "--helper", str(candidate), "--preview-hash", plan["previewHash"], "--confirm")
     signatures = json.loads(run([str(audit), str(helper), str(candidate)]))["signatures"]
-    account = hashlib.sha256(str(data).encode()).hexdigest()[:20] + "/runtime-key"
+    account = hashlib.sha256(str(data).encode()).hexdigest()[:20] + "/definition/runtime-auth-v1"
     # Lock only the disposable Keychain for a deterministic access refusal.
     # Fresh fixture grants can otherwise be cached by designated requirement.
     run(["security", "lock-keychain", str(keychain)])
@@ -71,13 +71,6 @@ def exercise(record, data, keychain, password, audit, helper, core, env, sign, c
     assert hashlib.sha256(staged.read_bytes()).hexdigest() == next_hash
     assert cli("keychain", "migrate", "--helper", str(candidate), "--preview-hash", "0" * 64, "--confirm", expected=1)["error"]
     passed.append("denied or stale migration keeps the original binding and grants, retaining the complete candidate")
-
-    # Explicit fixture-only grant: preserve both exact cdhash partitions. The
-    # known synthetic password and explicit fixture path cannot touch user items.
-    assert keychain == data / "fixture.keychain-db" and (data / ".mcplink-keychain-test-fixture").is_file()
-    partitions = ",".join("cdhash:" + value["cdhash"] for value in signatures)
-    run(["security", "set-generic-password-partition-list", "-s", "io.mcplink.credentials", "-a", account,
-         "-S", partitions, "-k", password, str(keychain)])
 
     driver = record / "updater-contract"
     shutil.copy2(ROOT / "target/debug/examples/updater_contract", driver)
@@ -133,8 +126,8 @@ def exercise(record, data, keychain, password, audit, helper, core, env, sign, c
             stream.add(app, arcname="mcplink.app")
         return archive
 
-    def preflight(archive, expected=0, hold=None):
-        args = {"action": "keychain-update-preflight", "home": str(record), "data": str(data), "package": str(archive)}
+    def preflight(archive, expected=0, hold=None, target_data=data):
+        args = {"action": "keychain-update-preflight", "home": str(record), "data": str(target_data), "package": str(archive)}
         if hold:
             args["holdMs"] = hold
             process = subprocess.Popen([str(driver)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
@@ -146,6 +139,14 @@ def exercise(record, data, keychain, password, audit, helper, core, env, sign, c
         return json.loads(result.stdout)
 
     compatible = package("same-certificate")
+    unbound_data = record / "no-helper-data"
+    unbound_data.mkdir()
+    assert preflight(compatible, target_data=unbound_data)["verified"]
+    incomplete = record / "incomplete.app.tar.gz"
+    with tarfile.open(incomplete, "w:gz"):
+        pass
+    assert preflight(incomplete, 2, target_data=unbound_data)["error"]
+    passed.append("macOS archive preflight validates app structure even without a fixed helper")
     assert preflight(compatible)["verified"]
     assert preflight(package("ad-hoc", adhoc=True), 2)["error"]
     assert preflight(package("wrong-cli", wrong_cli=True), 2)["error"]
@@ -180,6 +181,19 @@ def exercise(record, data, keychain, password, audit, helper, core, env, sign, c
     finally:
         assert held.wait(timeout=10) == 0
     passed.append("native updater and helper lifecycle share an exclusive lock")
+
+    # Explicit fixture-only grant: preserve both exact cdhash partitions. The
+    # known synthetic password and explicit fixture path cannot touch user items.
+    assert keychain == data / "fixture.keychain-db" and (data / ".mcplink-keychain-test-fixture").is_file()
+    lookup = ["-s", "io.mcplink.credentials", "-a", account]
+    found = subprocess.run(["security", "find-generic-password", *lookup, str(keychain)],
+                           capture_output=True, timeout=20).returncode
+    assert found == 0, f"Runtime root metadata lookup in the fixture Keychain failed (exit {found})"
+    partitions = ",".join("cdhash:" + value["cdhash"] for value in signatures)
+    result = subprocess.run(["security", "set-generic-password-partition-list", *lookup,
+                             "-S", partitions, "-k", password, str(keychain)],
+                            capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, "Fixture partition update failed: " + result.stderr.replace(password, "[fixture password]").strip()
 
     result = cli(*migration)["ok"]
     assert result["bindingVersion"] == 2 and result["previousHelperPreserved"]

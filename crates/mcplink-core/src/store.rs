@@ -16,14 +16,22 @@ pub(crate) struct ConnectionDeletion {
     pub released_bindings: i64,
 }
 
+pub(crate) struct ChangePreview {
+    pub expires_at: u64,
+    pub ready: bool,
+    pub result: Option<String>,
+}
+
 impl Store {
     pub fn open(data: &Path) -> Result<Self> {
         private_dir(data)?;
-        let db = Sqlite::open(data.join("mcplink.sqlite3")).context("无法打开本地数据库")?;
+        let path = data.join("mcplink.sqlite3");
+        crate::vault::prepare_private_file(&path)?;
+        let db = Sqlite::open(path).context("无法打开本地数据库")?;
         db.busy_timeout(std::time::Duration::from_secs(5))?;
         let schema: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
         anyhow::ensure!(schema <= 5, "数据库来自较新版本，请升级 mcplink");
-        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
+        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;
             CREATE TABLE IF NOT EXISTS connections(id TEXT PRIMARY KEY, document TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS bindings(connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE, source_id TEXT NOT NULL, name TEXT NOT NULL, document TEXT NOT NULL, PRIMARY KEY(source_id,name));
             CREATE TABLE IF NOT EXISTS sources(id TEXT PRIMARY KEY, document TEXT NOT NULL);
@@ -36,6 +44,10 @@ impl Store {
             CREATE TABLE IF NOT EXISTS connection_deletions(connection_id TEXT PRIMARY KEY, definition_ref TEXT, released_bindings INTEGER NOT NULL);
             CREATE INDEX IF NOT EXISTS connection_deletions_pending ON connection_deletions(connection_id) WHERE definition_ref IS NOT NULL;
             CREATE TABLE IF NOT EXISTS credential_cleanup(connection_id TEXT NOT NULL, reference TEXT PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS change_previews(id TEXT PRIMARY KEY, expires_at INTEGER NOT NULL, size INTEGER NOT NULL, ready INTEGER NOT NULL DEFAULT 0, vault_pending INTEGER NOT NULL DEFAULT 1, result TEXT);
+            CREATE INDEX IF NOT EXISTS change_previews_pending ON change_previews(expires_at) WHERE vault_pending=1;
+            CREATE TABLE IF NOT EXISTS change_staging(id TEXT PRIMARY KEY, backup INTEGER NOT NULL);
+            CREATE INDEX IF NOT EXISTS operations_by_plan ON operations(plan_id);
             PRAGMA user_version=5;")?;
         Ok(Self { db: Mutex::new(db) })
     }
@@ -93,10 +105,29 @@ impl Store {
     }
 
     pub fn connection(&self, id: &str) -> Result<Connection> {
-        self.connections()?
-            .into_iter()
-            .find(|item| item.id == id)
-            .context("服务连接不存在，请刷新清单")
+        let row: Option<String> = self
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT document FROM connections WHERE id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let connection: Connection =
+            serde_json::from_str(&row.context("服务连接不存在，请刷新清单")?)
+                .context("无法读取该连接的本地记录")?;
+        anyhow::ensure!(connection.id == id, "连接记录标识不一致");
+        Ok(connection)
+    }
+
+    pub(crate) fn connection_exists(&self, id: &str) -> Result<bool> {
+        Ok(self.db.lock().unwrap().query_row(
+            "SELECT EXISTS(SELECT 1 FROM connections WHERE id=?1)",
+            [id],
+            |row| row.get(0),
+        )?)
     }
 
     pub fn save_connection(&self, value: &Connection) -> Result<()> {
@@ -297,6 +328,25 @@ impl Store {
         Ok(())
     }
 
+    pub(crate) fn referenced_source_ids(&self) -> Result<std::collections::HashSet<String>> {
+        let db = self.db.lock().unwrap();
+        let mut statement = db.prepare("SELECT source_id FROM bindings UNION SELECT source_id FROM operations UNION SELECT source_id FROM entry_ownership")?;
+        Ok(statement
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub(crate) fn clear_abandoned_authorizations(&self) -> Result<()> {
+        let db = self.db.lock().unwrap();
+        db.execute(
+            "UPDATE connections
+             SET document=json_set(document,'$.status','needs_auth','$.lastError',?1)
+             WHERE CASE WHEN json_valid(document) THEN json_extract(document,'$.status')='authorizing' ELSE 0 END",
+            ["上次浏览器授权未完成，请重新登录"],
+        )?;
+        Ok(())
+    }
+
     pub fn operation(&self, id: &str) -> Result<Value> {
         self.find_operation(id)?.context("变更记录不存在")
     }
@@ -311,7 +361,7 @@ impl Store {
         change: &crate::model::Change,
         plan: &str,
         reference: &str,
-        backup: &str,
+        backup: Option<&str>,
     ) -> Result<()> {
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
@@ -320,6 +370,7 @@ impl Store {
             "INSERT INTO operation_details VALUES(?1,?2,?3)",
             params![change.id, change.kind(), change.restore_effect()],
         )?;
+        tx.execute("DELETE FROM change_staging WHERE id=?1", [&change.id])?;
         tx.commit()?;
         Ok(())
     }
@@ -365,14 +416,20 @@ impl Store {
 
     pub fn history_page(&self, before: Option<i64>, limit: u32) -> Result<Vec<Value>> {
         let db = self.db.lock().unwrap();
-        let mut statement = db.prepare("SELECT op.rowid,op.id,plan_id,source_id,connection_id,name,status,created_at,error,d.kind,d.restore_effect
+        let mut statement = db.prepare("SELECT op.rowid,op.id,plan_id,source_id,connection_id,name,status,created_at,error,d.kind,d.restore_effect,COALESCE(backup,'')!=''
             FROM operations op LEFT JOIN operation_details d ON d.id=op.id
             WHERE op.rowid < COALESCE(?1,9223372036854775807) ORDER BY op.rowid DESC LIMIT ?2")?;
-        let rows = statement.query_map(params![before, limit], |r| Ok(json!({
+        let rows = statement.query_map(params![before, limit], |r| {
+            let status: String = r.get(6)?;
+            let created: i64 = r.get(7)?;
+            let backup: bool = r.get(11)?;
+            Ok(json!({
             "cursor":r.get::<_,i64>(0)?, "id":r.get::<_,String>(1)?, "planId":r.get::<_,String>(2)?,
             "sourceId":r.get::<_,String>(3)?, "connectionId":r.get::<_,String>(4)?, "name":r.get::<_,String>(5)?,
-            "status":r.get::<_,String>(6)?, "createdAt":r.get::<_,i64>(7)?, "error":r.get::<_,Option<String>>(8)?, "kind":r.get::<_,Option<String>>(9)?, "restoreEffect":r.get::<_,Option<String>>(10)?
-        })))?;
+            "status":status, "createdAt":created, "error":r.get::<_,Option<String>>(8)?, "kind":r.get::<_,Option<String>>(9)?, "restoreEffect":r.get::<_,Option<String>>(10)?,
+            "backupRetained":backup,
+            "backupExpiresAt":(backup && status != "pending").then_some(created.saturating_add(crate::change_storage::BACKUP_SECONDS))
+        }))})?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -382,6 +439,172 @@ impl Store {
         Ok(statement
             .query_map([], operation_row)?
             .collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub(crate) fn plan_operations(&self, id: &str) -> Result<Vec<Value>> {
+        let db = self.db.lock().unwrap();
+        let mut statement = db.prepare("SELECT id,plan_id,source_id,connection_id,name,status,credential_ref FROM operations WHERE plan_id=?1 ORDER BY rowid")?;
+        Ok(statement
+            .query_map([id], operation_row)?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub(crate) fn entry_pending(&self, source: &str, name: &str) -> Result<bool> {
+        Ok(self.db.lock().unwrap().query_row(
+            "SELECT EXISTS(SELECT 1 FROM operations WHERE source_id=?1 AND name=?2 AND status='pending')",
+            params![source,name], |r| r.get(0),
+        )?)
+    }
+
+    pub(crate) fn preview(&self, id: &str) -> Result<Option<ChangePreview>> {
+        Ok(self
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT expires_at,ready,result FROM change_previews WHERE id=?1",
+                [id],
+                |r| {
+                    Ok(ChangePreview {
+                        expires_at: r.get::<_, i64>(0)?.max(0) as u64,
+                        ready: r.get(1)?,
+                        result: r.get(2)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    pub(crate) fn stage_preview(&self, id: &str, expires_at: u64, size: usize) -> Result<()> {
+        let db = self.db.lock().unwrap();
+        let (count, bytes): (i64, i64) = db.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(size),0) FROM change_previews WHERE vault_pending=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        anyhow::ensure!(
+            count < crate::change_storage::MAX_PREVIEWS as i64
+                && bytes.saturating_add(size as i64)
+                    <= crate::change_storage::PREVIEW_BUDGET as i64,
+            "待应用的配置预览已满，请应用已有预览或等它过期后重试"
+        );
+        db.execute(
+            "INSERT INTO change_previews(id,expires_at,size) VALUES(?1,?2,?3)",
+            params![id, expires_at as i64, size as i64],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn publish_preview(&self, id: &str) -> Result<()> {
+        self.db
+            .lock()
+            .unwrap()
+            .execute("UPDATE change_previews SET ready=1 WHERE id=?1", [id])?;
+        Ok(())
+    }
+
+    pub(crate) fn record_preview_result(&self, id: &str, result: &Value) -> Result<()> {
+        self.db.lock().unwrap().execute(
+            "INSERT INTO change_previews(id,expires_at,size,result) VALUES(?1,0,0,?2)
+             ON CONFLICT(id) DO UPDATE SET result=excluded.result",
+            params![id, serde_json::to_string(result)?],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn obsolete_previews(&self) -> Result<Vec<String>> {
+        let db = self.db.lock().unwrap();
+        let mut stmt = db.prepare("SELECT id FROM change_previews WHERE vault_pending=1 AND (ready=0 OR expires_at<=?1 OR result IS NOT NULL)")?;
+        Ok(stmt
+            .query_map([now() as i64], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub(crate) fn finish_preview_cleanup(&self, id: &str) -> Result<()> {
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        tx.execute(
+            "DELETE FROM change_previews WHERE id=?1 AND result IS NULL",
+            [id],
+        )?;
+        tx.execute(
+            "UPDATE change_previews SET vault_pending=0, size=0 WHERE id=?1",
+            [id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn stage_change(&self, id: &str, backup: bool) -> Result<()> {
+        self.db.lock().unwrap().execute(
+            "INSERT INTO change_staging VALUES(?1,?2)",
+            params![id, backup],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn obsolete_changes(&self) -> Result<Vec<(String, bool)>> {
+        let db = self.db.lock().unwrap();
+        let mut stmt = db.prepare("SELECT id,backup FROM change_staging UNION ALL
+            SELECT id,COALESCE(backup,'')!='' FROM operations WHERE status='failed' AND (credential_ref!='' OR COALESCE(backup,'')!='')")?;
+        Ok(stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub(crate) fn finish_change_cleanup(&self, id: &str) -> Result<()> {
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        tx.execute("DELETE FROM change_staging WHERE id=?1", [id])?;
+        tx.execute(
+            "UPDATE operations SET credential_ref='',backup=NULL WHERE id=?1 AND status='failed'",
+            [id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn backups(&self) -> Result<Vec<(String, String, bool)>> {
+        let db = self.db.lock().unwrap();
+        let mut stmt = db.prepare("SELECT id,backup,status!='pending' AND created_at<=?1 FROM operations WHERE COALESCE(backup,'')!=''")?;
+        let cutoff = (now() as i64).saturating_sub(crate::change_storage::BACKUP_SECONDS);
+        Ok(stmt
+            .query_map([cutoff], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub(crate) fn finish_backup_cleanup(&self, id: &str) -> Result<()> {
+        self.db.lock().unwrap().execute(
+            "UPDATE operations SET backup=NULL WHERE id=?1 AND status!='pending'",
+            [id],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn storage_migration_deadline(&self) -> Result<Option<u64>> {
+        let db = self.db.lock().unwrap();
+        db.execute(
+            "INSERT OR IGNORE INTO settings(name,value) VALUES('changes.legacy-sweep',?1)",
+            [(now() + crate::change_storage::PREVIEW_SECONDS).to_string()],
+        )?;
+        let deadline: String = db.query_row(
+            "SELECT value FROM settings WHERE name='changes.legacy-sweep'",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(if deadline == "complete" {
+            None
+        } else {
+            Some(deadline.parse()?)
+        })
+    }
+
+    pub(crate) fn finish_storage_migration(&self) -> Result<()> {
+        self.db.lock().unwrap().execute(
+            "UPDATE settings SET value='complete' WHERE name='changes.legacy-sweep'",
+            [],
+        )?;
+        Ok(())
     }
 }
 

@@ -62,8 +62,7 @@ impl UpdateGuard {
         let Some(helper) = &self.helper else {
             return Ok(());
         };
-        helper.verify()?;
-        let expected = crate::keychain_signature::certificate(&helper.path, ID)?;
+        let expected = helper.verify()?;
         for (path, identifier) in [
             (app.to_owned(), "io.mcplink.desktop"),
             (
@@ -72,8 +71,10 @@ impl UpdateGuard {
             ),
             (app.join("Contents/MacOS/mcplink"), "io.mcplink.cli"),
         ] {
+            let (certificate, binding_version) =
+                crate::keychain_signature::update_identity(&path, identifier)?;
             ensure!(
-                crate::keychain_signature::certificate(&path, identifier)? == expected,
+                certificate == expected,
                 "更新程序与固定助手的签名证书不兼容；已保留当前程序，请使用本机签名部署或单独审阅助手迁移"
             );
             if helper.binding.version > 1
@@ -82,7 +83,7 @@ impl UpdateGuard {
                     .is_some_and(|name| name != "mcplink-desktop")
             {
                 ensure!(
-                    crate::keychain_signature::binding_version(&path)? >= helper.binding.version,
+                    binding_version >= helper.binding.version,
                     "更新程序不支持当前助手绑定版本；已保留当前程序"
                 );
             }
@@ -284,7 +285,7 @@ pub fn migration_preview(data: &Path, candidate: &Path, operations: &[String]) -
     let old_raw = binding_bytes(data)?
         .context("尚未接入助手；首次接入请使用 keychain preview / authorize")?;
     let old = Helper::configured(data)?.context("缺少原助手")?;
-    old.verify_pin()?;
+    let previous_certificate = old.verify_pin()?;
     let prepared = Helper::candidate(data, candidate)?;
     ensure!(
         old.binding.sha256 != prepared.binding.sha256,
@@ -305,7 +306,7 @@ pub fn migration_preview(data: &Path, candidate: &Path, operations: &[String]) -
     finish_plan(json!({
         "version":1,"action":"migrate","dataDirectory":data,"helperIdentifier":ID,
         "previousBindingSha256":digest(&old_raw),"previousHelperSha256":old.binding.sha256,
-        "previousSignerSha256":digest(&crate::keychain_signature::certificate(&old.path, ID)?),
+        "previousSignerSha256":digest(&previous_certificate),
         "helperSha256":next.sha256,"candidateSignerSha256":digest(&crate::keychain_signature::certificate(candidate, ID)?),
         "installedPath":binding_path(data, &next),
         "previousRecoverySha256":receipt.as_ref().map(|v| digest(v)),

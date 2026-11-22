@@ -3,7 +3,7 @@ use mcplink_core::runtime::Session;
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler, ServiceExt, model::*, service::RequestContext,
 };
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
 use std::path::PathBuf;
 mod cli;
@@ -13,6 +13,27 @@ struct Bridge {
     client: Session,
     id: String,
     info: ServerConfig,
+}
+
+#[derive(Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct CatalogVersion {
+    tools: String,
+    resources: String,
+    prompts: String,
+}
+
+impl CatalogVersion {
+    fn parse(value: serde_json::Value) -> Result<Self> {
+        let version: Self = serde_json::from_value(value).context("清单摘要格式无效")?;
+        anyhow::ensure!(
+            [&version.tools, &version.resources, &version.prompts]
+                .iter()
+                .all(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())),
+            "清单摘要格式无效"
+        );
+        Ok(version)
+    }
 }
 
 impl Bridge {
@@ -138,7 +159,8 @@ async fn bridge(data: PathBuf, connection: String) -> Result<()> {
     }
     info.capabilities = serde_json::from_value(capabilities)?;
     info.protocol_version = ProtocolVersion::V_2025_11_25;
-    let mut version = client.call("mcp.catalog", json!({"id":connection})).await?;
+    let mut version =
+        CatalogVersion::parse(client.call("mcp.catalog", json!({"id":connection})).await?)?;
     let bridge = Bridge {
         client: client.clone(),
         id: connection.clone(),
@@ -160,22 +182,25 @@ async fn bridge(data: PathBuf, connection: String) -> Result<()> {
             .await
             .ok()
             .and_then(Result::ok)
-            .unwrap_or(json!(null));
+            .and_then(|value| CatalogVersion::parse(value).ok());
+            let Some(current) = current else {
+                continue;
+            };
             if current != version {
                 if info.capabilities.tools.is_some()
-                    && current["tools"] != version["tools"]
+                    && current.tools != version.tools
                     && peer.notify_tool_list_changed().await.is_err()
                 {
                     break;
                 }
                 if info.capabilities.resources.is_some()
-                    && current["resources"] != version["resources"]
+                    && current.resources != version.resources
                     && peer.notify_resource_list_changed().await.is_err()
                 {
                     break;
                 }
                 if info.capabilities.prompts.is_some()
-                    && current["prompts"] != version["prompts"]
+                    && current.prompts != version.prompts
                     && peer.notify_prompt_list_changed().await.is_err()
                 {
                     break;

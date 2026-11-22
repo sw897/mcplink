@@ -26,19 +26,49 @@ struct Mapping {
     to: Slot,
 }
 
-pub(crate) fn apply(request: &Value, previous: &Definition, next: &mut Definition) -> Result<()> {
+pub(crate) fn apply(
+    request: &Value,
+    previous: &Definition,
+    next: &mut Definition,
+    confirmed_origin: Option<&str>,
+) -> Result<Vec<(String, String)>> {
     let mappings: Vec<Mapping> = serde_json::from_value(request.clone())
         .map_err(|_| anyhow::anyhow!("凭据字段迁移声明无效"))?;
     ensure!(
         !mappings.is_empty() && mappings.len() <= 32,
         "凭据迁移需要 1–32 个字段"
     );
-    ensure!(
-        !next.changed_origin(previous),
-        "更改服务来源时不能迁移旧凭据"
-    );
+    let (from, to) = match (previous.url.is_some(), next.url.is_some()) {
+        (true, true) => {
+            ensure!(
+                !next.changed_origin(previous),
+                "更改服务来源时不能迁移旧凭据"
+            );
+            (Field::Headers, Field::Headers)
+        }
+        (false, false) => {
+            ensure!(
+                !next.changed_origin(previous),
+                "更改启动程序时不能迁移旧凭据"
+            );
+            (Field::Env, Field::Env)
+        }
+        (false, true) if next.http_api.is_some() => {
+            let origin = next.http_origin()?;
+            ensure!(
+                confirmed_origin == Some(origin.as_str()),
+                "从本地进程迁移已存环境变量需要在桌面确认目标服务"
+            );
+            (Field::Env, Field::Headers)
+        }
+        _ => anyhow::bail!("所选传输之间不能迁移旧凭据，请填写新的认证字段"),
+    };
     let mut destinations = HashSet::new();
     for mapping in &mappings {
+        ensure!(
+            mapping.from.field == from && mapping.to.field == to,
+            "凭据映射与连接传输不符"
+        );
         for slot in [&mapping.from, &mapping.to] {
             ensure!(
                 !slot.name.is_empty()
@@ -95,7 +125,10 @@ pub(crate) fn apply(request: &Value, previous: &Definition, next: &mut Definitio
         );
         target.insert(name, value.clone());
     }
-    Ok(())
+    Ok(mappings
+        .into_iter()
+        .map(|mapping| (mapping.from.name, mapping.to.name))
+        .collect())
 }
 
 #[cfg(test)]
@@ -110,16 +143,17 @@ mod tests {
             ..Default::default()
         };
         let mut next = Definition::default();
-        apply(&json!([{"from":{"field":"env","name":"KEY"},"to":{"field":"headers","name":"X-Credential"}}]), &old, &mut next).unwrap();
-        assert_eq!(next.headers["X-Credential"], old.env["KEY"]);
+        apply(&json!([{"from":{"field":"env","name":"KEY"},"to":{"field":"env","name":"CREDENTIAL"}}]), &old, &mut next, None).unwrap();
+        assert_eq!(next.env["CREDENTIAL"], old.env["KEY"]);
         assert!(
             apply(
                 &json!([{"from":{"field":"env","name":"KEY"},"to":{"field":"url","name":"value"}}]),
                 &old,
-                &mut next
+                &mut next,
+                None
             )
             .is_err()
         );
-        assert!(apply(&json!([{"from":{"field":"env","name":"MISSING"},"to":{"field":"headers","name":"Other"}}]), &old, &mut next).is_err());
+        assert!(apply(&json!([{"from":{"field":"env","name":"MISSING"},"to":{"field":"env","name":"Other"}}]), &old, &mut next, None).is_err());
     }
 }

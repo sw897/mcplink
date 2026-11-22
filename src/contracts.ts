@@ -163,11 +163,13 @@ export type ToolInventory = {
   };
 };
 export type Definition = {
+  editVersion?: string;
   command?: string;
   args: string[];
   env: Record<string, string>;
   cwd?: string;
   url?: string;
+  privateNetworkOrigin?: string;
   httpApi?: Json;
   headers: Record<string, string>;
   enabled: boolean;

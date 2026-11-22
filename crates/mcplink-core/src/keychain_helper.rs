@@ -7,8 +7,10 @@ use serde_json::{Value, json};
 use std::{
     fs,
     io::{Read, Write},
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
+    time::{Duration, Instant},
 };
 mod lifecycle;
 pub use lifecycle::{
@@ -69,7 +71,7 @@ fn read_private_file(path: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
     use std::os::unix::fs::OpenOptionsExt;
     let file = fs::OpenOptions::new()
         .read(true)
-        .custom_flags(0x100)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
         .context("无法读取助手文件；不会回退到其他凭据入口")?;
     ensure!(file.metadata()?.is_file(), "助手记录必须是普通文件");
@@ -145,13 +147,22 @@ impl Helper {
         Ok(helper)
     }
 
-    fn verify(&self) -> Result<()> {
+    fn verify(&self) -> Result<Vec<u8>> {
         vault::verify_running_code()?;
-        self.verify_pin()?;
-        verify_identity(&self.path)
+        let certificate = self.verify_pin()?;
+        ensure!(
+            certificate == crate::keychain_signature::current_certificate()?,
+            "钥匙串助手必须与当前 mcplink 使用同一签名证书"
+        );
+        Ok(certificate)
     }
 
-    fn verify_pin(&self) -> Result<()> {
+    fn verify_pin(&self) -> Result<Vec<u8>> {
+        let snapshot = self.pinned_snapshot()?;
+        crate::keychain_signature::certificate(&snapshot, ID)
+    }
+
+    fn pinned_snapshot(&self) -> Result<tempfile::TempPath> {
         if self.binding.version == 2 {
             for parent in [
                 directory(&self.data).join("versions"),
@@ -172,12 +183,39 @@ impl Helper {
             self.binding.sha256 == digest(&raw),
             "固定钥匙串助手已改变；请核对单独的助手升级，不自动替换或回退"
         );
-        crate::keychain_signature::certificate(&self.path, ID)?;
-        Ok(())
+        // Security.framework verifies a pathname. Resolve signature identity
+        // from the pinned bytes, independently of the live launch pathname.
+        let mut snapshot = tempfile::NamedTempFile::with_prefix("mcplink-keychain-")?;
+        snapshot.write_all(&raw)?;
+        snapshot
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(0o500))?;
+        Ok(snapshot.into_temp_path())
     }
 
     pub fn request(&self, operation: &str, key: &str, value: Option<&str>) -> Result<Value> {
-        self.verify()?;
+        let call = || self.request_blocking(operation, key, value);
+        if tokio::runtime::Handle::try_current().is_ok_and(|runtime| {
+            runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+        }) {
+            tokio::task::block_in_place(call)
+        } else {
+            call()
+        }
+    }
+
+    fn request_blocking(&self, operation: &str, key: &str, value: Option<&str>) -> Result<Value> {
+        if operation == "authorize" {
+            ensure!(!vault::interaction_disabled(), "无弹窗模式不能请求系统授权");
+        }
+        vault::verify_running_code()?;
+        let snapshot = self.pinned_snapshot()?;
+        let cdhash = crate::keychain_signature::helper_cdhash(
+            &snapshot,
+            ID,
+            &crate::keychain_signature::current_certificate()?,
+        )?;
+        drop(snapshot);
         let mut request =
             json!({"version":1,"operation":operation,"dataDirectory":self.data,"key":key});
         if let Some(value) = value {
@@ -187,7 +225,6 @@ impl Helper {
         ensure!(input.len() <= LIMIT, "钥匙串请求过大");
         let mut command = Command::new(&self.path);
         if operation == "authorize" {
-            ensure!(!vault::interaction_disabled(), "无弹窗模式不能请求系统授权");
             command.arg("--authorize");
         }
         let mut child = command
@@ -197,22 +234,14 @@ impl Helper {
             .stderr(Stdio::null())
             .spawn()
             .context("无法启动固定钥匙串助手")?;
-        if child
-            .stdin
-            .take()
-            .context("助手输入不可用")?
-            .write_all(&input)
-            .is_err()
-        {
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!("固定钥匙串助手拒绝请求");
+        if let Err(error) = crate::keychain_signature::verify_helper_process(child.id(), &cdhash) {
+            stop_child(&mut child);
+            return Err(error);
         }
-        let output = child.wait_with_output().context("固定钥匙串助手通信失败")?;
-        ensure!(output.stdout.len() <= LIMIT, "钥匙串助手响应过大");
-        let response: Value =
-            serde_json::from_slice(&output.stdout).context("钥匙串助手响应无效")?;
-        if !output.status.success() || response["ok"] != true {
+        let timeout = Duration::from_secs(if operation == "authorize" { 120 } else { 20 });
+        let (status, output) = helper_exchange(&mut child, input, timeout)?;
+        let response: Value = serde_json::from_slice(&output).context("钥匙串助手响应无效")?;
+        if !status.success() || response["ok"] != true {
             let status = response["status"].as_i64();
             bail!(
                 "固定钥匙串助手访问未获允许或身份校验失败（系统状态 {status:?}）；普通操作不会弹窗，请预览并明确授权对应项目"
@@ -235,8 +264,60 @@ impl Helper {
     }
 }
 
+fn stop_child(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn helper_exchange(
+    child: &mut Child,
+    input: Vec<u8>,
+    timeout: Duration,
+) -> Result<(ExitStatus, Vec<u8>)> {
+    let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+        stop_child(child);
+        bail!("钥匙串助手通信不可用");
+    };
+    let deadline = Instant::now() + timeout;
+    std::thread::scope(|scope| {
+        let writer = scope.spawn(move || stdin.write_all(&input));
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        scope.spawn(move || {
+            let mut bytes = Vec::new();
+            let result = stdout
+                .take((LIMIT + 1) as u64)
+                .read_to_end(&mut bytes)
+                .map(|_| bytes);
+            let _ = send.send(result);
+        });
+        let result = (|| {
+            let output = receive
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .context("固定钥匙串助手响应超时")??;
+            ensure!(output.len() <= LIMIT, "钥匙串助手响应过大");
+            let status = loop {
+                if let Some(status) = child.try_wait()? {
+                    break status;
+                }
+                ensure!(Instant::now() < deadline, "固定钥匙串助手退出超时");
+                std::thread::sleep(Duration::from_millis(5));
+            };
+            writer
+                .join()
+                .map_err(|_| anyhow::anyhow!("助手写入任务中断"))?
+                .context("固定钥匙串助手拒绝请求")?;
+            Ok((status, output))
+        })();
+        if result.is_err() {
+            stop_child(child);
+        }
+        result
+    })
+}
+
 fn credential_items(data: &Path, operations: &[String]) -> Result<Vec<Value>> {
-    let mut items = vec![json!({"key":"runtime-key","label":"本机后台通信","kind":"runtime"})];
+    let mut items =
+        vec![json!({"key":crate::runtime_auth::VAULT_KEY,"label":"本机后台通信","kind":"runtime"})];
     let store = Store::open(data)?;
     for connection in store.connections()? {
         items.push(
@@ -268,13 +349,4 @@ fn credential_items(data: &Path, operations: &[String]) -> Result<Vec<Value>> {
     items.sort_by_key(|v| v["key"].as_str().unwrap_or_default().to_owned());
     items.dedup_by(|a, b| a["key"] == b["key"]);
     Ok(items)
-}
-
-fn verify_identity(path: &Path) -> Result<()> {
-    ensure!(
-        crate::keychain_signature::certificate(path, ID)?
-            == crate::keychain_signature::current_certificate()?,
-        "钥匙串助手必须与当前 mcplink 使用同一签名证书"
-    );
-    Ok(())
 }

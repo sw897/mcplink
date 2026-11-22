@@ -13,8 +13,8 @@ pub(crate) fn discovery_diagnostic(engine: &Engine, id: &str, error: &anyhow::Er
     } else if connection.is_err()
         && engine
             .store
-            .connections()
-            .is_ok_and(|rows| rows.iter().all(|c| c.id != id))
+            .connection_exists(id)
+            .is_ok_and(|exists| !exists)
     {
         (
             "connection_missing",
@@ -78,6 +78,13 @@ pub(crate) enum CatalogKind {
 }
 
 impl CatalogKind {
+    pub fn generation_index(self) -> usize {
+        match self {
+            Self::Tools => 0,
+            Self::Resources | Self::ResourceTemplates => 1,
+            Self::Prompts => 2,
+        }
+    }
     pub fn from_method(method: &str) -> Option<Self> {
         Some(match method {
             "tools/list" => Self::Tools,

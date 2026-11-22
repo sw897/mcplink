@@ -177,6 +177,7 @@ enum HttpApiCommand {
         /// JSON 对象：source 为 JSON/YAML 文档正文，另可传 serverUrl、operations、all、toolNames
         #[arg(long, conflicts_with_all = ["server", "operation", "all"])]
         stdin: bool,
+        /// 明确选择本机、内网或其他服务 URL
         #[arg(long)]
         server: Option<String>,
         /// 重复选择实际操作键，例如 --operation "GET /notes/{id}"
@@ -424,9 +425,9 @@ fn schema() -> Value {
             "response":{"type":["json","text","image","base64Image"],"pointer":"optional JSON Pointer for json/base64Image","mimeType":"optional expected image/png,image/jpeg,image/webp","maxBytes":8388608,"success":{"pointer":"JSON Pointer in original response","equals":"literal scalar; missing/mismatched values are tool failures"},"sensitivePaths":"optional original-response JSON Pointers, filtered before output","credentialFiltering":"managed/custom request-header values, including encoded and token-only echoes; public metadata headers can be added via httpApi.sensitiveHeaders"},
             "probe":{"tool":"explicit operation name","arguments":"validated JSON object","semantics":"Only connections probe executes this sample. tools/list is local; successful discovery alone does not verify the upstream."}},
         "stdin":{"limitBytes":INPUT_LIMIT,"encoding":"UTF-8 JSON object; close stdin after one request",
-            "http-api import":{"required":["source"],"optional":["serverUrl","operations","all","toolNames"],"semantics":"Offline JSON/YAML document preview; operations are METHOD /path keys. Defaults to no selection. Explicit all selects supported operations only. No requests, credentials or configuration writes."},
+            "http-api import":{"required":["source"],"optional":["serverUrl","operations","all","toolNames"],"semantics":"Offline bounded JSON/YAML preview. Local and intranet candidates need an explicit serverUrl. Operations are METHOD /path keys. Explicit all selects supported operations only. No requests, credentials or configuration writes."},
             "connections save":{"required":["name","definition"],"optional":["id","title","accountLabel","credentialMappings"],
-                "definition":{"command":"string (stdio)","args":"string[]","env":"object<string,string>","cwd":"string","url":"string (HTTP MCP or API base URL)","httpApi":"object or null; see top-level httpApi contract","headers":"object<string,string>","enabled":"boolean (default true)","oauth":"boolean","clientId":"string or null","clientSecret":"string or null; masked on output","oauthScopes":"string[] (empty uses server suggestions)","oauthCallbackPort":"integer 1–65535 or null (automatic)","includeTools":"string[]","excludeTools":"string[]","includeSpecified":"boolean (true to restrict even when includeTools is empty)","timeout":"integer seconds","startupTimeout":"integer seconds","resourcesDisabled":"boolean","promptsDisabled":"boolean"},
+                "definition":{"command":"string (stdio)","args":"string[]","env":"object<string,string>","cwd":"string","url":"string (HTTP MCP or API base URL)","privateNetworkOrigin":"optional exact HTTPS origin authorized to use private DNS addresses or IP literals","httpApi":"object or null; see top-level httpApi contract","headers":"object<string,string>","enabled":"boolean (default true)","oauth":"boolean","clientId":"string or null","clientSecret":"string or null; masked on output","oauthScopes":"string[] (empty uses server suggestions)","oauthCallbackPort":"integer 1–65535 or null (automatic)","includeTools":"string[]","excludeTools":"string[]","includeSpecified":"boolean (true to restrict even when includeTools is empty)","timeout":"integer seconds","startupTimeout":"integer seconds","resourcesDisabled":"boolean","promptsDisabled":"boolean"},
                 "credentialMappings":{"from":{"field":"env or headers","name":"existing protected name"},"to":{"field":"env or headers","name":"new protected name"},"semantics":"array; existing id + definition.editVersion required; values stay in backend memory and protected storage"},"semantics":"Edit the normalized definition from connections show. Masked credentials stay with their origin. Changing origin suspends access. Metadata edits preserve connection state."},
             "credentials update":{"required":["value"],"optional":["header (default Authorization)"],"semantics":"Value stored verbatim, no Bearer prefix added"},
             "gateway save":{"required":["connectionIds"],"optional":["id","editVersion","title","toolSelections"],"semantics":"Create an aggregate entry or replace its service selection. Updates require editVersion. toolSelections maps selected connection IDs to original tool names: null inherits the service policy, [] exposes no tools; omission retains the saved range. Entry ranges can only narrow service-wide policy. Empty service selection exposes nothing; authentication stays with member connections."},
@@ -611,7 +612,14 @@ async fn execute(command: Command, data: PathBuf) -> Result<Value, Failure> {
                         "导入需要不超过 4 MiB 的本地文件"
                     )));
                 }
-                let source = fs::read_to_string(file)
+                let file = fs::File::open(file)
+                    .map_err(|_| Failure::input(anyhow::anyhow!("无法读取导入文件")))?;
+                let mut source = String::new();
+                let mut bounded = std::io::Read::take(
+                    file,
+                    mcplink_core::http_api::import::MAX_DOCUMENT_BYTES as u64 + 1,
+                );
+                std::io::Read::read_to_string(&mut bounded, &mut source)
                     .map_err(|_| Failure::input(anyhow::anyhow!("导入文件需要 UTF-8 JSON/YAML")))?;
                 mcplink_core::http_api::import::ImportRequest {
                     source,
@@ -903,16 +911,12 @@ async fn execute(command: Command, data: PathBuf) -> Result<Value, Failure> {
     Ok(projection.map(|key| value[key].clone()).unwrap_or(value))
 }
 
-async fn call(data: &std::path::Path, method: &str, mut params: Value) -> Result<Value> {
+async fn call(data: &std::path::Path, method: &str, params: Value) -> Result<Value> {
     if !params.is_object() {
         bail!("请求参数必须是 JSON 对象");
     }
     if method == "gateway.stop" {
         return Client::stop_existing(data).await;
-    }
-    if matches!(method, "changes.preview" | "connections.export_config") {
-        params["_bridgeExecutable"] =
-            json!(std::env::current_exe().context("无法定位共享入口程序")?);
     }
     Client::connect(data.to_owned())
         .await?
@@ -980,8 +984,30 @@ fn print_result(result: Result<Option<Value>, Failure>) -> i32 {
     }
 }
 
+fn bridge_invocation(arguments: &[OsString]) -> bool {
+    let mut words = arguments.iter().skip(1);
+    while let Some(word) = words.next() {
+        if word == "--data-dir" {
+            words.next();
+        } else if !word.to_string_lossy().starts_with('-') {
+            return word == "bridge";
+        }
+    }
+    false
+}
+
+fn early_error(bridge: bool, code: &str, message: &str) {
+    if bridge {
+        eprintln!("{message}");
+    } else {
+        println!("{}", json!({"error":{"code":code,"message":message}}));
+    }
+}
+
 pub async fn run() -> i32 {
-    let args = match Args::try_parse() {
+    let arguments: Vec<_> = std::env::args_os().collect();
+    let bridge = bridge_invocation(&arguments);
+    let args = match Args::try_parse_from(arguments) {
         Ok(args) => args,
         Err(error)
             if matches!(
@@ -989,17 +1015,23 @@ pub async fn run() -> i32 {
                 clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
             ) =>
         {
-            print!("{error}");
+            if bridge {
+                eprint!("{error}");
+            } else {
+                print!("{error}");
+            }
             return 0;
         }
         Err(_) => {
-            println!(
-                "{}",
-                json!({"error":{"code":"invalid_arguments","message":"命令参数无效，请运行 mcplink --help 或 mcplink schema"}})
+            early_error(
+                bridge,
+                "invalid_arguments",
+                "命令参数无效，请运行 mcplink --help 或 mcplink schema",
             );
             return 2;
         }
     };
+    let bridge = matches!(args.command, Command::Bridge { .. });
     if (args.no_auth_ui
         || matches!(
             args.command,
@@ -1007,20 +1039,14 @@ pub async fn run() -> i32 {
         ))
         && let Err(error) = mcplink_core::vault::disable_interaction()
     {
-        println!(
-            "{}",
-            json!({"error":{"code":"operation_failed","message":error.to_string()}})
-        );
+        early_error(bridge, "operation_failed", &error.to_string());
         return 1;
     }
     // Offline discovery and Skill installation must work without Keychain or a daemon.
     let data = match args.data_dir.map(Ok).unwrap_or_else(runtime::data_dir) {
         Ok(path) => path,
         Err(error) => {
-            println!(
-                "{}",
-                json!({"error":{"code":"operation_failed","message":error.to_string()}})
-            );
+            early_error(bridge, "operation_failed", &error.to_string());
             return 1;
         }
     };

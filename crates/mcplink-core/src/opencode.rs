@@ -10,11 +10,10 @@ use std::{
 };
 
 pub(crate) fn directory() -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os("OPENCODE_CONFIG_DIR") {
-        return Ok(PathBuf::from(path));
+    if let Some(path) = config::absolute_env("OPENCODE_CONFIG_DIR") {
+        return Ok(path);
     }
-    Ok(std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
+    Ok(config::absolute_env("XDG_CONFIG_HOME")
         .unwrap_or(config::user_home()?.join(".config"))
         .join("opencode"))
 }
@@ -29,21 +28,18 @@ fn source_id(path: &Path) -> String {
 pub(crate) fn is_managed(path: &Path) -> bool {
     #[cfg(target_os = "macos")]
     {
-        path.starts_with("/Library/Application Support/opencode")
-            || path.starts_with("/Library/Managed Preferences")
+        config::in_directory(path, Path::new("/Library/Application Support/opencode"))
+            || config::in_directory(path, Path::new("/Library/Managed Preferences"))
     }
     #[cfg(target_os = "windows")]
     {
-        path.starts_with(
-            PathBuf::from(
-                std::env::var_os("ProgramData").unwrap_or_else(|| r"C:\ProgramData".into()),
-            )
-            .join("opencode"),
-        )
+        let root =
+            config::absolute_env("ProgramData").unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+        config::in_directory(path, &root.join("opencode"))
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        path.starts_with("/etc/opencode")
+        config::in_directory(path, Path::new("/etc/opencode"))
     }
 }
 
@@ -71,22 +67,23 @@ fn validate_config(raw: &Value) -> Result<()> {
         }
     }
     if let Some(timeouts) = mcp.get("timeout") {
-        let timeouts = timeouts
-            .as_object()
-            .context("OpenCode mcp.timeout 需要映射")?;
-        if timeouts
-            .keys()
-            .any(|key| !matches!(key.as_str(), "startup" | "catalog" | "execution"))
-            || timeouts.values().any(|value| {
-                value
-                    .as_u64()
-                    .is_none_or(|millis| millis == 0 || millis > 9_007_199_254_740_991)
-            })
-        {
-            bail!("OpenCode mcp.timeout 需要当前格式的正整数毫秒设置");
-        }
+        timeout_fields(timeouts)?;
     }
     Ok(())
+}
+
+fn timeout_fields(value: &Value) -> Result<&serde_json::Map<String, Value>> {
+    let fields = value.as_object().context("OpenCode timeout 需要映射")?;
+    anyhow::ensure!(
+        fields.iter().all(|(key, value)| matches!(
+            key.as_str(),
+            "startup" | "catalog" | "execution"
+        ) && value
+            .as_u64()
+            .is_some_and(|millis| (1..=9_007_199_254_740_991).contains(&millis))),
+        "OpenCode timeout 需要当前格式的正整数毫秒设置"
+    );
+    Ok(fields)
 }
 
 pub fn default_sources() -> Result<Vec<Source>> {
@@ -96,9 +93,17 @@ pub fn default_sources() -> Result<Vec<Source>> {
         if !path.is_file() {
             continue;
         }
+        let legacy = source_id(&path);
+        let path = config::source_path(&path).unwrap_or(path);
+        let id = source_id(&path);
+        let legacy_ids = if id == legacy {
+            Vec::new()
+        } else {
+            vec![legacy]
+        };
         let managed = is_managed(&path);
         sources.push(Source {
-            id: source_id(&path),
+            id,
             agent: Agent::Opencode,
             label: format!("{}配置 · {name}", if managed { "托管" } else { "用户" }),
             path,
@@ -107,6 +112,7 @@ pub fn default_sources() -> Result<Vec<Source>> {
             plugin_root: None,
             discovery_error: None,
             scope: Some(if managed { "managed" } else { "user" }.into()),
+            legacy_ids,
         });
     }
     if sources.is_empty() {
@@ -161,24 +167,32 @@ pub fn source_from_params(params: &Value, sources: &[Source]) -> Result<Source> 
     {
         bail!("请选择完整的 opencode.json 或 opencode.jsonc 路径");
     }
-    let path = config::canonical_path(&path).unwrap_or(path);
+    let legacy = source_id(&path);
+    let path = config::source_path(&path)?;
     if let Some(project) = &project
         && path.parent() != Some(project.as_path())
         && path.parent() != Some(project.join(".opencode").as_path())
     {
         bail!("OpenCode 项目配置须位于所选项目目录或其 .opencode 目录");
     }
-    let existing = sources
-        .iter()
-        .find(|s| config::canonical_path(&s.path).unwrap_or(s.path.clone()) == path);
+    let existing = sources.iter().find(|s| s.path == path);
     if let Some(existing) = existing
         && (existing.agent != Agent::Opencode || existing.read_only)
     {
         return Ok(existing.clone());
     }
     let managed = is_managed(&path);
+    let id = existing
+        .filter(|source| source.project == project)
+        .map(|source| source.id.clone())
+        .unwrap_or_else(|| source_id(&path));
+    let legacy_ids = if id == legacy {
+        Vec::new()
+    } else {
+        vec![legacy]
+    };
     let source = Source {
-        id: source_id(&path),
+        id,
         agent: Agent::Opencode,
         label: params
             .get("label")
@@ -191,6 +205,7 @@ pub fn source_from_params(params: &Value, sources: &[Source]) -> Result<Source> 
         plugin_root: None,
         discovery_error: None,
         scope: Some(if managed { "managed" } else { scope }.into()),
+        legacy_ids,
     };
     let text = match std::fs::read_to_string(&source.path) {
         Ok(text) => text,
@@ -340,9 +355,6 @@ pub fn normalize(raw: &Value, project: Option<&Path>) -> Result<Definition> {
         .map(|value| value.as_bool().context("OpenCode 启停字段需要布尔值"))
         .transpose()?;
     let enabled = !disabled.unwrap_or(false);
-    if map.contains_key("timeout") {
-        bail!("OpenCode 原生毫秒超时尚不能完整托管，请保留原生配置或显式建立托管连接");
-    }
     if map.get("protocol").is_some_and(|v| v != "legacy")
         || map.get("pool").is_some_and(|v| v != false)
     {
@@ -355,6 +367,29 @@ pub fn normalize(raw: &Value, project: Option<&Path>) -> Result<Definition> {
         origin_project: project.map(Path::to_path_buf),
         ..Definition::default()
     };
+    if let Some(value) = map.get("timeout") {
+        let fields = timeout_fields(value)?;
+        let seconds = |key: &str| {
+            fields
+                .get(key)
+                .map(|value| {
+                    let millis = value.as_u64().context("OpenCode 超时须为正整数毫秒")?;
+                    anyhow::ensure!(
+                        millis % 1000 == 0,
+                        "OpenCode 托管超时需要整秒，请保留原生配置"
+                    );
+                    Ok::<_, anyhow::Error>(millis / 1000)
+                })
+                .transpose()
+        };
+        definition.startup_timeout = seconds("startup")?;
+        let catalog = seconds("catalog")?;
+        anyhow::ensure!(
+            catalog == seconds("execution")?,
+            "OpenCode 托管清单与执行超时须同时配置且相等，请保留原生配置"
+        );
+        definition.timeout = catalog;
+    }
     match map.get("type").and_then(Value::as_str) {
         Some("local") => {
             let command = map
@@ -411,20 +446,6 @@ pub fn normalize(raw: &Value, project: Option<&Path>) -> Result<Definition> {
 }
 
 pub fn native(def: &Definition) -> Result<Value> {
-    if def.client_secret.is_some()
-        || !def.oauth_scopes.is_empty()
-        || def.oauth_callback_port.is_some()
-    {
-        bail!("托管 OAuth 客户端参数不能等价导出到 OpenCode，请使用共享接入");
-    }
-    if def.include_specified
-        || !def.include_tools.is_empty()
-        || !def.exclude_tools.is_empty()
-        || def.resources_disabled
-        || def.prompts_disabled
-    {
-        bail!("OpenCode 直连不能等价保留当前工具筛选，请使用共享接入");
-    }
     const FIELDS: &[&str] = &[
         "type",
         "command",
@@ -539,6 +560,7 @@ pub fn native(def: &Definition) -> Result<Value> {
         timeouts["execution"] = json!(millis);
     }
     if !timeouts.as_object().unwrap().is_empty() {
+        timeout_fields(&timeouts)?;
         map.insert("timeout".into(), timeouts);
     }
     Ok(value)

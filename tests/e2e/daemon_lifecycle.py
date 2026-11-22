@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import platform
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -64,7 +65,7 @@ class Lifecycle(AgentCli):
         bridge = self.bridge(connection, "lifecycle-native-entry")
         result = bridge.call("tools/call", {"name": "process_info", "arguments": {}})
         observation = json.loads(result["result"]["content"][0]["text"])
-        if sys.platform == "darwin":
+        if os.name == "posix":
             assert observation["group"] == observation["pid"]
         self.stop(observation)
         assert not self.cli("gateway", "stop")["wasRunning"]
@@ -75,6 +76,30 @@ class Lifecycle(AgentCli):
         assert restored["pid"] != observation["pid"]
         assert not self.cli("gateway", "status")["paused"]
         self.passed("a subsequent Agent request restarts the stopped daemon and reuses its unchanged connection entry")
+
+        runtime_path = self.data / "runtime.json"
+        previous = json.loads(runtime_path.read_text())
+        self.stop(restored)
+        with socket.socket() as occupied:
+            occupied.bind(("127.0.0.1", 0))
+            occupied.listen()
+            port = occupied.getsockname()[1]
+            stale = json.dumps(previous | {"port": port})
+            runtime_path.write_text(stale)
+            forced = subprocess.run([str(BINARY), "daemon", "--data-dir", str(self.data), "--port", str(port)],
+                                    env=self.environment, capture_output=True, text=True, timeout=5)
+            assert forced.returncode != 0 and "端口被占用" in forced.stderr
+            assert runtime_path.read_text() == stale
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                bridge_result = executor.submit(bridge.call, "tools/call", {"name": "process_info", "arguments": {}})
+                cli_result = executor.submit(self.cli, "gateway", "status")
+                assert "result" in bridge_result.result(timeout=20)
+                assert cli_result.result(timeout=20)["paused"] is False
+            current = json.loads(runtime_path.read_text())
+            assert current["port"] != port and current["instance"] != previous["instance"]
+            assert self.cli("gateway", "status")["sessions"] == 1
+            assert json.loads(runtime_path.read_text()) == current
+        self.passed("explicit busy ports fail; stale automatic ports recover one daemon for concurrent Bridge and CLI requests")
 
         self.cli("connections", "probe", connection)
         self.changes(connection, ["codex:user"], mode="shared")
@@ -117,6 +142,17 @@ class Lifecycle(AgentCli):
 
         if sys.platform == "darwin":
             self.mac_cases()
+        if sys.platform.startswith("linux"):
+            connection, marker = self.save_tree("linux_signal_tree", "--stubborn")
+            bridge = self.bridge(connection, "linux-signal-lifecycle")
+            assert "result" in bridge.call("tools/call", {"name":"process_info", "arguments":{}})
+            observation = json.loads(marker.read_text())
+            assert observation["group"] == observation["pid"]
+            runtime = json.loads((self.data/"runtime.json").read_text())
+            os.kill(runtime["pid"], signal.SIGTERM)
+            wait_until(lambda: all(exited(pid) for pid in (runtime["pid"], observation["pid"], observation["descendant"])))
+            assert not (self.data/"runtime.json").exists()
+            self.passed("Linux SIGTERM closes the daemon and the complete upstream process group")
 
     def mac_cases(self):
         import plistlib
@@ -152,6 +188,13 @@ class Lifecycle(AgentCli):
         binary.unlink()
         assert not next(a for a in self.cli("status")["agents"] if a["id"] == "codex")["installed"]
         self.passed("macOS installation detection reads binary plists and requires the actual bundle executable")
+        binary.touch()
+        custom = self.home / "custom/Codex.app"
+        custom.parent.mkdir()
+        bundle.rename(custom)
+        self.rpc("agents.launcher", {"agent":"codex","path":str(custom)})
+        assert next(a for a in self.cli("status")["agents"] if a["id"] == "codex")["installed"]
+        self.passed("explicit macOS launcher accepts a registered desktop bundle at a custom location")
 
 
 def main():

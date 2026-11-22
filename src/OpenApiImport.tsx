@@ -1,4 +1,4 @@
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { FileInput, Loader2 } from "lucide-react";
 import { Definition, rpc } from "./contracts";
 
@@ -42,7 +42,9 @@ export function OpenApiImport({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const generation = useRef(0);
+  const applying = useRef(false);
   const listId = React.useId();
+  useEffect(() => () => { generation.current += 1; }, []);
 
   const inspect = async (text: string, address?: string) => {
     const current = ++generation.current;
@@ -95,6 +97,8 @@ export function OpenApiImport({
   };
 
   const apply = async () => {
+    if (applying.current || pending || disabled || selection.length === 0) return;
+    applying.current = true;
     const current = ++generation.current;
     setPending(true);
     setError("");
@@ -118,6 +122,7 @@ export function OpenApiImport({
     } catch (e) {
       if (current === generation.current) setError((e as Error).message);
     } finally {
+      applying.current = false;
       if (current === generation.current) setPending(false);
     }
   };
@@ -171,6 +176,9 @@ export function OpenApiImport({
                 ))}
               </datalist>
             </label>
+            {!preview.serverUrl && (
+              <p className="field-help">请选择服务地址。本机和内网地址需要明确选择。</p>
+            )}
             <button
               type="button"
               className="button"

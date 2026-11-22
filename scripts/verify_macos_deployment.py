@@ -136,7 +136,7 @@ def main():
         http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with http.open(f'http://127.0.0.1:{runtime["port"]}/health', timeout=3) as response:
             health = json.load(response)
-        assert health["application"] == "mcplink" and health["instance"] == runtime["instance"] and health["managementApi"] == 23
+        assert health["application"] == "mcplink" and health["instance"] == runtime["instance"] and health["managementApi"] == 24 and health["runtimeAuth"] == 1
         executable = subprocess.check_output(["ps", "-o", "comm=", "-p", str(runtime["pid"])], text=True).strip()
         assert executable in (str(args.cli), str(app_cli)) and sha(Path(executable)) == sha(args.cli)
         report.update(conclusion="PASS", keychain_ui_disabled=True, noninteractive_checks=checks,

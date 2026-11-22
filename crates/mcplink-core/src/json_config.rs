@@ -64,6 +64,7 @@ pub fn parse_json5(text: &str) -> Result<Value> {
 }
 
 fn parse_options(text: &str, options: &ParseOptions) -> Result<Value> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let root = document_options(text, options)?;
     if root.value().is_none() {
         return Ok(json!({}));
@@ -107,7 +108,11 @@ fn input(value: &Value) -> CstInputValue {
     }
 }
 
-fn update(object: &CstObject, desired: &serde_json::Map<String, Value>) -> Result<()> {
+fn update(
+    object: &CstObject,
+    desired: &serde_json::Map<String, Value>,
+    options: &ParseOptions,
+) -> Result<()> {
     for property in object.properties() {
         let name = property.name().context("JSON 属性名称无效")?;
         if !desired.contains_key(name.decoded_value()?.as_str()) {
@@ -117,10 +122,12 @@ fn update(object: &CstObject, desired: &serde_json::Map<String, Value>) -> Resul
     for (key, value) in desired {
         if let Some(property) = object.get(key) {
             if let (Some(object), Some(value)) = (property.object_value(), value.as_object()) {
-                update(&object, value)?;
+                update(&object, value, options)?;
             } else {
                 let current = property.value().map(|node| node.to_string());
-                let current = current.and_then(|text| parse_value(&text).ok());
+                let current = current.and_then(|text| {
+                    jsonc_parser::parse_to_serde_value::<Value>(&text, options).ok()
+                });
                 if current.as_ref() != Some(value) {
                     property.set_value(input(value));
                 }
@@ -130,13 +137,6 @@ fn update(object: &CstObject, desired: &serde_json::Map<String, Value>) -> Resul
         }
     }
     Ok(())
-}
-
-fn parse_value(text: &str) -> Result<Value> {
-    Ok(jsonc_parser::parse_to_serde_value::<Value>(
-        text,
-        &options(true),
-    )?)
 }
 
 pub fn render(
@@ -165,6 +165,8 @@ fn render_options(
     name: &str,
     value: Option<&Value>,
 ) -> Result<String> {
+    let bom = text.starts_with('\u{feff}');
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     parse_options(text, options)?;
     let root = document_options(text, options)?;
     let mut object = root
@@ -180,7 +182,7 @@ fn render_options(
             let target = object
                 .object_value_or_create(name)
                 .context("服务配置需要 JSON 映射")?;
-            update(&target, desired)?;
+            update(&target, desired, options)?;
         } else {
             bail!("服务配置需要 JSON 映射");
         }
@@ -188,6 +190,9 @@ fn render_options(
         property.remove();
     }
     let mut text = root.to_string();
+    if bom {
+        text.insert(0, '\u{feff}');
+    }
     if !text.ends_with('\n') {
         text.push('\n');
     }
@@ -253,9 +258,6 @@ pub(crate) fn claude_variables(def: &mut Definition, importing: bool) -> Result<
 }
 
 pub fn claude_native(def: &Definition, source: &Source) -> Result<Value> {
-    if !def.enabled {
-        bail!("Claude Code 不支持服务条目的 enabled 字段，请在原客户端 /mcp 中维护项目启停");
-    }
     if def.cwd.is_some()
         || def
             .origin_project
@@ -263,16 +265,6 @@ pub fn claude_native(def: &Definition, source: &Source) -> Result<Value> {
             .is_some_and(|project| source.project.as_ref() != Some(project))
     {
         bail!("Claude Code 直连无法等价保留工作目录，请使用共享接入或原项目作用域");
-    }
-    if def.include_specified
-        || !def.include_tools.is_empty()
-        || !def.exclude_tools.is_empty()
-        || def.resources_disabled
-        || def.prompts_disabled
-        || def.timeout.is_some()
-        || def.startup_timeout.is_some()
-    {
-        bail!("Claude Code 服务条目无法等价保留当前工具筛选或超时，请使用共享接入");
     }
     if def
         .original_agent
@@ -315,8 +307,15 @@ pub fn claude_native(def: &Definition, source: &Source) -> Result<Value> {
         if !def.headers.is_empty() {
             map.insert("headers".into(), json!(def.headers));
         }
-        if let Some(client) = &def.client_id {
-            map.insert("oauth".into(), json!({"clientId":client}));
+        if def.oauth || def.client_id.is_some() || def.oauth_callback_port.is_some() {
+            let mut oauth = serde_json::Map::new();
+            if let Some(client) = &def.client_id {
+                oauth.insert("clientId".into(), json!(client));
+            }
+            if let Some(port) = def.oauth_callback_port {
+                oauth.insert("callbackPort".into(), json!(port));
+            }
+            map.insert("oauth".into(), Value::Object(oauth));
         }
     }
     Ok(value)

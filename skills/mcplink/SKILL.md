@@ -78,7 +78,7 @@ mcplink changes restore OPERATION_ID
 
 HTTP API 的业务成功条件通过服务配置 `response.success` 声明；特定业务码的解释、分页与参数换算属于对应业务 Skill。不要在通用 mcplink 逻辑中加入服务专用判断。Adapter 过滤已知请求头凭据回显和配置的敏感 JSON Pointer，不代表所有业务资料都可公开。
 
-替换同一连接的接入方式时，若 schema 支持 credentialMappings，可使用原 ID 和最新 definition.editVersion，将 env/headers 中已有受保护字段迁移到另一个 env/headers 字段。实际值留在后端内存与受保护存储，不导出、不读凭据库文件；变更 HTTP 来源时不能带走旧凭据。新设备仍需独立授权。
+保存已有连接时，提交原 ID 和最新 `definition.editVersion`。同一 HTTP 来源的请求头改名可用 `credentialMappings`。从 STDIO 转为 HTTP API 并复用已存环境变量时，在桌面填写目标请求头并核对原生确认窗口里的服务来源和字段。保存后重新连接。更改 STDIO 的程序、参数或工作目录时，重新填写受保护的启动参数和需要使用的环境变量。凭据值留在本机受保护存储和后端内存。
 
 `credentials update CONNECTION_ID --stdin` 接受 `{"value":"上游要求的原样凭据","header":"Authorization"}`，默认 header 为 Authorization，不自动加 Bearer。凭据由可信本机来源经 stdin 传入；不要放在命令参数、Shell 历史、聊天回复、临时文件或报告里。`connections save` 中的 headers/env 同样走 stdin。管理输出保留掩码，不尝试读回秘密。
 

@@ -42,26 +42,7 @@ pub fn entry(def: &Definition, agent: &Agent) -> Result<Value> {
     if !agent.supports_import() {
         bail!("此客户端使用原生配置预览，请选择千问办公或豆包工作导入")
     }
-    config::validate(def)?;
-    check_portable(def)?;
-    if !def.enabled
-        || def.cwd.is_some()
-        || (def.command.is_some() && def.origin_project.is_some())
-        || def.oauth
-        || def.client_id.is_some()
-        || def.client_secret.is_some()
-        || !def.oauth_scopes.is_empty()
-        || def.oauth_callback_port.is_some()
-        || def.include_specified
-        || !def.include_tools.is_empty()
-        || !def.exclude_tools.is_empty()
-        || def.resources_disabled
-        || def.prompts_disabled
-        || def.timeout.is_some()
-        || def.startup_timeout.is_some()
-    {
-        bail!("客户端导入无法等价表达此连接的运行目录、认证或执行限制，请使用共享模式")
-    }
+    crate::adapter_policy::validate(def, agent, true)?;
     let mut entry = if let Some(command) = &def.command {
         json!({"type":"stdio","command":command,"args":def.args,"env":def.env})
     } else {

@@ -34,6 +34,7 @@ type UpdateView = {
   cliTargets: string[];
   canDownload: boolean;
   canInstall: boolean;
+  canArchiveStaleReceipt?: boolean;
   error?: string;
   startupIssue?: string;
   message?: string;
@@ -190,9 +191,9 @@ export function UpdateDialog({ onClose }: { onClose: () => void }) {
             <button
               className="button small"
               disabled={busy}
-              onClick={() => void run("retry_cli")}
+              onClick={() => void run(view.canArchiveStaleReceipt ? "archive_stale_receipt" : "retry_cli")}
             >
-              重试同步 CLI
+              {view.canArchiveStaleReceipt ? "归档旧版更新记录" : "重试同步 CLI"}
             </button>
           </div>
         )}

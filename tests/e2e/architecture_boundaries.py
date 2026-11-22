@@ -17,20 +17,6 @@ from run import BINARY
 
 
 class ArchitectureBoundaries(ToolCalls):
-    def control(self, gate, action):
-        request = urllib.request.Request(f"http://127.0.0.1:{self.port}/control",
-            data=json.dumps({"gate":gate,"action":action}).encode(),
-            headers={"Content-Type":"application/json"})
-        with urllib.request.urlopen(request, timeout=5) as response:
-            assert json.load(response)["ok"]
-
-    def wait_gate(self, name, previous, timeout=10):
-        deadline = time.monotonic()+timeout
-        while time.monotonic() < deadline:
-            if self.stats()["gates"].get(name,0) > previous: return
-            time.sleep(0.02)
-        raise AssertionError("fixture gate not reached: "+name)
-
     def catalog(self):
         healthy = self.save("healthy", url=self.url)
         for mode in ["cycle", "duplicate", "empty", "cursor"]:
@@ -117,19 +103,15 @@ class ArchitectureBoundaries(ToolCalls):
                     env=self.environment,capture_output=True,text=True,timeout=30)
                 self.wait_gate("refresh_token",previous)
                 update = workers.submit(self.cli,"credentials","oauth-config",connection,"--stdin",value={"scopes":["documents:write"]})
-                time.sleep(0.3)
-                waiting = not update.done()
-                self.control("refresh_token","release")
+                update.result(timeout=6)
                 response = probe.result(timeout=30)
-                assert response.returncode in [0,1] and not response.stderr
-                update.result(timeout=30)
-                assert waiting, "OAuth configuration committed while an old grant refresh was still in flight"
+                assert response.returncode == 1 and not response.stderr
         finally:
             self.control("refresh_token","release")
             self.cli("gateway","resume")
         assert self.cli("connections","show",connection)["connection"]["status"] == "needs_auth"
         self.invoke(connection,"read_document",{"id":"weekly-fixture"},exit_status=1)
-        self.passed("OAuth settings serialize with disposable-pool refresh and revoke the old scope grant before later calls")
+        self.passed("an OAuth edit cancels a disposable refresh and revokes the old grant while the fixture is still waiting")
 
     def callback(self):
         connection = self.save("callback_commit",url=self.url)

@@ -18,11 +18,12 @@ def main():
     args = parser.parse_args()
     args.record.mkdir(parents=True, exist_ok=False)
     current_version = json.loads((ROOT / "package.json").read_text())["version"]
-    report = {"available": False, "current_version": current_version, "scope": "successful pushes on main with matching source manifests and installer versions"}
+    report = {"available": False, "current_version": current_version, "scope": "successful main builds with matching source manifests and a fixture-capable installer"}
     process = subprocess.run(["gh", "run", "list", "--repo", args.repo, "--workflow", "ci.yml", "--branch", "main", "--event", "push", "--status", "success", "--limit", "10", "--json", "databaseId,headSha"], capture_output=True, text=True, timeout=45)
     if process.returncode:
         raise RuntimeError("Cannot list upgrade baselines; verify GitHub authentication and Actions read permission")
     fallback, chosen = None, None
+    excluded_production = 0
     for run in json.loads(process.stdout)[:3]:
         destination = args.record / str(run["databaseId"])
         # Older CI used acceptance-* and included reports. New CI exposes only
@@ -48,6 +49,9 @@ def main():
             continue
         version = manifest.get("version")
         if manifest.get("conclusion") != "PASS" or manifest.get("revision") != run["headSha"] or not isinstance(version, str):
+            continue
+        if manifest.get("fixture_vault_supported") is False:
+            excluded_production += 1
             continue
         packages = {}
         for path in destination.rglob("*.dmg" if args.platform == "macos" else "*setup.exe"):
@@ -77,7 +81,8 @@ def main():
         if not report["cross_version"]:
             report["limits"] = ["Only an earlier build of the same version is available; this is not cross-version migration acceptance"]
     else:
-        report["limits"] = ["No accessible matching baseline installer: only current install/reinstall can be checked"]
+        report["limits"] = ["No accessible fixture-capable baseline installer: only current install/reinstall can be checked"]
+    report["production_only_baselines_excluded"] = excluded_production
     (args.record / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     print("Cross-version upgrade baseline ready" if report.get("cross_version") else "Earlier-build baseline ready" if report["available"] else "No previous installer available; recorded upgrade limitation")
 

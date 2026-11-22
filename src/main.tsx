@@ -237,10 +237,12 @@ function App() {
       setDialog({ kind: "adopt", intent: "probe", connections: [connection] });
       return;
     }
+    const recheck = connection.active && connection.authKind === "oauth"
+      && connection.status === "needs_auth" && connection.revision !== undefined;
     const result = await action<ToolInventory>(
-      "查看工具",
-      "connections.tools",
-      { id: connection.id },
+      recheck ? "重新核验授权" : "查看工具",
+      recheck ? "connections.probe" : "connections.tools",
+      { id: connection.id, ...(recheck ? { expectedRevision: connection.revision } : {}) },
     );
     if (result) {
       setTools((previous) => ({
@@ -2198,6 +2200,7 @@ function App() {
       )}
       {dialog?.kind === "editor" && (
         <Editor
+          key={dialog.connection?.id}
           connection={dialog.connection}
           sharedAgents={
             dialog.connection
@@ -2213,7 +2216,7 @@ function App() {
           onClose={() => setDialog(undefined)}
           onDone={async () => {
             await load();
-            setDialog(undefined);
+            setDialog((previous) => previous === dialog ? undefined : previous);
           }}
         />
       )}
@@ -2241,11 +2244,12 @@ function App() {
       )}
       {dialog?.kind === "credential" && (
         <CredentialDialog
+          key={dialog.connection.id}
           connection={dialog.connection}
           onClose={() => setDialog(undefined)}
           onDone={async () => {
             await load();
-            setDialog(undefined);
+            setDialog((previous) => previous === dialog ? undefined : previous);
           }}
         />
       )}

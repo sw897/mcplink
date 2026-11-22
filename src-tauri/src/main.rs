@@ -10,6 +10,7 @@ mod background;
 mod updater;
 
 fn cli_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    #[cfg(debug_assertions)]
     if let Some(path) = std::env::var_os("MCPLINK_CLI") {
         return Ok(path.into());
     }
@@ -50,16 +51,35 @@ async fn rpc(
     params: serde_json::Value,
     retry_auth: Option<bool>,
 ) -> Result<serde_json::Value, String> {
+    mcplink_desktop::desktop_rpc::validate(&method, &params)?;
+    let transfer = method == "connections.save" && params.get("credentialMappings").is_some();
+    rpc_internal(app, method, params, retry_auth, transfer).await
+}
+
+async fn rpc_internal(
+    app: tauri::AppHandle,
+    method: String,
+    params: serde_json::Value,
+    retry_auth: Option<bool>,
+    transfer: bool,
+) -> Result<serde_json::Value, String> {
     #[cfg(any(windows, target_os = "macos"))]
-    let _activity = background::enter_rpc(&app, &method)?;
+    let _activity = background::enter_rpc(&app)?;
     let session = app.state::<Session>();
     if retry_auth == Some(true) {
         session.retry_authentication().await;
     }
-    let response = tokio::time::timeout(
-        std::time::Duration::from_secs(660),
-        session.call(&method, params),
-    )
+    let approved_origin = if transfer {
+        Some(confirm_transfer(&app, &session, &params).await?)
+    } else {
+        None
+    };
+    let response = tokio::time::timeout(std::time::Duration::from_secs(660), async {
+        match approved_origin {
+            Some(origin) => session.save_confirmed_transfer(params, origin).await,
+            None => session.call(&method, params).await,
+        }
+    })
     .await
     .map_err(|_| "本地管理程序响应超时，执行结果需核对；不要自动重试")?;
     let result = match response {
@@ -79,6 +99,37 @@ async fn rpc(
     #[cfg(any(windows, target_os = "macos"))]
     background::observe(&app, &method, &result);
     Ok(result)
+}
+
+async fn confirm_transfer(
+    app: &tauri::AppHandle,
+    session: &Session,
+    params: &serde_json::Value,
+) -> Result<String, String> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+
+    let preview = session
+        .call("connections.transfer_preview", params.clone())
+        .await
+        .map_err(|error| error.to_string())?;
+    let origin = preview["origin"].as_str().ok_or("凭据迁移缺少目标地址")?;
+    let fields: Vec<(String, String)> =
+        serde_json::from_value(preview["fields"].clone()).map_err(|_| "凭据迁移缺少字段清单")?;
+    let fields = fields
+        .into_iter()
+        .map(|(from, to)| format!("{from} → {to}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (answer, confirmed) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .message(format!("允许将以下已存环境变量用作 {origin} 的请求头？\n\n{fields}\n\n保存后请在账号页重新连接。"))
+        .title("确认迁移已存凭据")
+        .buttons(MessageDialogButtons::OkCancelCustom("迁移".into(), "取消".into()))
+        .show(move |accepted| { let _ = answer.send(accepted); });
+    if confirmed.await != Ok(true) {
+        return Err("已取消凭据迁移".into());
+    }
+    Ok(origin.to_owned())
 }
 
 #[tauri::command]
@@ -140,9 +191,13 @@ async fn desktop_update(
         } else if action != "status" {
             return Err("当前平台暂未提供应用内升级，请到 GitHub 下载".into());
         }
-        Ok(
-            serde_json::json!({"supported":false,"phase":"unsupported","currentVersion":app.package_info().version.to_string()}),
-        )
+        Ok(serde_json::json!({
+            "supported": false, "phase": "unsupported", "revision": 0, "target": "unsupported",
+            "currentVersion":app.package_info().version.to_string(), "preview": false,
+            "candidateId": 0, "downloaded": 0, "total": 0, "cliTargets": [],
+            "canDownload": false, "canInstall": false,
+            "canArchiveStaleReceipt": false,
+        }))
     }
 }
 
@@ -150,13 +205,7 @@ fn main() {
     // Startup, polling and MCP recovery never open system password dialogs.
     // First-time helper grants use the explicit reviewed CLI authorization flow.
     mcplink_core::vault::disable_interaction().expect("cannot disable Keychain consent UI");
-    let builder = tauri::Builder::default().setup(|app| {
-        app.manage(Session::new(
-            mcplink_core::runtime::data_dir()?,
-            cli_path(app.handle())?,
-        ));
-        Ok(())
-    });
+    let builder = tauri::Builder::default();
     #[cfg(any(windows, target_os = "macos"))]
     let builder = builder
         .plugin(
@@ -177,14 +226,6 @@ fn main() {
             let plugin = plugin.macos_launcher(tauri_plugin_autostart::MacosLauncher::LaunchAgent);
             plugin.build()
         })
-        .setup(|app| {
-            app.manage(Session::new(
-                mcplink_core::runtime::data_dir()?,
-                cli_path(app.handle())?,
-            ));
-            updater::setup(app)?;
-            background::setup(app)
-        })
         .on_menu_event(background::menu_event)
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -200,6 +241,18 @@ fn main() {
             }
         });
     let app = builder
+        .setup(|app| {
+            app.manage(Session::new(
+                mcplink_core::runtime::data_dir()?,
+                cli_path(app.handle())?,
+            ));
+            #[cfg(any(windows, target_os = "macos"))]
+            {
+                updater::setup(app)?;
+                background::setup(app)?;
+            }
+            Ok(())
+        })
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             rpc,

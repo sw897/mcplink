@@ -6,10 +6,8 @@ use rmcp::{
     service::{ClientInitializeError, NotificationContext, Peer, RunningService},
     transport::{
         StreamableHttpClientTransport, TokioChildProcess,
-        auth::{
-            AuthClient, AuthorizationManager, AuthorizationRequest, OAuthClientConfig, OAuthState,
-        },
-        streamable_http_client::StreamableHttpClientTransportConfig,
+        auth::{AuthClient, AuthError, OAuthClientConfig},
+        streamable_http_client::{StreamableHttpClientTransportConfig, StreamableHttpError},
     },
 };
 use serde_json::{Value, json};
@@ -17,12 +15,13 @@ use std::{
     collections::HashMap,
     process::Stdio,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, Weak,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
 };
-use tokio::{net::TcpListener, sync::Mutex as AsyncMutex};
+use tokio::sync::Mutex as AsyncMutex;
+use tokio_util::sync::CancellationToken;
 
 type Session = RunningService<RoleClient, CatalogClient>;
 
@@ -80,33 +79,44 @@ fn client_config() -> ClientConfig {
     config
 }
 
-pub(crate) fn http_endpoint(raw: &str, project: Option<&std::path::Path>) -> Result<String> {
-    let endpoint = config::resolve(raw, project)?;
-    let url = url::Url::parse(&endpoint).context("MCP 地址无效")?;
-    let loopback = match url.host() {
-        Some(url::Host::Domain(host)) => host == "localhost",
-        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-        None => false,
-    };
-    if url.scheme() != "https" && !(url.scheme() == "http" && loopback) {
-        bail!("共享 HTTP 连接需要 HTTPS，或本机 loopback 地址");
-    }
-    if !url.username().is_empty() || url.password().is_some() {
-        bail!("请通过认证字段配置凭据");
-    }
-    Ok(endpoint)
+#[derive(Default)]
+struct SessionSlot {
+    generation: Mutex<CancellationToken>,
+    current: AsyncMutex<Option<SessionGeneration>>,
 }
-type SessionSlot = Arc<AsyncMutex<Option<(u64, Session)>>>;
+
+struct SessionGeneration {
+    revision: u64,
+    cancelled: CancellationToken,
+    service: Session,
+}
+
+async fn close_session(session: SessionGeneration) -> Result<()> {
+    session.cancelled.cancel();
+    tokio::time::timeout(Duration::from_secs(20), session.service.cancel())
+        .await
+        .context("上游服务退出清理超时")?
+        .context("上游服务退出失败")?;
+    Ok(())
+}
+
 #[derive(Default)]
 pub struct McpPool {
-    sessions: Mutex<HashMap<String, SessionSlot>>,
-    refresh: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
+    sessions: Mutex<HashMap<String, Arc<SessionSlot>>>,
+    refresh: Mutex<HashMap<String, Weak<AsyncMutex<()>>>>,
     catalogs: Mutex<HashMap<String, Arc<CatalogClock>>>,
     shutdown_guard: AsyncMutex<()>,
+    recheck_oauth: bool,
 }
 
 impl McpPool {
+    pub(crate) fn rechecking_oauth() -> Self {
+        Self {
+            recheck_oauth: true,
+            ..Self::default()
+        }
+    }
+
     fn clock(&self, id: &str) -> Arc<CatalogClock> {
         self.catalogs
             .lock()
@@ -130,12 +140,14 @@ impl McpPool {
     }
 
     pub fn refresh_lock(&self, id: &str) -> Arc<AsyncMutex<()>> {
-        self.refresh
-            .lock()
-            .unwrap()
-            .entry(id.into())
-            .or_default()
-            .clone()
+        let mut refresh = self.refresh.lock().unwrap();
+        if let Some(lock) = refresh.get(id).and_then(Weak::upgrade) {
+            return lock;
+        }
+        refresh.retain(|_, lock| lock.strong_count() != 0);
+        let lock = Arc::new(AsyncMutex::new(()));
+        refresh.insert(id.into(), Arc::downgrade(&lock));
+        lock
     }
 
     pub fn count(&self) -> usize {
@@ -144,27 +156,47 @@ impl McpPool {
             .unwrap()
             .values()
             .filter(|slot| {
-                slot.try_lock()
-                    .is_ok_and(|s| s.as_ref().is_some_and(|(_, session)| !session.is_closed()))
+                slot.current.try_lock().is_ok_and(|s| {
+                    s.as_ref()
+                        .is_some_and(|s| !s.cancelled.is_cancelled() && !s.service.is_closed())
+                })
             })
             .count()
     }
 
-    pub async fn invalidate(&self, id: &str) {
+    pub(crate) fn invalidate(&self, id: &str) {
         self.refresh_catalog(id);
-        let slot = self.sessions.lock().unwrap().remove(id);
-        if let Some(slot) = slot
-            && let Some((_, session)) = slot.lock().await.take()
-        {
-            session.cancellation_token().cancel();
+        if let Some(slot) = self.sessions.lock().unwrap().get(id) {
+            std::mem::take(&mut *slot.generation.lock().unwrap()).cancel();
         }
     }
 
-    pub async fn clear(&self) {
+    fn epoch(&self, id: &str) -> CancellationToken {
+        let mut sessions = self.sessions.lock().unwrap();
+        let slot = sessions.entry(id.to_owned()).or_default();
+        slot.generation.lock().unwrap().clone()
+    }
+
+    pub(crate) fn suspend_for_edit(&self, id: &str) {
+        // Keep the current generation cancelled until the credential transition
+        // finishes. Disposable probes use this same generation and release any
+        // SDK refresh guard when their network operation is cancelled.
+        self.epoch(id).cancel();
+    }
+
+    pub(crate) fn clear(&self) {
         let ids: Vec<_> = self.sessions.lock().unwrap().keys().cloned().collect();
         for id in ids {
-            self.invalidate(&id).await;
+            self.invalidate(&id);
         }
+    }
+
+    pub(crate) fn forget(&self, id: &str) {
+        if let Some(slot) = self.sessions.lock().unwrap().remove(id) {
+            slot.generation.lock().unwrap().cancel();
+        }
+        self.catalogs.lock().unwrap().remove(id);
+        self.refresh.lock().unwrap().remove(id);
     }
 
     pub async fn shutdown(&self) -> Result<()> {
@@ -178,12 +210,10 @@ impl McpPool {
             .collect();
         let mut tasks = tokio::task::JoinSet::new();
         for slot in slots {
+            slot.generation.lock().unwrap().cancel();
             tasks.spawn(async move {
-                if let Some((_, session)) = slot.lock().await.take() {
-                    tokio::time::timeout(Duration::from_secs(20), session.cancel())
-                        .await
-                        .context("上游服务退出清理超时")?
-                        .context("上游服务退出失败")?;
+                if let Some(session) = slot.current.lock().await.take() {
+                    close_session(session).await?;
                 }
                 Ok::<_, anyhow::Error>(())
             });
@@ -197,57 +227,90 @@ impl McpPool {
         failure.map_or(Ok(()), Err)
     }
 
-    pub async fn peer(&self, engine: Arc<Engine>, id: &str) -> Result<Peer<RoleClient>> {
+    pub(crate) async fn peer(
+        &self,
+        engine: Arc<Engine>,
+        id: &str,
+        expected_revision: u64,
+    ) -> Result<(Peer<RoleClient>, CancellationToken)> {
         let connection = engine.store.connection(id)?;
+        if connection.revision != expected_revision {
+            bail!("连接已更新，请重新发现工具");
+        }
         if connection.members.is_some() {
             bail!("聚合入口通过托管服务路由，不能作为上游建立会话");
         }
         if !connection.active {
             bail!("连接已断开，请在账号页重新连接");
         }
-        let slot = {
+        if connection.auth_kind == "oauth"
+            && connection.status == "needs_auth"
+            && !self.recheck_oauth
+        {
+            bail!(ConnectionFailure::Authentication);
+        }
+        let shared_pool = std::ptr::eq(self, &engine.pool);
+        let (slot, local_generation) = {
             let mut sessions = self.sessions.lock().unwrap();
-            if std::ptr::eq(self, &engine.pool)
-                && engine.paused.load(std::sync::atomic::Ordering::SeqCst)
-            {
+            if *engine.shutdown.borrow() {
+                bail!("共享后台正在退出");
+            }
+            if shared_pool && engine.paused.load(std::sync::atomic::Ordering::SeqCst) {
                 bail!("共享后台已暂停，请在 mcplink 恢复");
             }
-            sessions.entry(id.into()).or_default().clone()
+            let slot = sessions.entry(id.into()).or_default().clone();
+            let generation = slot.generation.lock().unwrap().clone();
+            (slot, generation)
+        };
+        let generation = if shared_pool {
+            local_generation
+        } else {
+            engine.pool.epoch(id)
         };
         let mut shutdown = engine.shutdown.subscribe();
         let mut slot = tokio::select! {
+            biased;
             _ = shutdown.wait_for(|stopping| *stopping) => bail!("共享后台正在退出"),
-            slot = slot.lock() => slot,
+            _ = generation.cancelled() => bail!("连接已更新，请重新连接"),
+            slot = slot.current.lock() => slot,
         };
-        if let Some((revision, session)) = slot.as_ref()
-            && *revision == connection.revision
-            && !session.is_closed()
+        if let Some(session) = slot.as_ref()
+            && session.revision == connection.revision
+            && !session.cancelled.is_cancelled()
+            && !session.service.is_closed()
         {
-            return Ok(session.peer().clone());
+            return Ok((session.service.peer().clone(), session.cancelled.clone()));
         }
+        if let Some(session) = slot.take() {
+            close_session(session).await?;
+        }
+        let lifetime = generation.child_token();
         let definition = engine.definition(&connection)?;
         if definition.http_api.is_some() {
             bail!("HTTP API 通过 Adapter 派发，不能建立 MCP 上游会话");
         }
-        if definition.oauth && connection.status == "needs_auth" {
-            bail!(ConnectionFailure::Authentication);
-        }
         let started = tokio::time::timeout(
             Duration::from_secs(definition.startup_timeout.unwrap_or(40).clamp(5, 300)),
             async {
-                if let Some(endpoint) = &definition.url {
-                    let endpoint = http_endpoint(endpoint, definition.origin_project.as_deref())?;
-                    let client = reqwest::Client::builder()
-                        .redirect(reqwest::redirect::Policy::none())
-                        .connect_timeout(Duration::from_secs(15))
-                        .build()
-                        .context("无法建立 HTTP 客户端")?;
+                if definition.url.is_some() {
+                    let (endpoint, target) = engine.outbound.target(&definition)?;
+                    let client = target.client(&endpoint)?.clone();
                     let mut transport =
-                        StreamableHttpClientTransportConfig::with_uri(endpoint.clone());
+                        StreamableHttpClientTransportConfig::with_uri(endpoint.as_str());
                     transport.reinit_on_expired_session = false;
                     for (key, value) in &definition.headers {
                         let key = reqwest::header::HeaderName::from_bytes(key.as_bytes())
                             .context("HTTP 头名称无效")?;
+                        anyhow::ensure!(
+                            !matches!(
+                                key.as_str(),
+                                "host"
+                                    | "content-length"
+                                    | "transfer-encoding"
+                                    | "proxy-authorization"
+                            ),
+                            "此 HTTP 请求头由运行时维护"
+                        );
                         let value = reqwest::header::HeaderValue::from_str(&config::resolve(
                             value,
                             definition.origin_project.as_deref(),
@@ -259,9 +322,10 @@ impl McpPool {
                         // A refresh can immediately revoke the access token on an
                         // outstanding POST. Queue ordinary POSTs on this OAuth session.
                         transport.max_concurrent_requests = 1;
-                        let mut manager = AuthorizationManager::new(endpoint)
+                        let mut manager = target
+                            .oauth(endpoint, lifetime.child_token())
                             .await
-                            .context("无法发现 OAuth 认证服务")?;
+                            .map_err(connection_error)?;
                         manager.set_credential_store(VaultCredentials::new(
                             engine.clone(),
                             &connection,
@@ -274,21 +338,20 @@ impl McpPool {
                         if !manager
                             .initialize_from_store()
                             .await
-                            .context("无法读取 OAuth 授权，请重新登录")?
+                            .map_err(connection_error)?
                         {
                             bail!(ConnectionFailure::Authentication);
                         }
                         drop(guard);
-                        let (stored_client, _) = manager
-                            .get_credentials()
-                            .await
-                            .context("无法读取 OAuth 客户端身份，请重新登录")?;
+                        let (stored_client, _) =
+                            manager.get_credentials().await.map_err(connection_error)?;
                         if definition
                             .client_id
                             .as_ref()
                             .is_some_and(|id| id != &stored_client)
                         {
-                            bail!("OAuth 应用身份已变化，请重新登录");
+                            return Err(anyhow::Error::new(ConnectionFailure::Authentication)
+                                .context("OAuth 应用身份已变化，请重新登录"));
                         }
                         if let Some(secret) = &definition.client_secret {
                             let redirect = format!(
@@ -301,7 +364,7 @@ impl McpPool {
                                         .with_client_secret(secret.clone())
                                         .with_scopes(definition.oauth_scopes.clone()),
                                 )
-                                .context("无法恢复 OAuth 客户端认证，请重新登录")?;
+                                .map_err(connection_error)?;
                         }
                         let transport = StreamableHttpClientTransport::with_client(
                             AuthClient::new(client, manager),
@@ -311,7 +374,7 @@ impl McpPool {
                             config: client_config(),
                             clock: self.clock(id),
                         }
-                        .serve(transport)
+                        .serve_with_ct(transport, lifetime.child_token())
                         .await
                         .map_err(connection_error)?)
                     } else {
@@ -321,7 +384,7 @@ impl McpPool {
                             config: client_config(),
                             clock: self.clock(id),
                         }
-                        .serve(transport)
+                        .serve_with_ct(transport, lifetime.child_token())
                         .await
                         .map_err(connection_error)?)
                     }
@@ -380,7 +443,7 @@ impl McpPool {
                             .wrap(crate::process_group::KillGroupOnDrop);
                         wrapped
                     };
-                    #[cfg(target_os = "macos")]
+                    #[cfg(unix)]
                     let command = {
                         use process_wrap::tokio::{CommandWrap, KillOnDrop, ProcessGroup};
                         let mut wrapped = CommandWrap::from(command);
@@ -396,24 +459,31 @@ impl McpPool {
                         config: client_config(),
                         clock: self.clock(id),
                     }
-                    .serve(transport)
+                    .serve_with_ct(transport, lifetime.child_token())
                     .await
                     .map_err(connection_error)?)
                 }
             },
         );
         let started = tokio::select! {
+            biased;
             _ = shutdown.wait_for(|stopping| *stopping) => bail!("共享后台正在退出"),
+            _ = generation.cancelled() => bail!("连接已更新，请重新连接"),
             result = started => result.map_err(|_| ConnectionFailure::Timeout)??,
         };
+        let started = SessionGeneration {
+            revision: connection.revision,
+            cancelled: lifetime.clone(),
+            service: started,
+        };
         let current = engine.store.connection(id)?;
-        if !current.active || current.revision != connection.revision {
-            started.cancellation_token().cancel();
+        if generation.is_cancelled() || !current.active || current.revision != connection.revision {
+            close_session(started).await?;
             bail!("连接已更新，请重新连接");
         }
-        let peer = started.peer().clone();
-        *slot = Some((connection.revision, started));
-        Ok(peer)
+        let peer = started.service.peer().clone();
+        *slot = Some(started);
+        Ok((peer, lifetime))
     }
 
     pub async fn request(&self, engine: Arc<Engine>, id: &str, request: Value) -> Result<Value> {
@@ -477,23 +547,25 @@ impl McpPool {
         if definition.http_api.is_some() {
             return crate::http_api::request(engine, &connection, &definition, &request).await;
         }
-        let peer = self.peer(engine.clone(), id).await?;
-        if let Some(expected) = revision {
-            let current = engine.store.connection(id)?;
-            if current.revision != expected || !current.active {
-                bail!(crate::invocation::ToolFailure {
-                    code: crate::invocation::ToolErrorCode::ConnectionChanged,
-                    details: Value::Null
-                });
-            }
+        let (peer, generation) = self.peer(engine.clone(), id, connection.revision).await?;
+        let current = engine.store.connection(id)?;
+        if current.revision != connection.revision || !current.active {
+            bail!(crate::invocation::ToolFailure {
+                code: crate::invocation::ToolErrorCode::ConnectionChanged,
+                details: Value::Null
+            });
         }
         let request =
             serde_json::from_value::<ClientRequest>(request).context("MCP 请求参数格式不正确")?;
         let limit = definition.timeout.unwrap_or(120).clamp(5, 600);
         let mut shutdown = engine.shutdown.subscribe();
         let outcome = tokio::select! {
+            biased;
             _ = shutdown.wait_for(|stopping| *stopping) => {
                 bail!("后台正在退出，调用已中断；执行结果需核对，不要自动重试");
+            },
+            _ = generation.cancelled() => {
+                bail!("连接已更新，调用已中断；执行结果需核对，不要自动重试");
             },
             outcome = tokio::time::timeout(Duration::from_secs(limit), peer.send_request(request)) => outcome,
         };
@@ -514,9 +586,7 @@ impl McpPool {
             Ok(Err(error)) => {
                 let diagnostic = connection_error(error);
                 if invoking {
-                    Err(anyhow::anyhow!(
-                        "工具调用中断，执行结果需核对；不要自动重试。{diagnostic}"
-                    ))
+                    Err(diagnostic.context("工具调用中断，执行结果需核对；不要自动重试"))
                 } else {
                     Err(diagnostic)
                 }
@@ -547,27 +617,51 @@ pub fn tool_allowed(definition: &crate::model::Definition, name: &str) -> bool {
 
 fn requires_authentication(error: &(dyn std::error::Error + 'static)) -> bool {
     if let Some(initialization) = error.downcast_ref::<ClientInitializeError>() {
-        if initialization.is_authorization_required() {
-            return true;
-        }
-        if let ClientInitializeError::LegacyFallbackFailed { discover, fallback } = initialization {
-            return requires_authentication(discover.as_ref())
-                || requires_authentication(fallback.as_ref());
-        }
+        return match initialization {
+            ClientInitializeError::TransportError { error, .. } => {
+                requires_authentication(error.error.as_ref())
+            }
+            ClientInitializeError::LegacyFallbackFailed { discover, fallback } => {
+                requires_authentication(fallback.as_ref())
+                    || requires_authentication(discover.as_ref())
+            }
+            ClientInitializeError::JsonRpcError(error) => error.code.0 == 400006,
+            _ => false,
+        };
     }
-    let detail = error.to_string().to_ascii_lowercase();
-    // SDK wrappers can omit the HTTP status or both startup failures in Display.
-    [
-        "401",
-        "unauthorized",
-        "auth required",
-        "authorization required",
-        "invalid_token",
-        "400006",
-    ]
-    .iter()
-    .any(|message| detail.contains(message))
-        || error.source().is_some_and(requires_authentication)
+    if let Some(rmcp::ServiceError::TransportSend(error)) =
+        error.downcast_ref::<rmcp::ServiceError>()
+    {
+        return requires_authentication(error.error.as_ref());
+    }
+    if let Some(error) = error.downcast_ref::<AuthError>() {
+        return matches!(
+            error,
+            AuthError::AuthorizationRequired
+                | AuthError::TokenExpired
+                | AuthError::TokenRefreshRejected(_)
+                | AuthError::InsufficientScope { .. }
+        );
+    }
+    if let Some(error) = error.downcast_ref::<StreamableHttpError<reqwest::Error>>() {
+        return match error {
+            StreamableHttpError::AuthRequired(_) | StreamableHttpError::InsufficientScope(_) => {
+                true
+            }
+            StreamableHttpError::Auth(error) => requires_authentication(error),
+            StreamableHttpError::HttpStatus(error) => error.status == 401,
+            StreamableHttpError::Client(error) => {
+                error.status() == Some(reqwest::StatusCode::UNAUTHORIZED)
+            }
+            // rmcp 3.9 wraps a challenge-less 401 in this variant with a
+            // status prefix generated by its reqwest transport.
+            StreamableHttpError::UnexpectedServerResponse(message) => {
+                message.starts_with("HTTP 401 Unauthorized:")
+            }
+            _ => false,
+        };
+    }
+    error.source().is_some_and(requires_authentication)
 }
 
 fn connection_error(error: impl std::error::Error + 'static) -> anyhow::Error {
@@ -669,171 +763,4 @@ pub async fn configure_oauth(engine: Arc<Engine>, params: &Value) -> Result<Valu
     Ok(
         json!({"status":if changed {"configured"}else{"unchanged"},"connection":connection.public_value(),"definition":connection.editable_definition(&definition)}),
     )
-}
-
-pub async fn start_oauth(engine: Arc<Engine>, id: &str) -> Result<Value> {
-    let _mutation = engine.mutation.lock().await;
-    let mut connection = engine.store.connection(id)?;
-    let mut definition = engine.definition(&connection)?;
-    if definition.http_api.is_some() {
-        bail!("HTTP API Adapter 使用托管请求头认证，不支持 MCP OAuth 登录");
-    }
-    let endpoint = http_endpoint(
-        definition
-            .url
-            .as_deref()
-            .context("OAuth 需要 HTTP MCP 服务")?,
-        definition.origin_project.as_deref(),
-    )?;
-    config::validate(&definition)?;
-    let listener = TcpListener::bind((
-        std::net::Ipv4Addr::LOCALHOST,
-        definition.oauth_callback_port.unwrap_or(0),
-    ))
-    .await
-    .context("无法建立本地授权回调")?;
-    let address = listener.local_addr()?;
-    let redirect = format!("http://127.0.0.1:{}/callback", address.port());
-    let (mut state, auth_url) = tokio::time::timeout(Duration::from_secs(45), async {
-        let mut manager = AuthorizationManager::new(endpoint)
-            .await
-            .context("无法发现上游 OAuth 元数据")?;
-        let metadata = manager
-            .resolve_metadata()
-            .await
-            .context("无法发现上游 OAuth 元数据")?
-            .metadata;
-        if definition.client_id.is_none() && metadata.registration_endpoint.is_none() {
-            bail!("上游不支持动态客户端注册；请先配置你注册应用的 clientId 及其要求的客户端机密");
-        }
-        let github = url::Url::parse(&metadata.authorization_endpoint).is_ok_and(|url| {
-            url.host_str() == Some("github.com") && url.path() == "/login/oauth/authorize"
-        });
-        if github && definition.client_secret.is_none() {
-            bail!("GitHub 授权码流程需要自有注册应用的客户端机密，请先配置 OAuth 客户端");
-        }
-        manager.set_metadata(metadata);
-        // Prepare with the SDK's in-memory store. Discovery/registration failures
-        // must not delete an existing Token or grant before a URL can be returned.
-        let mut state = OAuthState::Unauthorized(manager);
-        let mut request = AuthorizationRequest::new(&redirect)
-            .with_client_name("mcplink")
-            .with_initial_scope_selection();
-        if let Some(client) = &definition.client_id {
-            request = request.with_preregistered_client(client.clone());
-        }
-        if let Some(secret) = &definition.client_secret {
-            request = request.with_client_secret(secret.clone());
-        }
-        if !definition.oauth_scopes.is_empty() {
-            request = request.with_scopes(definition.oauth_scopes.clone());
-        }
-        state
-            .start_authorization(request)
-            .await
-            .context("无法准备 OAuth 授权，请核对注册应用、回调与客户端认证")?;
-        let url = state
-            .get_authorization_url()
-            .await
-            .context("无法创建浏览器授权地址")?;
-        Ok::<_, anyhow::Error>((state, url))
-    })
-    .await
-    .context("OAuth 授权准备超时，原有认证保持不变")??;
-    if !matches!(state, OAuthState::Session(_)) {
-        bail!("OAuth 授权会话未就绪");
-    }
-    definition.oauth = true;
-    definition
-        .headers
-        .retain(|key, _| !key.eq_ignore_ascii_case("authorization"));
-    crate::lifecycle::replace_definition(
-        &engine,
-        &mut connection,
-        &definition,
-        None,
-        crate::lifecycle::Transition::Authorize,
-    )
-    .await?;
-    if let OAuthState::Session(session) = &mut state {
-        session
-            .auth_manager
-            .set_credential_store(VaultCredentials::new(engine.clone(), &connection));
-    }
-    let state = Arc::new(AsyncMutex::new(state));
-    let (finished, mut completed) = tokio::sync::mpsc::channel::<()>(1);
-    let callback_engine = engine.clone();
-    let callback_id = id.to_owned();
-    let revision = connection.revision;
-    let expiry_engine = engine.clone();
-    let expiry_id = id.to_owned();
-    let expected_host = format!("127.0.0.1:{}", address.port());
-    let router = axum::Router::new().route(
-        "/callback",
-        axum::routing::get(
-            move |headers: axum::http::HeaderMap, uri: axum::http::Uri| {
-                let state = state.clone();
-                let engine = callback_engine.clone();
-                let id = callback_id.clone();
-                let done = finished.clone();
-                let host = expected_host.clone();
-                async move {
-                    if headers.get("host").and_then(|v| v.to_str().ok()) != Some(host.as_str()) {
-                        return (
-                            axum::http::StatusCode::BAD_REQUEST,
-                            axum::response::Html("授权回调来源无效"),
-                        );
-                    }
-                    let _mutation = engine.mutation.lock().await;
-                    let edit = crate::lifecycle::CredentialEdit::begin(&engine, &id).await;
-                    if !engine
-                        .store
-                        .connection(&id)
-                        .is_ok_and(|c| c.active && c.revision == revision)
-                    {
-                        let _ = edit.finish(Ok(())).await;
-                        return (
-                            axum::http::StatusCode::BAD_REQUEST,
-                            axum::response::Html("授权会话已失效，请重新登录"),
-                        );
-                    }
-                    let callback = format!("http://{host}{uri}");
-                    let exchange = state.lock().await.handle_callback_url(&callback).await;
-                    if exchange.is_err() {
-                        let _ = edit.finish(Ok(())).await;
-                        return (
-                            axum::http::StatusCode::BAD_REQUEST,
-                            axum::response::Html("授权校验未通过，请返回 mcplink 重新登录"),
-                        );
-                    }
-                    let result = crate::lifecycle::complete_oauth(&engine, &id, revision);
-                    if edit.finish(result).await.is_err() {
-                        return (
-                            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                            axum::response::Html(
-                                "授权凭据已接收，但连接状态保存失败；请返回 mcplink 检查连接。",
-                            ),
-                        );
-                    }
-                    let _ = done.send(()).await;
-                    (
-                        axum::http::StatusCode::OK,
-                        axum::response::Html("授权已完成，可以返回 mcplink 检查连接。"),
-                    )
-                }
-            },
-        ),
-    );
-    tokio::spawn(async move {
-        let shutdown = async move {
-            tokio::select! {_=tokio::time::sleep(Duration::from_secs(300))=>{
-                let _mutation=expiry_engine.mutation.lock().await;
-                if let Ok(mut current)=expiry_engine.store.connection(&expiry_id)&& current.revision==revision&&current.status=="authorizing"{current.status="needs_auth".into();current.last_error=Some("浏览器授权已过期，请重新登录".into());let _=expiry_engine.store.save_connection(&current);}
-            },_=completed.recv()=>{}}
-        };
-        let _ = axum::serve(listener, router)
-            .with_graceful_shutdown(shutdown)
-            .await;
-    });
-    Ok(json!({"url":auth_url,"expiresAt":crate::model::now()+300}))
 }
