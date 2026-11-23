@@ -379,11 +379,19 @@ pub(crate) async fn start(engine: Arc<Engine>, id: &str) -> Result<Value> {
         complete: CancellationToken::new(),
     });
     tokio::spawn(async move {
+        // Shutdown waits for the port guard, including any final status write.
+        let _lease = lease;
+        let _port = port;
         serve(listener, &state).await;
-        // Release the fixed port before attempting to update abandoned status.
-        drop(port);
-        drop(lease);
-        let _mutation = state.engine.mutation.lock().await;
+        let mut shutdown = state.engine.shutdown.subscribe();
+        let _mutation = tokio::select! {
+            biased;
+            _ = shutdown.wait_for(|stopping| *stopping) => return,
+            guard = state.engine.mutation.lock() => guard,
+        };
+        if *shutdown.borrow() {
+            return;
+        }
         if let Ok(mut current) = state.engine.store.connection(&state.id)
             && current.revision == state.revision
             && current.status == "authorizing"

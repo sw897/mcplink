@@ -4,6 +4,7 @@ Uses loopback releases, ephemeral signing identities and a marked synthetic home
 It does not install a desktop app or contact an upstream MCP service.
 """
 import argparse
+from contextlib import contextmanager
 import copy
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -23,6 +24,33 @@ SIGNER = ROOT / "node_modules/@tauri-apps/cli/tauri.js"
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
+
+
+@contextmanager
+def windows_directory_writer(path):
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    ]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    file_add_file = 0x2
+    share_read_write = 0x3
+    open_existing = 3
+    backup_semantics = 0x02000000
+    handle = kernel.CreateFileW(str(path), file_add_file, share_read_write, None,
+                                open_existing, backup_semantics, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        yield
+    finally:
+        kernel.CloseHandle(handle)
 
 
 def signing_identity(home, name="fixture"):
@@ -222,7 +250,12 @@ def run(record, live=False):
         sync = {"action": "sync", "version": "0.4.0", "sidecar": str(sidecar)}
         target.write_bytes(old)
         pending()
-        assert call("first-start CLI synchronization", sync)["synced"] and target.read_bytes() == new
+        if os.name == "nt":
+            with windows_directory_writer(target.parent):
+                synced = call("Windows CLI synchronization with a concurrent directory writer", sync)
+        else:
+            synced = call("first-start CLI synchronization", sync)
+        assert synced["synced"] and target.read_bytes() == new
         assert call("idempotent CLI synchronization", sync)["synced"]
         target.write_bytes(b"user edited")
         call("edited CLI retained", sync, error="已被修改")

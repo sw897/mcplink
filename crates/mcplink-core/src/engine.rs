@@ -483,20 +483,18 @@ impl Engine {
         );
         let old = self.definition(&connection)?;
         let mut next = Self::requested_definition(p)?;
-        anyhow::ensure!(
-            old.url.is_none() && next.http_api.is_some(),
-            "此确认仅用于本地进程迁移到 HTTP API"
-        );
+        let mappings = p
+            .get("credentialMappings")
+            .filter(|mappings| !mappings.is_null())
+            .context("缺少需要迁移的字段")?;
+        if old.url.is_some() || next.http_api.is_none() {
+            return Ok(json!({"requiresConfirmation":false}));
+        }
         next.origin_project.clone_from(&old.origin_project);
         let origin = next.http_origin()?;
-        let fields = crate::credential_transfer::apply(
-            p.get("credentialMappings").context("缺少需要迁移的字段")?,
-            &old,
-            &mut next,
-            Some(&origin),
-        )?;
+        let fields = crate::credential_transfer::apply(mappings, &old, &mut next, Some(&origin))?;
         config::validate(&next)?;
-        Ok(json!({"origin":origin,"fields":fields}))
+        Ok(json!({"requiresConfirmation":true,"origin":origin,"fields":fields}))
     }
 
     async fn save(&self, p: &Value, confirmed_transfer_origin: Option<&str>) -> Result<Value> {
@@ -555,7 +553,9 @@ impl Engine {
                 .map(|old| self.definition(old))
                 .transpose()?,
         };
-        let mappings = p.get("credentialMappings");
+        let mappings = p
+            .get("credentialMappings")
+            .filter(|mappings| !mappings.is_null());
         if mappings.is_some() && (existing.is_none() || draft.is_some()) {
             bail!("凭据字段迁移仅用于带编辑版本的已有托管连接");
         }

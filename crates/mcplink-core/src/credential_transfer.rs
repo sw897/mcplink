@@ -77,8 +77,7 @@ pub(crate) fn apply(
                 "凭据字段名称无效"
             );
             if slot.field == Field::Headers {
-                reqwest::header::HeaderName::from_bytes(slot.name.as_bytes())
-                    .map_err(|_| anyhow::anyhow!("凭据请求头名称无效"))?;
+                crate::http_api::checked_header_name(&slot.name)?;
             }
         }
         let identity = if mapping.to.field == Field::Headers {

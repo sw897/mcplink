@@ -26,8 +26,8 @@ use std::{
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-    MoveFileExW,
+    FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
 };
 
 pub(crate) struct Directory {
@@ -121,10 +121,10 @@ impl Directory {
                 .rev()
                 .filter(|directory| directory.is_absolute())
             {
-                // Keep the ancestry pinned against deletion while allowing writes to its entries.
+                // Directory-list access makes the handle participate in delete sharing checks.
                 let open = || {
                     OpenOptions::new()
-                        .read(true)
+                        .access_mode(FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY)
                         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
                         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
                         .open(directory)

@@ -14,9 +14,9 @@ use windows_sys::Win32::{
     Foundation::GENERIC_WRITE,
     Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_WRITE_THROUGH, FILE_READ_ATTRIBUTES,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle,
-        MOVEFILE_WRITE_THROUGH, MoveFileExW, ReplaceFileW, WRITE_DAC,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_WRITE_THROUGH, FILE_LIST_DIRECTORY,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        GetFileInformationByHandle, MOVEFILE_WRITE_THROUGH, MoveFileExW, ReplaceFileW, WRITE_DAC,
     },
 };
 
@@ -54,10 +54,10 @@ impl Directory {
             .rev()
             .filter(|path| path.is_absolute())
         {
-            // Keep every directory open without FILE_SHARE_DELETE until the transaction ends.
+            // Directory-list access makes the handle participate in delete sharing checks.
             let open = || {
                 OpenOptions::new()
-                    .access_mode(FILE_READ_ATTRIBUTES)
+                    .access_mode(FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY)
                     .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
                     .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
                     .open(directory)

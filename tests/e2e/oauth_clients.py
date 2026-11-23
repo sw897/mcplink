@@ -91,7 +91,15 @@ class OAuthClients(ToolCalls):
 
         self.cli("credentials", "login", connection)
         assert self.cli("gateway", "stop")["stopped"]
-        assert self.cli("connections", "show", connection)["connection"]["status"] == "needs_auth"
+        # The next daemon owns recovery of the incomplete authorization.
+        db = sqlite3.connect(self.data / "mcplink.sqlite3")
+        try:
+            row = db.execute("SELECT document FROM connections WHERE id=?", (connection,)).fetchone()
+            assert json.loads(row[0])["status"] == "authorizing"
+        finally:
+            db.close()
+        recovered = self.cli("connections", "show", connection)["connection"]
+        assert recovered["status"] == "needs_auth" and "上次浏览器授权" in recovered["lastError"]
         authorization = self.cli("credentials", "login", connection)
         assert browser_status(authorization["url"]) == 200
         assert not self.invoke(connection, "read_document", {"id":"weekly-fixture"})["output"]["isError"]

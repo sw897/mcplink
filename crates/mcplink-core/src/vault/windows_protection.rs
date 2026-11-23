@@ -26,7 +26,8 @@ use windows_sys::Win32::{
     Storage::FileSystem::{
         CREATE_NEW, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_REPARSE_POINT,
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_WRITE_THROUGH,
-        FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL, WRITE_DAC,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL,
+        WRITE_DAC,
     },
     System::Threading::{GetCurrentProcess, OpenProcessToken},
 };
@@ -202,10 +203,15 @@ pub(super) fn restrict_file(path: &Path) -> io::Result<()> {
 }
 
 fn restrict_existing(path: &Path, directory: bool, sd: &LocalAllocation) -> io::Result<()> {
+    let mut share_mode = FILE_SHARE_READ | FILE_SHARE_WRITE;
+    if !directory {
+        // The ACL update targets the verified file handle.
+        share_mode |= FILE_SHARE_DELETE;
+    }
     let mut options = OpenOptions::new();
     options
         .access_mode(WRITE_DAC | READ_CONTROL | FILE_READ_ATTRIBUTES)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .share_mode(share_mode)
         .custom_flags(
             FILE_FLAG_OPEN_REPARSE_POINT
                 | if directory {

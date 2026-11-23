@@ -2,6 +2,7 @@
 import argparse
 import base64
 import hashlib
+from http.client import HTTPConnection
 import json
 import os
 from pathlib import Path
@@ -67,6 +68,19 @@ class Acceptance(AgentCli):
         self.passed("desktop Session starts the supplied CLI, while an absent stop remains offline")
 
         runtime = json.loads((self.data / "runtime.json").read_text())
+        health = HTTPConnection("127.0.0.1", runtime["port"], timeout=5)
+        try:
+            health.request("GET", "/health")
+            response = health.getresponse()
+            assert response.status == 200 and json.load(response)["instance"] == runtime["instance"]
+            for site in ("same-site", "same-origin", "cross-site", "none"):
+                health.request("GET", "/health", headers={"Sec-Fetch-Site": site})
+                response = health.getresponse()
+                assert response.status == 403
+                response.read()
+        finally:
+            health.close()
+        self.passed("local health accepts native requests and rejects requests carrying Fetch Metadata")
         connection = self.cli("connections", "save", "--stdin", value={"name": "session_notes", "definition": {
             "command": sys.executable, "args": [str(ROOT / "tests/fixtures/mcp_server.py"), "--stdio"]}})["id"]
         bridge = self.bridge(connection, "session-cache-entry")

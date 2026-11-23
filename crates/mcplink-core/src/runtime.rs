@@ -65,9 +65,7 @@ fn valid_host(headers: &HeaderMap, port: u16) -> bool {
     let expected = format!("127.0.0.1:{port}");
     headers.get("host").and_then(|v| v.to_str().ok()) == Some(expected.as_str())
         && !headers.contains_key("origin")
-        && headers
-            .get("sec-fetch-site")
-            .is_none_or(|value| value != "cross-site")
+        && !headers.contains_key("sec-fetch-site")
 }
 
 fn lock_contended(error: &std::io::Error) -> bool {
@@ -273,9 +271,10 @@ pub async fn daemon(data: PathBuf, port: Option<u16>) -> Result<()> {
         .route("/auth", post(authenticate))
         .route("/rpc", post(rpc))
         .with_state(state);
-    let maintenance = tokio::spawn(maintain_change_storage(engine.clone()));
-    let outcome = serve_management(listener, router, &engine).await;
-    maintenance.abort();
+    let (outcome, ()) = tokio::join!(
+        serve_management(listener, router, &engine),
+        maintain_change_storage(engine.clone()),
+    );
     if fs::read(data.join("runtime.json"))
         .ok()
         .and_then(|value| serde_json::from_slice::<RuntimeInfo>(&value).ok())
@@ -288,8 +287,13 @@ pub async fn daemon(data: PathBuf, port: Option<u16>) -> Result<()> {
 }
 
 async fn maintain_change_storage(engine: Arc<Engine>) {
+    let mut shutdown = engine.shutdown.subscribe();
     loop {
-        tokio::time::sleep(Duration::from_secs(60)).await;
+        tokio::select! {
+            biased;
+            _ = shutdown.wait_for(|stopping| *stopping) => break,
+            _ = tokio::time::sleep(Duration::from_secs(60)) => {}
+        }
         let engine = engine.clone();
         if tokio::task::spawn_blocking(move || {
             let _guard = engine.mutation.blocking_lock();

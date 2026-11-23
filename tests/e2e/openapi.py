@@ -152,7 +152,7 @@ class OpenApi(HttpApi):
         assert not result["isError"] and "fixture-http-api" not in json.dumps(result)
         self.passed("configured scalar success conditions reject missing/mismatched fields; credential and sensitive-path filters protect CLI, MCP and persisted error status")
 
-        original = self.cli("connections", "save", "--stdin", value={"name": "transport_migration", "definition": {
+        original = self.cli("connections", "save", "--stdin", value={"name": "transport_migration", "credentialMappings": None, "definition": {
             "command": sys.executable, "args": [str(FIXTURE), "--stdio"], "env": {"FIXTURE_KEY": "Bearer fixture-http-api"}}})["id"]
         old = self.cli("connections", "show", original)
         mappings = [{"from": {"field": "env", "name": "FIXTURE_KEY"}, "to": {"field": "headers", "name": "Authorization"}}]
@@ -162,7 +162,12 @@ class OpenApi(HttpApi):
         rejected = self.cli("connections", "save", "--stdin", value=payload, exit_status=1)
         assert "在桌面确认" in rejected["error"]["message"]
         preview = self.rpc("connections.transfer_preview", payload)
-        assert preview == {"origin": self.endpoint, "fields": [["FIXTURE_KEY", "Authorization"]]}
+        assert preview == {"requiresConfirmation": True, "origin": self.endpoint, "fields": [["FIXTURE_KEY", "Authorization"]]}
+        assert self.cli("connections", "show", original) == before
+        for name in ("Host", "content-length", "Transfer-Encoding", "Proxy-Authorization"):
+            forbidden = {"from": mappings[0]["from"], "to": {"field": "headers", "name": name}}
+            error = self.rpc("connections.transfer_preview", payload | {"credentialMappings": [forbidden]}, error=True)
+            assert "由运行时维护" in error
         assert self.cli("connections", "show", original) == before
         for bad in [mappings + mappings, [{"from": {"field": "env", "name": "MISSING"}, "to": {"field": "headers", "name": "Authorization"}}]]:
             self.cli("connections", "save", "--stdin", value={"id": original, "name": "transport_migration", "definition": migrated, "credentialMappings": bad}, exit_status=1)
@@ -203,15 +208,17 @@ class OpenApi(HttpApi):
             "url": templated_url, "headers": {"X-Old": "synthetic-map-value"}}})["id"]
         detail = self.cli("connections", "show", path_origin)
         same_origin = detail["definition"] | {"httpApi": {"tools": tools}, "headers": {}}
-        mapped = self.cli("connections", "save", "--stdin", value={"id": path_origin,
+        rename = {"id": path_origin,
             "name": "same_origin_move", "definition": same_origin,
-            "credentialMappings": [{"from": {"field":"headers", "name":"X-Old"}, "to": {"field":"headers", "name":"X-New"}}]})
+            "credentialMappings": [{"from": {"field":"headers", "name":"X-Old"}, "to": {"field":"headers", "name":"X-New"}}]}
+        assert self.rpc("connections.transfer_preview", rename) == {"requiresConfirmation": False}
+        mapped = self.cli("connections", "save", "--stdin", value=rename)
         assert mapped["id"] == path_origin and mapped["active"]
         assert self.cli("connections", "show", path_origin)["definition"]["headers"] == {"X-New":"••••••••"}
         detail = self.cli("connections", "show", path_origin)
         next_definition = detail["definition"] | {"url": self.endpoint + "/mcp"}
         unchanged = self.cli("connections", "save", "--stdin", value={"id": path_origin,
-            "name": "same_origin_move", "definition": next_definition})
+            "name": "same_origin_move", "definition": next_definition, "credentialMappings": None})
         assert unchanged["active"] and self.cli("connections", "show", path_origin)["definition"]["headers"] == {"X-New":"••••••••"}
         self.passed("masked and templated URLs resolve to the effective origin before protected header reuse")
 

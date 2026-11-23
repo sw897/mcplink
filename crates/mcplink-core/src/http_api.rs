@@ -350,7 +350,7 @@ fn json_content_type(value: &str) -> bool {
                 .all(|b| b.is_ascii_alphanumeric() || b"/-+._".contains(&b)))
 }
 
-fn checked_header_name(key: &str) -> Result<reqwest::header::HeaderName> {
+pub(crate) fn checked_header_name(key: &str) -> Result<reqwest::header::HeaderName> {
     let key =
         reqwest::header::HeaderName::from_bytes(key.as_bytes()).context("HTTP 请求头名称无效")?;
     ensure!(

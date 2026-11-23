@@ -52,7 +52,7 @@ async fn rpc(
     retry_auth: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     mcplink_desktop::desktop_rpc::validate(&method, &params)?;
-    let transfer = method == "connections.save" && params.get("credentialMappings").is_some();
+    let transfer = method == "connections.save" && !params["credentialMappings"].is_null();
     rpc_internal(app, method, params, retry_auth, transfer).await
 }
 
@@ -70,7 +70,7 @@ async fn rpc_internal(
         session.retry_authentication().await;
     }
     let approved_origin = if transfer {
-        Some(confirm_transfer(&app, &session, &params).await?)
+        confirm_transfer(&app, &session, &params).await?
     } else {
         None
     };
@@ -105,13 +105,16 @@ async fn confirm_transfer(
     app: &tauri::AppHandle,
     session: &Session,
     params: &serde_json::Value,
-) -> Result<String, String> {
+) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
     let preview = session
         .call("connections.transfer_preview", params.clone())
         .await
         .map_err(|error| error.to_string())?;
+    if preview["requiresConfirmation"].as_bool() == Some(false) {
+        return Ok(None);
+    }
     let origin = preview["origin"].as_str().ok_or("凭据迁移缺少目标地址")?;
     let fields: Vec<(String, String)> =
         serde_json::from_value(preview["fields"].clone()).map_err(|_| "凭据迁移缺少字段清单")?;
@@ -129,7 +132,7 @@ async fn confirm_transfer(
     if confirmed.await != Ok(true) {
         return Err("已取消凭据迁移".into());
     }
-    Ok(origin.to_owned())
+    Ok(Some(origin.to_owned()))
 }
 
 #[tauri::command]
