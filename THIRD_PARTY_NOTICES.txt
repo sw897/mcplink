@@ -1,4 +1,4 @@
-Third-party notices for mcplink 0.3.2
+Third-party notices for mcplink 0.3.3
 Generated from installed locked dependencies.
 
 ========================================================================

@@ -1,29 +1,24 @@
-# mcplink 0.3.2 · Preview / 预览版
+# mcplink 0.3.3 · Preview / 预览版
 
-mcplink 将多个 MCP Server 与普通 HTTP API 接到每个 Agent 的一个入口，并把工具转成终端、脚本和自动化命令。本补丁完善契约诊断、批量工具选择及 HTTP API 探测确认，包含自 0.3.0 后的客户端与跨平台验收修复。
+mcplink 将多个 MCP Server 与普通 HTTP API 接到每个 Agent 的一个入口，并把工具转成终端、脚本和自动化命令。本版本加入应用内更新，并完善凭据保护和配置恢复。
 
-mcplink connects MCP servers and ordinary HTTP APIs through one entry per agent and turns tools into terminal, script, and automation commands. This patch improves contract diagnostics, bulk tool selection, and HTTP API probe confirmation, and includes client and cross-platform acceptance fixes since 0.3.0.
+mcplink connects MCP servers and ordinary HTTP APIs through one entry per agent and turns tools into terminal, script, and automation commands. This version adds in-app updates and improves credential protection and configuration recovery.
 
 ## 改进 / Improvements
 
-- **CLI 契约诊断**：区分工具变化、移除或范围排除，以及认证、通信或发现故障导致的未能核验。聚合入口按成员归因，健康工具继续核验。展示参数增删、类型/必填性及 stdin 模式变化；完整旧 Schema 不写入清单。<br>**CLI contract diagnostics:** distinguish changed, removed or filtered tools from contracts left unchecked by authentication, transport, or discovery failures. Attribute aggregate failures to members and keep healthy tools checkable. Summarize parameter and stdin-mode changes without storing full old schemas.
-- **搜索结果批量选择**：统一入口工具范围和工具 CLI 可批量选择或取消当前搜索结果，保留隐藏选择；清空全部为独立操作。<br>**Bulk search selection:** select or deselect matching tools in entry ranges and Tool CLI while preserving hidden selections; clearing the entire selection is a separate action.
-- **HTTP API 探测确认**：查看工具只读本地定义，真实探测单独确认工具及 HTTP 操作。连接修订变化时拒绝旧确认，每次确认只派发一次。<br>**HTTP API probe confirmation:** inspect local definitions without a request, then confirm the tool and HTTP operation before probing. Reject stale revisions and dispatch each confirmation once.
-- **质量与许可**：更新第三方声明版本，CI 与发布预检比对应用版本及锁定依赖。扩充契约、搜索操作、关键客户端原生加载及 Windows 安装窗口验收。<br>**Quality and notices:** align third-party notices with the release and check locked dependency coverage in CI and release preflight. Extend contract, search, native-client, and installed Windows window acceptance.
-- **CI 稳定性**：服务失败状态按详情中的持久错误验收，避免依赖会消失的通知；tag 复用同一提交已完成的双平台验收记录，避免重复占用 runner。<br>**CI stability:** verify persistent service errors after dismissing transient notifications. Tags reuse completed cross-platform acceptance for the exact source commit, avoiding duplicate runner use.
+- **软件更新**支持检查 GitHub 上的版本、核验与版本绑定的签名并确认安装。首个支持此功能的版本需要手动安装。<br>**Software updates** check GitHub for new versions and verify version-bound signatures before asking for installation confirmation. Install this first updater-enabled version manually.
+- **凭据保护**包括 Windows 长凭据的分片存储、macOS 固定钥匙串助手，以及按来源核对的凭据迁移。本地管理连接使用加密会话。<br>**Credential protection** includes chunked storage for large Windows credentials, a fixed macOS Keychain helper, and origin checks during migration. The local management interface uses encrypted sessions.
+- **HTTP API 接入**支持导入 OpenAPI 和 Swagger，配置响应成功条件，并过滤工具输出中的托管凭据。<br>**HTTP API integration** imports OpenAPI and Swagger definitions, supports configurable success conditions, and filters managed credentials from tool results.
+- **配置和后台恢复**补强配置写入与恢复、OAuth 回调取消和后台退出。Windows 验收覆盖 NTFS ACL、凭据迁移、NSIS 覆盖安装和目录已有写句柄时的 CLI 同步。<br>**Configuration and backend recovery** improve configuration writes and recovery, OAuth callback cancellation, and graceful shutdown. Windows acceptance covers NTFS ACLs, credential migration, NSIS upgrades, and CLI synchronization while a directory is open for writing.
 
 ## 升级与下载 / Upgrade and downloads
 
-桌面、独立 CLI 和后台应一起升级并重启后台。0.3.2 沿用 **数据语义版本 5**，management API 升为 **22**；新契约诊断会拒绝旧后台。保留原有连接和托管凭据，生成的旧 CLI 清单仍可检查；契约确有变化时，核对后生成到新目录。
+0.3.3 沿用 **数据语义版本 5**，使用 **management API 24**。先退出旧后台，再一起升级桌面、独立 CLI 和 Bridge。保留已有连接、托管凭据及生成的 CLI 清单。工具契约变化时，核对后再生成到新目录。
 
-Upgrade the desktop, standalone CLI, and backend together, then restart the backend. Version 0.3.2 retains **data semantics 5** and raises management API to **22**; new diagnostics reject older backends. Existing connections, managed credentials, and generated manifests are retained. Review changed contracts and regenerate into a new directory.
+Version 0.3.3 retains **data semantics 5** and uses **management API 24**. Stop the old backend before upgrading the desktop, standalone CLI, and Bridge together. Existing connections, managed credentials, and generated CLI manifests are retained. Review changed tool contracts before regenerating into a new directory.
 
-支持 macOS Apple Silicon 和 Windows x64。macOS 预览包为 **ad-hoc 签名、未公证**，Windows 包 **未签名**。本版本不宣称正式发布者签名或系统信任；实际状态及源码提交见平台构建清单，下载后按平台 SHA256SUMS 核对。
+预览构建支持 macOS Apple Silicon 和 Windows x64。macOS 预览包使用临时签名，未经公证。Windows 预览包未签名。平台清单记录源码提交和签名状态。下载后按平台 SHA-256 校验值核对。
 
-Downloads support macOS Apple Silicon and Windows x64. The macOS preview is **ad-hoc signed and not notarized**; Windows packages are **unsigned**. No production publisher signature or system trust is claimed. Platform manifests record the source revision and signing flags; verify downloads against the platform SHA256SUMS.
+Preview builds support macOS Apple Silicon and Windows x64. The macOS preview is ad-hoc signed and has not been notarized. Windows preview packages are unsigned. Platform manifests record the source revision and signing status. Verify downloads against the platform SHA-256 checksums.
 
-公开附件仅包含安装包、独立 CLI、校验值和公开构建来源信息。客户端配置、凭据、截图、业务账号材料及原始验收报告不随包发布。
-
-Public assets contain only installers, standalone CLIs, checksums, and public build provenance. Native configurations, credentials, screenshots, business-account records, and raw acceptance reports are excluded.
-
-使用说明 / Guides: [README](https://github.com/sw897/mcplink/blob/v0.3.2/README.md) · [CLI](https://github.com/sw897/mcplink/blob/v0.3.2/docs/agent-cli.md) · [HTTP API](https://github.com/sw897/mcplink/blob/v0.3.2/docs/http-api.md) · [兼容矩阵 / Compatibility](https://github.com/sw897/mcplink/blob/v0.3.2/docs/agent-discovery.md) · [发布流程 / Release process](https://github.com/sw897/mcplink/blob/v0.3.2/docs/release.md)
+[README](https://github.com/sw897/mcplink/blob/v0.3.3/README.md) · [CLI](https://github.com/sw897/mcplink/blob/v0.3.3/docs/agent-cli.md) · [HTTP API](https://github.com/sw897/mcplink/blob/v0.3.3/docs/http-api.md) · [兼容矩阵 / Compatibility](https://github.com/sw897/mcplink/blob/v0.3.3/docs/agent-discovery.md) · [发布流程 / Release process](https://github.com/sw897/mcplink/blob/v0.3.3/docs/release.md)
